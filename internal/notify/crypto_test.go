@@ -1,0 +1,102 @@
+package notify
+
+import (
+	"bytes"
+	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"testing"
+)
+
+func TestECDHEncryptionRoundTrip(t *testing.T) {
+	creator, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceGroup, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	creatorKey, err := deriveKey(creator, encode(deviceGroup.PublicKey().Bytes()), "session-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceGroupKey, err := deriveKey(deviceGroup, encode(creator.PublicKey().Bytes()), "session-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(creatorKey, deviceGroupKey) {
+		t.Fatal("ECDH peers derived different session keys")
+	}
+
+	want := decryptedResponse{ID: "response-id", RequestID: "request-id", OptionID: "option-id"}
+	nonce, ciphertext, err := encryptJSON(creatorKey, "authenticated-context", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got decryptedResponse
+	if err := decryptJSON(deviceGroupKey, "authenticated-context", nonce, ciphertext, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID || got.RequestID != want.RequestID || got.OptionID != want.OptionID {
+		t.Fatalf("decrypted response = %+v, want %+v", got, want)
+	}
+	if err := decryptJSON(deviceGroupKey, "different-context", nonce, ciphertext, &got); err == nil {
+		t.Fatal("decryptJSON accepted ciphertext under different additional data")
+	}
+}
+
+func TestPairingProofAuthentication(t *testing.T) {
+	authSecret, err := randomValue(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := decode(authSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, secret)
+	fmt.Fprint(mac, "v1\nsession\npairing\ngroup\npublic-key")
+	proof := encode(mac.Sum(nil))
+
+	if err := verifyPairingProof(authSecret, "session", "pairing", "group", "public-key", proof); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyPairingProof(authSecret, "session", "pairing", "other-group", "public-key", proof); err == nil {
+		t.Fatal("verifyPairingProof accepted a proof for another device group")
+	}
+}
+
+func TestDecodeJSONRejectsProtocolDrift(t *testing.T) {
+	tests := []string{
+		`{"id":"response","requestId":"request","optionId":"option","createdAt":"2026-08-27T00:00:00Z","unknown":true}`,
+		`{"id":"response","requestId":"request","optionId":"option","createdAt":"2026-08-27T00:00:00Z"} {}`,
+	}
+	for _, input := range tests {
+		var response decryptedResponse
+		if err := decodeJSON([]byte(input), &response); err == nil {
+			t.Fatalf("decodeJSON accepted invalid protocol input: %s", input)
+		}
+	}
+}
+
+func TestNewAPIRejectsUnsafeOrAmbiguousBaseURLs(t *testing.T) {
+	for _, rawURL := range []string{
+		"http://notify.guru",
+		"https://notify.guru/path",
+		"https://notify.guru?query=true",
+		"https://notify.guru/#fragment",
+	} {
+		if _, err := NewAPI(rawURL); err == nil {
+			t.Fatalf("NewAPI accepted %q", rawURL)
+		}
+	}
+	for _, rawURL := range []string{"https://notify.guru", "http://localhost:8787"} {
+		if _, err := NewAPI(rawURL); err != nil {
+			t.Fatalf("NewAPI rejected %q: %v", rawURL, err)
+		}
+	}
+}
