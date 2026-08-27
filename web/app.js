@@ -92,6 +92,7 @@ initialize().catch(showFatalError);
 async function initialize() {
   if ("serviceWorker" in navigator) await navigator.serviceWorker.register("/sw.js");
   identity = await identityOrCreate();
+  await migrateLocalSessions();
   await deleteExpiredLocalSessions();
   const scannedRequest = parseDeviceRequestFragment();
   if (scannedRequest !== null) {
@@ -379,15 +380,24 @@ async function syncSession(session) {
   await putSession(session);
 }
 
-async function respond(sessionId, optionId, button) {
-  button.disabled = true;
+async function respond(sessionId, optionId) {
+  await sendRequestResponse(sessionId, "response", optionId);
+}
+
+async function dismissRequest(sessionId) {
+  await sendRequestResponse(sessionId, "dismiss");
+}
+
+async function sendRequestResponse(sessionId, type, optionId) {
   const session = await getSession(sessionId);
   if (session === undefined || session.request === null) throw new Error("Request disappeared before response");
   const timestamp = session.requestKeyTimestamp;
   const key = session.keys[String(timestamp)];
   if (key === undefined) throw new Error("Response encryption key is unavailable");
   const responseId = randomId();
-  const response = { id: responseId, type: "response", requestId: session.request.requestId, optionId, createdAt: new Date().toISOString() };
+  const response = type === "response"
+    ? { id: responseId, type, requestId: session.request.requestId, optionId, createdAt: new Date().toISOString() }
+    : { id: responseId, type, requestId: session.request.requestId, createdAt: new Date().toISOString() };
   const encrypted = await encryptResponse(key, session.sessionId, session.groupId, timestamp, responseId, response);
   session.expiresAt = await postResponse(session, identity, {
     responseId,
@@ -397,7 +407,18 @@ async function respond(sessionId, optionId, button) {
     ...encrypted,
   });
   session.request = null;
-  session.status = "応答を送信しました";
+  session.requestKeyTimestamp = null;
+  session.status = type === "response" ? "応答を送信しました" : "リクエストを閉じました";
+  await putSession(session);
+  await render();
+}
+
+async function dismissNotification(sessionId, notificationId) {
+  const session = await getSession(sessionId);
+  if (session === undefined) throw new Error("Session disappeared before notification was dismissed");
+  const index = session.notifications.findIndex((notification) => notification.id === notificationId);
+  if (index === -1) throw new Error("Notification disappeared before it was dismissed");
+  session.notifications.splice(index, 1);
   await putSession(session);
   await render();
 }
@@ -432,7 +453,10 @@ function applyEvent(session, event, keyTimestamp) {
   if (event.type === "notify") {
     requireExactKeys(event, ["id", "type", "sessionTitle", "message", "color", "createdAt"]);
     session.title = stringValue(event.sessionTitle, "sessionTitle");
-    session.notification = stringValue(event.message, "message");
+    session.notifications.push({
+      id: stringValue(event.id, "id"),
+      message: stringValue(event.message, "message"),
+    });
     session.color = colorValue(event.color);
     return;
   }
@@ -559,16 +583,39 @@ async function render() {
     card.querySelector(".session-title").textContent = session.title;
     card.querySelector(".expiry").textContent = expiryText(session.expiresAt);
     card.querySelector(".status").textContent = session.status;
-    card.querySelector(".notification").textContent = session.notification;
+    const notifications = card.querySelector(".notifications");
+    for (const notification of session.notifications) {
+      const row = document.createElement("div");
+      row.className = "notification";
+      const message = document.createElement("p");
+      message.textContent = notification.message;
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "dismiss-item";
+      dismiss.textContent = "×";
+      dismiss.setAttribute("aria-label", "通知を消す");
+      dismiss.title = "通知を消す";
+      dismiss.addEventListener("click", () => dismissNotification(session.sessionId, notification.id).catch(showError));
+      row.append(message, dismiss);
+      notifications.append(row);
+    }
     if (session.request !== null) {
       const element = card.querySelector(".request");
       element.hidden = false;
       element.querySelector(".request-prompt").textContent = session.request.prompt;
+      const dismiss = element.querySelector(".request-dismiss");
+      dismiss.addEventListener("click", () => {
+        dismiss.disabled = true;
+        dismissRequest(session.sessionId).catch(showError).finally(() => { dismiss.disabled = false; });
+      });
       for (const option of session.request.options) {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = option.label;
-        button.addEventListener("click", () => respond(session.sessionId, option.id, button).catch(showError));
+        button.addEventListener("click", () => {
+          button.disabled = true;
+          respond(session.sessionId, option.id).catch(showError).finally(() => { button.disabled = false; });
+        });
         element.querySelector(".request-options").append(button);
       }
     }
@@ -602,9 +649,30 @@ async function render() {
 function newSession(sessionId, groupId, creatorPublicKey, expiresAt, color = null) {
   return {
     protocolVersion: 3, sessionId, groupId, creatorPublicKey, keys: {}, cursor: 0,
-    title: `Session ${sessionId.slice(0, 8)}`, status: "接続しました", notification: "",
+    title: `Session ${sessionId.slice(0, 8)}`, status: "接続しました", notifications: [],
     request: null, requestKeyTimestamp: null, color, updatedAt: Date.now(), expiresAt,
   };
+}
+
+async function migrateLocalSessions() {
+  for (const session of await listSessions()) {
+    if (Object.hasOwn(session, "notifications")) {
+      if (!Array.isArray(session.notifications)) throw new Error("Stored session notifications must be an array");
+      for (const notification of session.notifications) {
+        requireExactKeys(notification, ["id", "message"]);
+        stringValue(notification.id, "notification id");
+        stringValue(notification.message, "notification message");
+      }
+      continue;
+    }
+    if (typeof session.notification !== "string") throw new Error("Stored session notification is invalid");
+    session.notifications = session.notification === "" ? [] : [{
+      id: `legacy:${session.sessionId}`,
+      message: session.notification,
+    }];
+    delete session.notification;
+    await putSession(session);
+  }
 }
 
 function colorValue(value) {

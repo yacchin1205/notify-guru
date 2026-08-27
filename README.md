@@ -52,7 +52,7 @@ quit
 - `status` updates the card silently. `notify` shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in either OS alert.
 - `close-request` ends the identified request on connected devices.
 - Each local QR image remains available for 10 minutes or until `notifyg` exits. It is held only in process memory, and the response prevents browser caching.
-- `responses` retrieves every choice response and free-form message without selecting or aggregating them.
+- `responses` retrieves every choice response, request dismissal, and free-form message without selecting or aggregating them.
 - `close` immediately deletes the session and removes its card from connected browsers.
 - `quit` only exits the CLI. The session remains until its normal expiry, but its creator keys are lost with the process.
 
@@ -83,7 +83,7 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choice responses and free-form messages, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
 
 The image URL is reachable only from the same machine as the `notifyg` process. When MCP runs in a container, on a remote host, or across SSH without port forwarding, use the terminal QR code or pairing URL instead.
 

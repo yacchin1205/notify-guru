@@ -117,9 +117,9 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		}
 	}
 
-	responseIDs := make([]string, len(groups))
-	for index, group := range groups {
-		responseIDs[index] = postEncryptedResponse(t, ctx, api, created.SessionID, requested.RequestID, requested.Choices[index].ID, group, eventsExpiry)
+	responseIDs := []string{
+		postEncryptedRequestResult(t, ctx, api, created.SessionID, requested.RequestID, "response", requested.Choices[0].ID, groups[0], eventsExpiry),
+		postEncryptedRequestResult(t, ctx, api, created.SessionID, requested.RequestID, "dismiss", "", groups[1], eventsExpiry),
 	}
 
 	responses := callTool[responsesToolOutput](t, ctx, clientSession, "responses_wait", map[string]any{
@@ -128,10 +128,11 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if len(responses.Responses) != 2 {
 		t.Fatalf("response count = %d, want 2", len(responses.Responses))
 	}
-	for index, response := range responses.Responses {
-		if response.ID != responseIDs[index] || response.RequestID != requested.RequestID || response.OptionID != requested.Choices[index].ID || response.GroupID != groups[index].GroupID {
-			t.Fatalf("unexpected response %d: %+v", index, response)
-		}
+	if response := responses.Responses[0]; response.ID != responseIDs[0] || response.Type != "response" || response.RequestID != requested.RequestID || response.OptionID != requested.Choices[0].ID || response.GroupID != groups[0].GroupID {
+		t.Fatalf("unexpected choice response: %+v", response)
+	}
+	if response := responses.Responses[1]; response.ID != responseIDs[1] || response.Type != "dismiss" || response.RequestID != requested.RequestID || response.OptionID != "" || response.GroupID != groups[1].GroupID {
+		t.Fatalf("unexpected dismiss response: %+v", response)
 	}
 
 	closed := callTool[closeToolOutput](t, ctx, clientSession, "session_close", map[string]any{
@@ -167,12 +168,13 @@ func assertQRImage(t *testing.T, imageURL string) {
 	}
 }
 
-func postEncryptedResponse(
+func postEncryptedRequestResult(
 	t *testing.T,
 	ctx context.Context,
 	api *API,
 	sessionID string,
 	requestID string,
+	responseType string,
 	optionID string,
 	group joinedDeviceGroup,
 	expectedExpiry int64,
@@ -184,7 +186,7 @@ func postEncryptedResponse(
 	}
 	responseBody := decryptedResponse{
 		ID:        responseID,
-		Type:      "response",
+		Type:      responseType,
 		RequestID: requestID,
 		OptionID:  optionID,
 		CreatedAt: time.Now().UTC(),

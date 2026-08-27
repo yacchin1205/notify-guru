@@ -64,7 +64,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.closeRequest)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "responses_wait",
-		Description: "Wait for and return every newly received encrypted response. The agent decides how to interpret them.",
+		Description: "Wait for and return every newly received encrypted choice, dismissal, or message. The agent decides how to interpret them.",
 	}, s.waitResponses)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_close",

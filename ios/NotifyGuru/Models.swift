@@ -111,7 +111,12 @@ struct SessionRequest: Codable, Equatable {
     let options: [SessionChoice]
 }
 
-struct SessionRecord: Codable, Equatable, Identifiable {
+struct SessionNotification: Codable, Equatable, Identifiable {
+    let id: String
+    let message: String
+}
+
+struct SessionRecord: Equatable, Identifiable {
     var id: String { sessionID }
     let protocolVersion: Int
     let sessionID: String
@@ -121,12 +126,60 @@ struct SessionRecord: Codable, Equatable, Identifiable {
     var cursor: Int64
     var title: String
     var status: String
-    var notification: String
+    var notifications: [SessionNotification]
     var request: SessionRequest?
     var requestKeyTimestamp: Int64?
     var color: String?
     var updatedAt: Int64?
     var expiresAt: Int64
+}
+
+extension SessionRecord: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion, sessionID, groupID, creatorPublicKey, keys, cursor, title, status
+        case notification, notifications, request, requestKeyTimestamp, color, updatedAt, expiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try values.decode(Int.self, forKey: .protocolVersion)
+        sessionID = try values.decode(String.self, forKey: .sessionID)
+        groupID = try values.decode(String.self, forKey: .groupID)
+        creatorPublicKey = try values.decode(String.self, forKey: .creatorPublicKey)
+        keys = try values.decode([String: Data].self, forKey: .keys)
+        cursor = try values.decode(Int64.self, forKey: .cursor)
+        title = try values.decode(String.self, forKey: .title)
+        status = try values.decode(String.self, forKey: .status)
+        if values.contains(.notifications) {
+            notifications = try values.decode([SessionNotification].self, forKey: .notifications)
+        } else {
+            let previous = try values.decode(String.self, forKey: .notification)
+            notifications = previous.isEmpty ? [] : [SessionNotification(id: "legacy:\(sessionID)", message: previous)]
+        }
+        request = try values.decodeIfPresent(SessionRequest.self, forKey: .request)
+        requestKeyTimestamp = try values.decodeIfPresent(Int64.self, forKey: .requestKeyTimestamp)
+        color = try values.decodeIfPresent(String.self, forKey: .color)
+        updatedAt = try values.decodeIfPresent(Int64.self, forKey: .updatedAt)
+        expiresAt = try values.decode(Int64.self, forKey: .expiresAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(protocolVersion, forKey: .protocolVersion)
+        try values.encode(sessionID, forKey: .sessionID)
+        try values.encode(groupID, forKey: .groupID)
+        try values.encode(creatorPublicKey, forKey: .creatorPublicKey)
+        try values.encode(keys, forKey: .keys)
+        try values.encode(cursor, forKey: .cursor)
+        try values.encode(title, forKey: .title)
+        try values.encode(status, forKey: .status)
+        try values.encode(notifications, forKey: .notifications)
+        try values.encodeIfPresent(request, forKey: .request)
+        try values.encodeIfPresent(requestKeyTimestamp, forKey: .requestKeyTimestamp)
+        try values.encodeIfPresent(color, forKey: .color)
+        try values.encodeIfPresent(updatedAt, forKey: .updatedAt)
+        try values.encode(expiresAt, forKey: .expiresAt)
+    }
 }
 
 struct Vault: Codable, Equatable {
@@ -149,7 +202,7 @@ enum ConnectionState: Equatable {
 }
 
 enum SessionEvent {
-    case notification(title: String, message: String, color: String)
+    case notification(id: String, title: String, message: String, color: String)
     case status(title: String, value: String, color: String)
     case request(title: String, value: SessionRequest, color: String)
     case closeRequest(title: String, requestID: String, color: String)

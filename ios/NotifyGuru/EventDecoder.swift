@@ -11,6 +11,7 @@ enum EventDecoder {
             try requireKeys(fields, ["id", "type", "sessionTitle", "message", "color", "createdAt"])
             try validateCommon(fields)
             return .notification(
+                id: try text(fields, "id"),
                 title: try text(fields, "sessionTitle"),
                 message: try text(fields, "message"),
                 color: try color(fields)

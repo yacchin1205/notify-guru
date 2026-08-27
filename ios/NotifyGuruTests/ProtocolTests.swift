@@ -121,9 +121,10 @@ final class ProtocolTests: XCTestCase {
 
     func testEventDecoderAcceptsColorAndRequestClosure() throws {
         let notification = Data(##"{"id":"event","type":"notify","sessionTitle":"Build","message":"Done","color":"#D9F2D0","createdAt":"2026-08-27T00:00:00Z"}"##.utf8)
-        guard case .notification(let title, let message, let color) = try EventDecoder.decode(notification) else {
+        guard case .notification(let id, let title, let message, let color) = try EventDecoder.decode(notification) else {
             return XCTFail("notify event decoded as another type")
         }
+        XCTAssertEqual(id, "event")
         XCTAssertEqual(title, "Build")
         XCTAssertEqual(message, "Done")
         XCTAssertEqual(color, "#d9f2d0")
@@ -141,6 +142,38 @@ final class ProtocolTests: XCTestCase {
         let vault = Vault(version: 3, identity: try fixedIdentity(), sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)])
         XCTAssertEqual(try JSONDecoder().decode(Vault.self, from: JSONEncoder().encode(vault)), vault)
         XCTAssertEqual(AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000).sessions.map(\.sessionID), ["current"])
+    }
+
+    func testSessionRecordMigratesPreviousNotification() throws {
+        let previous = Data(#"{"protocolVersion":3,"sessionID":"legacy","groupID":"group","creatorPublicKey":"creator","keys":{},"cursor":0,"title":"Session","status":"Connected","notification":"Earlier notification","expiresAt":2000}"#.utf8)
+        let session = try JSONDecoder().decode(SessionRecord.self, from: previous)
+        XCTAssertEqual(session.notifications, [SessionNotification(id: "legacy:legacy", message: "Earlier notification")])
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session)) as! [String: Any]
+        XCTAssertNil(encoded["notification"])
+        XCTAssertNotNil(encoded["notifications"])
+    }
+
+    func testDismissResponseContainsOnlyDismissFields() throws {
+        let key = Data(repeating: 9, count: 32)
+        var record = session(id: "session")
+        record.keys["42"] = key
+        let encrypted = try CryptoEngine.encryptDismiss(
+            session: record, timestamp: 42, responseID: "response", requestID: "request",
+            createdAt: "2026-08-28T00:00:00Z"
+        )
+        let combined = try Base64URL.decode(encrypted.ciphertext)
+        let box = try AES.GCM.SealedBox(
+            nonce: AES.GCM.Nonce(data: try Base64URL.decode(encrypted.nonce)),
+            ciphertext: combined.dropLast(16), tag: combined.suffix(16)
+        )
+        let plaintext = try AES.GCM.open(
+            box, using: SymmetricKey(data: key),
+            authenticating: Data("notify.guru/v3/response/session/group/42/response".utf8)
+        )
+        let fields = try JSONSerialization.jsonObject(with: plaintext) as! [String: String]
+        XCTAssertEqual(fields, [
+            "id": "response", "type": "dismiss", "requestId": "request", "createdAt": "2026-08-28T00:00:00Z",
+        ])
     }
 
     func testDetachingGroupRemovesOnlyItsV3Sessions() throws {
@@ -179,7 +212,7 @@ final class ProtocolTests: XCTestCase {
     private func session(id: String, groupID: String = "group", expiresAt: Int64 = 2_000) -> SessionRecord {
         SessionRecord(
             protocolVersion: 3, sessionID: id, groupID: groupID, creatorPublicKey: "creator-public-key",
-            keys: [:], cursor: 0, title: "Session", status: "Connected", notification: "",
+            keys: [:], cursor: 0, title: "Session", status: "Connected", notifications: [],
             request: nil, requestKeyTimestamp: nil, color: nil, updatedAt: nil, expiresAt: expiresAt
         )
     }

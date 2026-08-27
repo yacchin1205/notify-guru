@@ -24,6 +24,14 @@ final class AppModel: ObservableObject {
     private var hasFinishedStarting = false
     private var isSyncing = false
 
+    private var isSessionHistoryUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-session-history")
+#else
+        false
+#endif
+    }
+
     var isAwaitingDeviceApproval: Bool { pendingDeviceRequest != nil }
     var deviceCount: Int { max(1, groupDevices.count) }
     var isSharingAcrossDevices: Bool { groupDevices.count > 1 }
@@ -31,6 +39,12 @@ final class AppModel: ObservableObject {
 
     func start() async {
         guard !isReady else { return }
+#if DEBUG
+        if isSessionHistoryUITest {
+            startSessionHistoryUITest()
+            return
+        }
+#endif
         do {
             PushCoordinator.shared.onToken = { [weak self] token, environment in
                 guard let self else { return }
@@ -64,6 +78,7 @@ final class AppModel: ObservableObject {
     }
 
     func runSyncLoop() async {
+        guard !isSessionHistoryUITest else { return }
         while !Task.isCancelled {
             await sync()
             do { try await Task.sleep(for: .seconds(2)) }
@@ -161,7 +176,56 @@ final class AppModel: ObservableObject {
                 responseID: responseID, payload: payload
             )
             current.sessions[index].request = nil
+            current.sessions[index].requestKeyTimestamp = nil
             current.sessions[index].status = "Response sent"
+            try persist(current)
+        } catch { show(error) }
+    }
+
+    func dismissRequest(sessionID: String) async {
+        do {
+            var current = try requiredVault()
+            guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
+                  let request = current.sessions[index].request,
+                  let timestamp = current.sessions[index].requestKeyTimestamp else {
+                throw ProtocolError.invalidResponse("request is no longer available")
+            }
+#if DEBUG
+            if isSessionHistoryUITest {
+                if ProcessInfo.processInfo.arguments.contains("-ui-test-dismiss-error") {
+                    throw URLError(.notConnectedToInternet)
+                }
+                current.sessions[index].request = nil
+                current.sessions[index].requestKeyTimestamp = nil
+                current.sessions[index].status = "Request dismissed"
+                try persist(current)
+                return
+            }
+#endif
+            let responseID = try CryptoEngine.randomID()
+            let payload = try CryptoEngine.encryptDismiss(
+                session: current.sessions[index], timestamp: timestamp, responseID: responseID,
+                requestID: request.id, createdAt: RFC3339.string(from: Date())
+            )
+            current.sessions[index].expiresAt = try await api.postResponse(
+                session: current.sessions[index], identity: current.identity, timestamp: timestamp,
+                responseID: responseID, payload: payload
+            )
+            current.sessions[index].request = nil
+            current.sessions[index].requestKeyTimestamp = nil
+            current.sessions[index].status = "Request dismissed"
+            try persist(current)
+        } catch { show(error) }
+    }
+
+    func dismissNotification(sessionID: String, notificationID: String) {
+        do {
+            var current = try requiredVault()
+            guard let sessionIndex = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
+                  let notificationIndex = current.sessions[sessionIndex].notifications.firstIndex(where: { $0.id == notificationID }) else {
+                throw ProtocolError.invalidResponse("notification is no longer available")
+            }
+            current.sessions[sessionIndex].notifications.remove(at: notificationIndex)
             try persist(current)
         } catch { show(error) }
     }
@@ -230,6 +294,7 @@ final class AppModel: ObservableObject {
     }
 
     func sync() async {
+        guard !isSessionHistoryUITest else { return }
         guard isReady, !isSyncing else { return }
         isSyncing = true; connectionState = .syncing
         defer { isSyncing = false }
@@ -303,7 +368,7 @@ final class AppModel: ObservableObject {
         var record = SessionRecord(
             protocolVersion: 3, sessionID: pairing.sessionID, groupID: group.groupID,
             creatorPublicKey: pairing.creatorPublicKey, keys: [:], cursor: 0,
-            title: "Session \(pairing.sessionID.prefix(8))", status: "Connected", notification: "",
+            title: "Session \(pairing.sessionID.prefix(8))", status: "Connected", notifications: [],
             request: nil, requestKeyTimestamp: nil, color: pairing.color,
             updatedAt: Self.currentTimeMilliseconds(), expiresAt: expiresAt
         )
@@ -397,7 +462,7 @@ final class AppModel: ObservableObject {
             var record = SessionRecord(
                 protocolVersion: 3, sessionID: remote.sessionID, groupID: group.groupID,
                 creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
-                title: "Session \(remote.sessionID.prefix(8))", status: "Connected", notification: "",
+                title: "Session \(remote.sessionID.prefix(8))", status: "Connected", notifications: [],
                 request: nil, requestKeyTimestamp: nil, color: nil,
                 updatedAt: Self.currentTimeMilliseconds(), expiresAt: remote.expiresAt
             )
@@ -416,8 +481,10 @@ final class AppModel: ObservableObject {
 
     private func apply(_ event: SessionEvent, timestamp: Int64, to session: inout SessionRecord) {
         switch event {
-        case .notification(let title, let message, let color):
-            session.title = title; session.notification = message; session.color = color
+        case .notification(let id, let title, let message, let color):
+            session.title = title
+            session.notifications.append(SessionNotification(id: id, message: message))
+            session.color = color
         case .status(let title, let value, let color):
             session.title = title; session.status = value; session.color = color
         case .request(let title, let value, let color):
@@ -462,7 +529,9 @@ final class AppModel: ObservableObject {
     }
 
     private func persist(_ value: Vault) throws {
-        try keychain.save(value); vault = value; publish(value)
+        if !isSessionHistoryUITest { try keychain.save(value) }
+        vault = value
+        publish(value)
     }
 
     private func publish(_ value: Vault) {
@@ -492,6 +561,39 @@ final class AppModel: ObservableObject {
         guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return }
         errorMessage = error.localizedDescription; connectionState = .failed
     }
+
+#if DEBUG
+    private func startSessionHistoryUITest() {
+        let session = SessionRecord(
+            protocolVersion: 3, sessionID: "ui-test-session", groupID: "ui-test-group",
+            creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 3,
+            title: "UI improvement test", status: "Working",
+            notifications: [
+                SessionNotification(id: "notice-1", message: "First accumulated notice"),
+                SessionNotification(id: "notice-2", message: "Second accumulated notice"),
+            ],
+            request: SessionRequest(
+                id: "request-1", prompt: "Continue the meeting?",
+                options: [SessionChoice(id: "yes", label: "Yes"), SessionChoice(id: "no", label: "No")]
+            ),
+            requestKeyTimestamp: 42, color: "#d9f2d0", updatedAt: Self.currentTimeMilliseconds(),
+            expiresAt: Self.currentTimeMilliseconds() + 86_400_000
+        )
+        let identity = DeviceIdentity(
+            deviceID: "ui-test-device", accessToken: "unused",
+            encryptionPrivateKey: Data(repeating: 1, count: 32),
+            signingPrivateKey: Data(repeating: 2, count: 32),
+            group: DeviceGroup(groupID: "ui-test-group", keys: [:])
+        )
+        let current = Vault(version: 3, identity: identity, sessions: [session])
+        vault = current
+        publish(current)
+        groupDevices = [GroupDevice(deviceID: identity.deviceID, encryptionPublicKey: "unused", addedAt: 0)]
+        connectionState = .current
+        isReady = true
+        hasFinishedStarting = true
+    }
+#endif
 
     nonisolated static func pruningExpiredSessions(from vault: Vault, nowMilliseconds: Int64) -> Vault {
         var result = vault; result.sessions.removeAll { $0.expiresAt <= nowMilliseconds }; return result

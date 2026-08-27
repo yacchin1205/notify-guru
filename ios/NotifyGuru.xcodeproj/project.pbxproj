@@ -382,7 +382,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotifyGuru/Info.plist;
-				MARKETING_VERSION = 2026.8.0;
+				MARKETING_VERSION = 2026.8.2;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -405,7 +405,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotifyGuru/Info.plist;
-				MARKETING_VERSION = 2026.8.0;
+				MARKETING_VERSION = 2026.8.2;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

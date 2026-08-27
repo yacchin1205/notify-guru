@@ -78,9 +78,12 @@
           <span class="expiry"></span>
         </div>
         <p class="status"></p>
-        <p class="notification"></p>
+        <section class="notifications" aria-label="通知"></section>
         <section class="request" hidden>
-          <p class="request-prompt"></p>
+          <div class="request-head">
+            <p class="request-prompt"></p>
+            <button class="request-dismiss dismiss-item" type="button" aria-label="リクエストを閉じる" title="リクエストを閉じる">×</button>
+          </div>
           <div class="request-options"></div>
         </section>
         <section class="feedback">

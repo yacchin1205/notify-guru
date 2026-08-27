@@ -315,6 +315,10 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 			if decrypted.RequestID == "" || decrypted.OptionID == "" || decrypted.Message != "" {
 				return nil, fmt.Errorf("response %q has invalid response fields", decrypted.ID)
 			}
+		case "dismiss":
+			if decrypted.RequestID == "" || decrypted.OptionID != "" || decrypted.Message != "" {
+				return nil, fmt.Errorf("response %q has invalid dismiss fields", decrypted.ID)
+			}
 		case "feedback":
 			if decrypted.Message == "" || decrypted.RequestID != "" || decrypted.OptionID != "" {
 				return nil, fmt.Errorf("response %q has invalid feedback fields", decrypted.ID)

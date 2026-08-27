@@ -51,6 +51,46 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "05-management-after-relaunch", app: app)
     }
 
+    func testNotificationHistoryAndRequestDismissal() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["First accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "Dismiss notification").count, 2)
+        XCTAssertTrue(app.buttons["Dismiss request"].exists)
+        attachScreenshot(named: "10-notification-history-and-request", app: app)
+
+        app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
+        XCTAssertFalse(app.staticTexts["First accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "Dismiss notification").count, 1)
+        attachScreenshot(named: "11-first-notification-dismissed", app: app)
+
+        app.buttons["Dismiss request"].tap()
+        XCTAssertFalse(app.staticTexts["Continue the meeting?"].exists)
+        XCTAssertFalse(app.buttons["Yes"].exists)
+        XCTAssertFalse(app.buttons["No"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        attachScreenshot(named: "12-request-dismissed", app: app)
+    }
+
+    func testRequestRemainsVisibleWhenDismissalFails() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-dismiss-error"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].waitForExistence(timeout: 5))
+        app.buttons["Dismiss request"].tap()
+
+        XCTAssertTrue(app.alerts["notify.guru error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
+        attachScreenshot(named: "13-dismiss-error-keeps-request", app: app)
+    }
+
     private func attachScreenshot(named name: String, app: XCUIApplication) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name

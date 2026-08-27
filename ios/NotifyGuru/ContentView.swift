@@ -384,15 +384,38 @@ private struct SessionCard: View {
                 Label(session.status, systemImage: "waveform.path.ecg")
                     .font(.subheadline.weight(.medium))
             }
-            if !session.notification.isEmpty {
-                Text(session.notification)
-                    .font(.body)
-                    .textSelection(.enabled)
+            ForEach(session.notifications) { notification in
+                HStack(alignment: .top, spacing: 12) {
+                    Text(notification.message)
+                        .font(.body)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button("Dismiss notification", systemImage: "xmark") {
+                        model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
             }
             if let request = session.request {
                 Divider()
-                Text(request.prompt)
-                    .font(.headline)
+                HStack(alignment: .top, spacing: 12) {
+                    Text(request.prompt)
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    Button("Dismiss request", systemImage: "xmark") {
+                        responding = true
+                        Task {
+                            await model.dismissRequest(sessionID: session.sessionID)
+                            responding = false
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(responding)
+                }
                 ForEach(request.options) { option in
                     Button(option.label) {
                         responding = true

@@ -228,9 +228,12 @@ func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewe
 			return false, nil
 		}
 		for _, response := range responses {
-			if response.Type == "feedback" {
+			switch response.Type {
+			case "feedback":
 				fmt.Fprintf(output, "feedback message=%q group=%s at=%s\n", response.Message, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			} else {
+			case "dismiss":
+				fmt.Fprintf(output, "dismiss request=%s group=%s at=%s\n", response.RequestID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+			case "response":
 				fmt.Fprintf(output, "response request=%s option=%s group=%s at=%s\n", response.RequestID, response.OptionID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 			}
 		}

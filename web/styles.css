@@ -227,8 +227,21 @@ body.managing-devices #empty {
   font-size: 0.85rem;
 }
 
+.notifications {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
 .notification {
-  margin: 0.75rem 0 0;
+  display: flex;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.notification p {
+  flex: 1;
+  margin: 0;
   font-size: 1.05rem;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -241,8 +254,26 @@ body.managing-devices #empty {
 }
 
 .request-prompt {
+  flex: 1;
   margin: 0;
   font-weight: 650;
+}
+
+.request-head {
+  display: flex;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+button.dismiss-item {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  width: 2rem;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.25rem;
 }
 
 .request-options {

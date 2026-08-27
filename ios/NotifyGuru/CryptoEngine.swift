@@ -176,6 +176,12 @@ enum CryptoEngine {
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
+    static func encryptDismiss(session: SessionRecord, timestamp: Int64, responseID: String, requestID: String, createdAt: String) throws -> EncryptedPayload {
+        guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("dismiss key is unavailable") }
+        let response = DismissPayload(id: responseID, type: "dismiss", requestID: requestID, createdAt: createdAt)
+        return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
+    }
+
     static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String, createdAt: String) throws -> EncryptedPayload {
         guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("feedback key is unavailable") }
         let response = FeedbackPayload(id: responseID, type: "feedback", message: message, createdAt: createdAt)
@@ -242,4 +248,18 @@ private struct FeedbackPayload: Encodable {
     let type: String
     let message: String
     let createdAt: String
+}
+
+private struct DismissPayload: Encodable {
+    let id: String
+    let type: String
+    let requestID: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case requestID = "requestId"
+        case createdAt
+    }
 }
