@@ -77,4 +77,30 @@ final class ProtocolTests: XCTestCase {
         let encoded = try JSONEncoder().encode(vault)
         XCTAssertEqual(try JSONDecoder().decode(Vault.self, from: encoded), vault)
     }
+
+    func testPrunesExpiredSessionsWithoutServerAccess() {
+        func session(id: String, expiresAt: Int64) -> SessionRecord {
+            SessionRecord(
+                sessionID: id,
+                groupID: "group",
+                groupAccessToken: "sensitive-token",
+                sharedKey: Data(repeating: 9, count: 32),
+                cursor: 0,
+                title: "Decrypted title",
+                status: "Decrypted status",
+                notification: "Decrypted notification",
+                request: nil,
+                expiresAt: expiresAt
+            )
+        }
+        let vault = Vault(
+            version: 1,
+            identity: DeviceIdentity(groupID: "group", privateKey: Data(repeating: 7, count: 32)),
+            sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)]
+        )
+
+        let pruned = AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000)
+
+        XCTAssertEqual(pruned.sessions.map(\.sessionID), ["current"])
+    }
 }

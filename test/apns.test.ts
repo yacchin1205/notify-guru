@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { APNsClient } from "../src/apns";
 
 describe("APNs client", () => {
@@ -21,7 +21,7 @@ describe("APNs client", () => {
       transport,
     );
 
-    await expect(client.send("aabbccdd", "sandbox")).resolves.toBe("delivered");
+    await expect(client.send("aabbccdd", "sandbox")).resolves.toEqual({ outcome: "delivered" });
     expect(receivedURL).toBe("https://api.sandbox.push.apple.com/3/device/aabbccdd");
     expect(receivedInit?.headers).toMatchObject({
       "apns-push-type": "alert",
@@ -36,21 +36,85 @@ describe("APNs client", () => {
     expect(authorization.slice(7).split(".")).toHaveLength(3);
   });
 
-  it("classifies invalid destination tokens without hiding provider errors", async () => {
+  it("reuses one provider token across APNs clients in the same Worker isolate", async () => {
+    const privateKey = await signingKey();
+    const authorizations: string[] = [];
+    const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authorizations.push((init?.headers as Record<string, string>).authorization);
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    const config = {
+      keyId: "CACHEKEY01",
+      teamId: "CACHETEA01",
+      privateKey,
+      topic: "guru.notify.app",
+    };
+
+    await Promise.all([
+      new APNsClient(config, transport).send("aabb", "sandbox"),
+      new APNsClient(config, transport).send("ccdd", "sandbox"),
+    ]);
+
+    expect(authorizations).toHaveLength(2);
+    expect(authorizations[0]).toBe(authorizations[1]);
+  });
+
+  it("refreshes a cached provider token before Apple's one-hour limit", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-27T00:00:00Z"));
+      const privateKey = await signingKey();
+      const authorizations: string[] = [];
+      const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        authorizations.push((init?.headers as Record<string, string>).authorization);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch;
+      const client = new APNsClient(
+        { keyId: "REFRESH001", teamId: "REFRESH002", privateKey, topic: "guru.notify.app" },
+        transport,
+      );
+
+      await client.send("aabb", "sandbox");
+      vi.setSystemTime(new Date("2026-08-27T00:49:00Z"));
+      await client.send("aabb", "sandbox");
+      vi.setSystemTime(new Date("2026-08-27T00:51:00Z"));
+      await client.send("aabb", "sandbox");
+
+      expect(authorizations[0]).toBe(authorizations[1]);
+      expect(authorizations[2]).not.toBe(authorizations[1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("classifies invalid, permanent, and retryable provider responses", async () => {
     const privateKey = await signingKey();
     const invalid = new APNsClient(
-      { keyId: "ABCDEFGHIJ", teamId: "0123456789", privateKey, topic: "guru.notify.app" },
+      { keyId: "INVALID001", teamId: "INVALID002", privateKey, topic: "guru.notify.app" },
       (async () => Response.json({ reason: "Unregistered", timestamp: 1 }, { status: 410 })) as typeof fetch,
     );
     const providerFailure = new APNsClient(
-      { keyId: "ABCDEFGHIJ", teamId: "0123456789", privateKey, topic: "guru.notify.app" },
-      (async () => Response.json({ reason: "InternalServerError" }, { status: 500 })) as typeof fetch,
+      { keyId: "PERMANENT1", teamId: "PERMANENT2", privateKey, topic: "guru.notify.app" },
+      (async () => Response.json({ reason: "BadTopic" }, { status: 400 })) as typeof fetch,
+    );
+    const retryable = new APNsClient(
+      { keyId: "RETRYABLE1", teamId: "RETRYABLE2", privateKey, topic: "guru.notify.app" },
+      (async () => Response.json({ reason: "ServiceUnavailable" }, { status: 503 })) as typeof fetch,
     );
 
-    await expect(invalid.send("aabb", "production")).resolves.toBe("invalid-token");
-    await expect(providerFailure.send("aabb", "production")).rejects.toThrow(
-      "APNs request failed (500): InternalServerError",
-    );
+    await expect(invalid.send("aabb", "production")).resolves.toEqual({
+      outcome: "invalid-token",
+      reason: "Unregistered",
+    });
+    await expect(providerFailure.send("aabb", "production")).resolves.toEqual({
+      outcome: "permanent-failure",
+      reason: "BadTopic",
+    });
+    await expect(retryable.send("aabb", "production")).resolves.toEqual({
+      outcome: "retry",
+      reason: "ServiceUnavailable",
+      minimumDelayMs: 15 * 60 * 1000,
+    });
   });
 });
 

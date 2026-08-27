@@ -1,6 +1,7 @@
 import { ApiError, getEvents, joinSession, postResponse } from "./api.js";
 import { createIdentity, decryptEvent, deriveSessionKey, encryptResponse, hashToken, pairingProof, randomId, randomToken } from "./crypto.js";
 import { deleteSession, getIdentity, getSession, listSessions, putIdentity, putSession } from "./db.js";
+import { expiredSessionIDs } from "./expiry.js";
 
 const cardsElement = document.querySelector("#cards");
 const emptyElement = document.querySelector("#empty");
@@ -21,6 +22,7 @@ async function initialize() {
     await navigator.serviceWorker.register("/sw.js");
   }
   const identity = await identityOrCreate();
+  await deleteExpiredLocalSessions();
   if (location.hash.length > 1) {
     await joinFromFragment(identity);
   }
@@ -91,6 +93,11 @@ async function joinFromFragment(identity) {
 
 async function syncAll() {
   connectionElement.textContent = "同期中";
+  const expired = await deleteExpiredLocalSessions();
+  if (expired) {
+    await render();
+    rendered = true;
+  }
   const sessions = await listSessions();
   let changed = false;
   for (const session of sessions) {
@@ -101,6 +108,15 @@ async function syncAll() {
     rendered = true;
   }
   connectionElement.textContent = "同期済み";
+}
+
+async function deleteExpiredLocalSessions() {
+  const sessions = await listSessions();
+  const expired = expiredSessionIDs(sessions, Date.now());
+  for (const sessionID of expired) {
+    await deleteSession(sessionID);
+  }
+  return expired.length > 0;
 }
 
 async function syncSession(session) {

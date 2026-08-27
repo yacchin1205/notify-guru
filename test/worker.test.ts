@@ -135,6 +135,61 @@ describe("session relay", () => {
     expect(rejected.json.error).toBe("invalid_group_token");
   });
 
+  it("retries one failed push job without blocking later jobs", async () => {
+    const fixture = await createJoinedSession();
+    const registered = await api(`/api/sessions/${fixture.sessionId}/push`, {
+      method: "PUT",
+      token: fixture.groupToken,
+      body: {
+        groupId: fixture.groupId,
+        deviceToken: "aabbccdd",
+        environment: "sandbox",
+      },
+    });
+    expect(registered.status).toBe(200);
+    for (let index = 0; index < 2; index += 1) {
+      const event = await api(`/api/sessions/${fixture.sessionId}/events`, {
+        method: "POST",
+        token: fixture.managerToken,
+        body: {
+          eventId: randomId(),
+          groupId: fixture.groupId,
+          nonce: "AAAAAAAAAAAAAAAA",
+          ciphertext: `opaque_event_${index}`,
+        },
+      });
+      expect(event.status).toBe(201);
+    }
+
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(fixture.sessionId));
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec("UPDATE push_jobs SET attempt_count = 0, next_attempt_at = 0");
+      let calls = 0;
+      Object.defineProperty(instance, "apns", {
+        value: {
+          send: async () => {
+            calls += 1;
+            return calls === 1
+              ? { outcome: "retry" as const, reason: "ServiceUnavailable", minimumDelayMs: 0 }
+              : { outcome: "delivered" as const };
+          },
+        },
+      });
+
+      await instance.alarm();
+
+      expect(calls).toBe(2);
+      const jobs = Array.from(
+        state.storage.sql.exec<{ attempt_count: number; next_attempt_at: number }>(
+          "SELECT attempt_count, next_attempt_at FROM push_jobs",
+        ),
+      );
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].attempt_count).toBe(1);
+      expect(jobs[0].next_attempt_at).toBeGreaterThan(Date.now());
+    });
+  });
+
   it("consumes each pairing exactly once", async () => {
     const fixture = await createJoinedSession();
     const response = await join(fixture);

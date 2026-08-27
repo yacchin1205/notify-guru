@@ -22,14 +22,22 @@ final class AppModel: ObservableObject {
             PushCoordinator.shared.onFailure = { [weak self] error in
                 self?.show(error)
             }
-            if let existing = try keychain.load() {
-                vault = existing
+            let loaded = try keychain.load()
+            let initial: Vault
+            if let loaded {
+                initial = loaded
             } else {
-                let created = Vault(version: 1, identity: try CryptoEngine.createIdentity(), sessions: [])
-                try keychain.save(created)
-                vault = created
+                initial = Vault(version: 1, identity: try CryptoEngine.createIdentity(), sessions: [])
             }
-            sessions = requiredVault().sessions
+            let current = Self.pruningExpiredSessions(
+                from: initial,
+                nowMilliseconds: Self.currentTimeMilliseconds()
+            )
+            if loaded == nil || current != initial {
+                try keychain.save(current)
+            }
+            vault = current
+            sessions = current.sessions
             isReady = true
             await sync()
             await resumeNotifications()
@@ -54,6 +62,7 @@ final class AppModel: ObservableObject {
 
     func join(link: String) async -> Bool {
         do {
+            try pruneExpiredSessions()
             let pairing = try PairingLink(link.trimmingCharacters(in: .whitespacesAndNewlines))
             var current = requiredVault()
             guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }) else {
@@ -91,6 +100,7 @@ final class AppModel: ObservableObject {
 
     func respond(sessionID: String, optionID: String) async {
         do {
+            try pruneExpiredSessions()
             var current = requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
                   let request = current.sessions[index].request else {
@@ -128,6 +138,7 @@ final class AppModel: ObservableObject {
         connectionState = .syncing
         defer { isSyncing = false }
         do {
+            try pruneExpiredSessions()
             var current = requiredVault()
             var index = 0
             while index < current.sessions.count {
@@ -201,6 +212,7 @@ final class AppModel: ObservableObject {
 
     private func registerPushToken(_ token: String, environment: PushEnvironment) async {
         do {
+            try pruneExpiredSessions()
             var current = requiredVault()
             var index = 0
             while index < current.sessions.count {
@@ -234,6 +246,27 @@ final class AppModel: ObservableObject {
     private func show(_ error: Error) {
         guard !isExpectedCancellation(error) else { return }
         errorMessage = error.localizedDescription
+    }
+
+    private func pruneExpiredSessions() throws {
+        let current = requiredVault()
+        let pruned = Self.pruningExpiredSessions(
+            from: current,
+            nowMilliseconds: Self.currentTimeMilliseconds()
+        )
+        if pruned != current {
+            try persist(pruned)
+        }
+    }
+
+    nonisolated static func pruningExpiredSessions(from vault: Vault, nowMilliseconds: Int64) -> Vault {
+        var result = vault
+        result.sessions.removeAll { $0.expiresAt <= nowMilliseconds }
+        return result
+    }
+
+    nonisolated private static func currentTimeMilliseconds() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
     }
 
     private func isExpectedCancellation(_ error: Error) -> Bool {

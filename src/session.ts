@@ -16,6 +16,10 @@ import { APNsClient, type APNsEnvironment } from "./apns";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
+const MAX_PUSH_ATTEMPTS = 8;
+const PUSH_RETRY_BASE_MS = 30_000;
+const PUSH_RETRY_CAP_MS = 30 * 60 * 1000;
+const PUSH_ALARM_FALLBACK_MS = 15 * 60 * 1000;
 
 interface SessionEnv {
   APNS_KEY_ID?: string;
@@ -61,6 +65,8 @@ interface PushJobRow extends Record<string, SqlStorageValue> {
   group_id: string;
   device_token: string;
   environment: APNsEnvironment;
+  attempt_count: number;
+  next_attempt_at: number;
 }
 
 export class Session {
@@ -109,33 +115,45 @@ export class Session {
       await this.state.storage.deleteAll();
       return;
     }
+    const now = Date.now();
+    await this.state.storage.setAlarm(Math.min(initialMeta[0].expires_at, now + PUSH_ALARM_FALLBACK_MS));
     const jobs = Array.from(
       this.state.storage.sql.exec<PushJobRow>(
-        "SELECT event_id, group_id, device_token, environment FROM push_jobs ORDER BY event_id LIMIT 100",
+        `SELECT event_id, group_id, device_token, environment, attempt_count, next_attempt_at
+         FROM push_jobs WHERE next_attempt_at <= ? ORDER BY next_attempt_at, event_id LIMIT 100`,
+        now,
       ),
     );
     if (jobs.length === 0) {
-      await this.scheduleExpiry(initialMeta[0].expires_at);
+      await this.scheduleNextAlarm(initialMeta[0].expires_at);
       return;
     }
-    await this.schedulePush(Date.now() + 60_000);
+    const invalidTokens = new Set<string>();
     for (const job of jobs) {
-      const result = await this.apns.send(job.device_token, job.environment);
-      this.state.storage.transactionSync(() => {
-        this.state.storage.sql.exec(
-          "DELETE FROM push_jobs WHERE event_id = ? AND device_token = ?",
-          job.event_id,
-          job.device_token,
-        );
-        if (result === "invalid-token") {
-          this.state.storage.sql.exec(
-            "DELETE FROM push_tokens WHERE group_id = ? AND device_token = ?",
-            job.group_id,
-            job.device_token,
-          );
-          this.state.storage.sql.exec("DELETE FROM push_jobs WHERE device_token = ?", job.device_token);
+      if (invalidTokens.has(job.device_token)) {
+        continue;
+      }
+      try {
+        const result = await this.apns.send(job.device_token, job.environment);
+        switch (result.outcome) {
+          case "delivered":
+            this.deletePushJob(job);
+            break;
+          case "invalid-token":
+            invalidTokens.add(job.device_token);
+            this.deleteInvalidToken(job);
+            break;
+          case "permanent-failure":
+            console.warn("APNs push discarded after a permanent provider response", { reason: result.reason });
+            this.deletePushJob(job);
+            break;
+          case "retry":
+            this.retryPushJob(job, result.reason, result.minimumDelayMs);
+            break;
         }
-      });
+      } catch {
+        this.retryPushJob(job, "transport-or-provider-response", 0);
+      }
     }
 
     const rows = Array.from(
@@ -144,13 +162,7 @@ export class Session {
     if (rows.length !== 1) {
       throw new Error("Initialized session must contain exactly one meta row");
     }
-    await this.scheduleExpiry(rows[0].expires_at);
-    const remaining = Array.from(
-      this.state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM push_jobs"),
-    );
-    if (remaining[0].count > 0) {
-      await this.schedulePush(Date.now());
-    }
+    await this.scheduleNextAlarm(rows[0].expires_at);
   }
 
   private async route(request: Request): Promise<Response> {
@@ -323,9 +335,11 @@ export class Session {
       );
       this.state.storage.sql.exec("UPDATE meta SET expires_at = ? WHERE singleton = 1", expiresAt);
       this.state.storage.sql.exec(
-        `INSERT INTO push_jobs (event_id, group_id, device_token, environment)
-         SELECT ?, group_id, device_token, environment FROM push_tokens WHERE group_id = ?`,
+        `INSERT INTO push_jobs
+           (event_id, group_id, device_token, environment, attempt_count, next_attempt_at)
+         SELECT ?, group_id, device_token, environment, 0, ? FROM push_tokens WHERE group_id = ?`,
         eventId,
+        now,
         groupId,
       );
     });
@@ -538,9 +552,23 @@ export class Session {
         group_id TEXT NOT NULL REFERENCES groups(id),
         device_token TEXT NOT NULL,
         environment TEXT NOT NULL CHECK (environment IN ('sandbox', 'production')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (event_id, device_token)
       );
     `);
+    const columns = new Set(
+      Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(push_jobs)"), (row) => row.name),
+    );
+    if (!columns.has("attempt_count")) {
+      this.state.storage.sql.exec("ALTER TABLE push_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columns.has("next_attempt_at")) {
+      this.state.storage.sql.exec("ALTER TABLE push_jobs ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
+    }
+    this.state.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS push_jobs_due ON push_jobs(next_attempt_at, event_id)",
+    );
   }
 
   private async scheduleExpiry(expiresAt: number): Promise<void> {
@@ -550,4 +578,68 @@ export class Session {
   private async schedulePush(at: number): Promise<void> {
     await this.state.storage.setAlarm(at);
   }
+
+  private deletePushJob(job: PushJobRow): void {
+    this.state.storage.sql.exec(
+      "DELETE FROM push_jobs WHERE event_id = ? AND device_token = ?",
+      job.event_id,
+      job.device_token,
+    );
+  }
+
+  private deleteInvalidToken(job: PushJobRow): void {
+    this.state.storage.transactionSync(() => {
+      this.state.storage.sql.exec(
+        "DELETE FROM push_tokens WHERE group_id = ? AND device_token = ?",
+        job.group_id,
+        job.device_token,
+      );
+      this.state.storage.sql.exec("DELETE FROM push_jobs WHERE device_token = ?", job.device_token);
+    });
+  }
+
+  private retryPushJob(job: PushJobRow, reason: string, minimumDelayMs: number): void {
+    const attempt = job.attempt_count + 1;
+    if (attempt >= MAX_PUSH_ATTEMPTS) {
+      console.warn("APNs push discarded after exhausting retries", { reason, attempts: attempt });
+      this.deletePushJob(job);
+      return;
+    }
+    const nextAttemptAt = Date.now() + pushRetryDelay(attempt, minimumDelayMs);
+    this.state.storage.sql.exec(
+      `UPDATE push_jobs SET attempt_count = ?, next_attempt_at = ?
+       WHERE event_id = ? AND device_token = ?`,
+      attempt,
+      nextAttemptAt,
+      job.event_id,
+      job.device_token,
+    );
+  }
+
+  private async scheduleNextAlarm(expiresAt: number): Promise<void> {
+    const rows = Array.from(
+      this.state.storage.sql.exec<{ count: number; next_attempt_at: number | null }>(
+        "SELECT COUNT(*) AS count, MIN(next_attempt_at) AS next_attempt_at FROM push_jobs",
+      ),
+    );
+    if (rows.length !== 1) {
+      throw new Error("Push queue aggregate must return exactly one row");
+    }
+    if (rows[0].count === 0) {
+      await this.scheduleExpiry(expiresAt);
+      return;
+    }
+    if (rows[0].next_attempt_at === null) {
+      throw new Error("Non-empty push queue must have a next attempt time");
+    }
+    await this.schedulePush(Math.min(expiresAt, Math.max(Date.now() + 1_000, rows[0].next_attempt_at)));
+  }
+}
+
+function pushRetryDelay(attempt: number, minimumDelayMs: number): number {
+  const exponential = Math.min(PUSH_RETRY_BASE_MS * 2 ** (attempt - 1), PUSH_RETRY_CAP_MS);
+  const random = new Uint32Array(1);
+  crypto.getRandomValues(random);
+  const jittered = exponential * (0.5 + random[0] / 2 ** 32);
+  return minimumDelayMs + Math.floor(jittered);
 }
