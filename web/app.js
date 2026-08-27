@@ -45,6 +45,10 @@ const emptyElement = document.querySelector("#empty");
 const messageElement = document.querySelector("#message");
 const connectionElement = document.querySelector("#connection-state");
 const cardTemplate = document.querySelector("#card-template");
+const groupSetupElement = document.querySelector("#device-group-setup");
+const createGroupButton = document.querySelector("#create-device-group");
+const deviceInvitationURLElement = document.querySelector("#device-invitation-url");
+const openDeviceInvitationButton = document.querySelector("#open-device-invitation");
 const groupElement = document.querySelector("#device-group");
 const groupGenerationElement = document.querySelector("#group-generation");
 const groupStatusElement = document.querySelector("#group-status");
@@ -63,6 +67,8 @@ let rendered = false;
 let synchronizing = false;
 
 window.addEventListener("unhandledrejection", (event) => showError(event.reason));
+createGroupButton.addEventListener("click", () => createStandaloneGroup().catch(showError));
+openDeviceInvitationButton.addEventListener("click", () => openDeviceInvitation().catch(showError));
 inviteDeviceButton.addEventListener("click", () => createDeviceInvitation().catch(showError));
 
 await initialize();
@@ -92,6 +98,9 @@ async function identityOrCreate() {
 }
 
 async function createInitialGroup() {
+  if (identity.group !== null || identity.pendingInvitation !== undefined) {
+    throw new Error("この端末にはすでにデバイスグループがあります");
+  }
   const groupId = randomId();
   const generation = await createGeneration(1);
   const keyPackage = await createKeyPackage(groupId, generation, deviceDescriptor(identity));
@@ -115,6 +124,28 @@ async function createInitialGroup() {
     generations: { "1": generation },
   };
   await putIdentity(identity);
+}
+
+async function createStandaloneGroup() {
+  createGroupButton.disabled = true;
+  try {
+    await createInitialGroup();
+    messageElement.textContent = "新しいデバイスグループを作成しました。";
+    await syncAll();
+    if (location.pathname === "/join" && location.hash.length > 1) await joinFromFragment();
+  } finally {
+    createGroupButton.disabled = false;
+  }
+}
+
+async function openDeviceInvitation() {
+  const value = deviceInvitationURLElement.value.trim();
+  if (value.length === 0) throw new Error("デバイス招待リンクを入力してください");
+  const url = new URL(value);
+  if (url.origin !== location.origin || url.pathname !== "/device" || url.hash.length <= 1) {
+    throw new Error("notify.guru のデバイス招待リンクではありません");
+  }
+  location.assign(url.href);
 }
 
 async function beginDeviceJoin(invitation) {
@@ -149,7 +180,10 @@ async function joinFromFragment() {
   const required = ["v", "s", "p", "t", "a", "k"];
   requireFragmentFields(parameters, required);
   if (parameters.get("v") !== "2") throw new Error("Unsupported pairing protocol version");
-  if (identity.group === null) await createInitialGroup();
+  if (identity.group === null) {
+    messageElement.textContent = "先にデバイスグループを作成するか、既存グループへ参加してください。";
+    return;
+  }
   await syncGroup();
 
   const sessionId = parameters.get("s");
@@ -429,7 +463,11 @@ async function buildTransition(action, targetDeviceId, pending) {
 }
 
 async function renderGroup() {
-  if (identity.pendingInvitation !== undefined) return;
+  groupSetupElement.hidden = identity.group !== null || identity.pendingInvitation !== undefined;
+  if (identity.pendingInvitation !== undefined) {
+    groupElement.hidden = true;
+    return;
+  }
   groupElement.hidden = identity.group === null;
   if (identity.group === null || groupState === undefined) return;
   groupGenerationElement.textContent = `鍵世代 ${identity.group.generation}`;

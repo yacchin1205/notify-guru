@@ -6,6 +6,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var groupDevices: [GroupDevice] = []
     @Published private(set) var pendingDevices: [PendingDevice] = []
     @Published private(set) var groupGeneration: Int64?
+    @Published private(set) var hasDeviceGroup = false
     @Published private(set) var deviceID: String?
     @Published private(set) var invitationLink: String?
     @Published private(set) var verificationCode: String?
@@ -97,6 +98,21 @@ final class AppModel: ObservableObject {
             current.identity.invitations[invitationID] = invitation
             try persist(current)
             invitationLink = try deviceInvitationURL(invitation)
+        } catch { show(error) }
+    }
+
+    func createDeviceGroup() async {
+        do {
+            var current = requiredVault()
+            guard current.identity.group == nil, current.identity.pendingInvitation == nil else {
+                throw ProtocolError.invalidResponse("this device already belongs to a device group")
+            }
+            try await createInitialGroup(&current)
+            deviceJoinStatus = nil
+            verificationCode = nil
+            invitationLink = nil
+            errorMessage = nil
+            await sync()
         } catch { show(error) }
     }
 
@@ -232,7 +248,9 @@ final class AppModel: ObservableObject {
         guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }) else {
             throw ProtocolError.invalidPairingLink("this device group already joined the session")
         }
-        if current.identity.group == nil { try await createInitialGroup(&current) }
+        guard current.identity.group != nil else {
+            throw ProtocolError.invalidPairingLink("create or join a device group before joining a session")
+        }
         try await synchronizeGroup(&current)
         guard let group = current.identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
         let expiresAt = try await api.join(pairing, identity: current.identity)
@@ -533,6 +551,7 @@ final class AppModel: ObservableObject {
 
     private func publish(_ value: Vault) {
         sessions = value.sessions.sorted { $0.expiresAt > $1.expiresAt }
+        hasDeviceGroup = value.identity.group != nil
         groupGeneration = value.identity.group?.generation
         deviceID = value.identity.deviceID
     }

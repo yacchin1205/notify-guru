@@ -28,7 +28,7 @@ notifyg --title "Deployment"
 
 The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, scan it with the receiving device, then enter `join` in the CLI to refresh the joined devices.
 
-After joining, the PWA or iOS app can create a 10-minute device invitation. Open that link on a new device, compare the six-digit code on both devices, and approve it on the inviting device. The new device then receives the group's active sessions. Different people should join the Agent session as separate device groups instead of sharing one group.
+Before joining a session, create a new device group in the PWA or iOS app, or scan an invitation from an existing group. A group remains manageable even when it has no active sessions. An enrolled device can create a 10-minute device invitation; open that link on a new device, compare the six-digit code on both devices, and approve it on the inviting device. The new device then receives the group's active sessions. Different people should join the Agent session as separate device groups instead of sharing one group.
 
 Available commands:
 

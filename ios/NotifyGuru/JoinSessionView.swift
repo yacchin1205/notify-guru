@@ -16,7 +16,7 @@ struct JoinSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-                TextField("https://notify.guru/join#…", text: $pairingLink, axis: .vertical)
+                TextField("https://notify.guru/…#…", text: $pairingLink, axis: .vertical)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textContentType(.URL)
@@ -25,7 +25,7 @@ struct JoinSessionView: View {
                     .padding(12)
                     .background(.background, in: RoundedRectangle(cornerRadius: 12))
 
-                Button("Join session") {
+                Button("Join") {
                     Task { await join(pairingLink) }
                 }
                 .buttonStyle(.borderedProminent)
@@ -34,7 +34,7 @@ struct JoinSessionView: View {
             }
             .padding()
             .background(Color(uiColor: .secondarySystemBackground))
-            .navigationTitle("Join a session")
+            .navigationTitle("Scan a link")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -57,7 +57,7 @@ struct JoinSessionView: View {
             ContentUnavailableView {
                 Label("Camera access", systemImage: "camera")
             } description: {
-                Text("Camera access is used only to scan a pairing QR code.")
+                Text("Camera access is used only to scan a session or device invitation QR code.")
             } actions: {
                 Button("Allow camera") { requestCameraAccess() }
                     .buttonStyle(.borderedProminent)

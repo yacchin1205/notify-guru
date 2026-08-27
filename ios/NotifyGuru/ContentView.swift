@@ -13,8 +13,10 @@ struct ContentView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
-                            if model.groupGeneration != nil || model.deviceJoinStatus != nil {
+                            if model.hasDeviceGroup {
                                 DeviceGroupCard()
+                            } else {
+                                DeviceGroupSetupCard(showingJoin: $showingJoin)
                             }
                             ForEach(model.sessions) { session in
                                 SessionCard(session: session)
@@ -23,7 +25,7 @@ struct ContentView: View {
                                 ContentUnavailableView {
                                     Label("No sessions", systemImage: "link.badge.plus")
                                 } description: {
-                                    Text("Scan the one-shot QR code shown by notifyg, or a device invitation.")
+                                    Text("Once this device belongs to a group, scan the one-shot QR code shown by notifyg.")
                                 } actions: {
                                     Button("Scan a link") { showingJoin = true }
                                         .buttonStyle(.borderedProminent)
@@ -86,6 +88,35 @@ struct ContentView: View {
         case .current: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
         }
+    }
+}
+
+private struct DeviceGroupSetupCard: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var showingJoin: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("DEVICE GROUP")
+                .font(.caption2.weight(.bold))
+                .tracking(1.5)
+                .foregroundStyle(Color.brandAccent)
+            Text("Set up this device")
+                .font(.headline)
+            Text("Create a new group, or scan an invitation from a device in an existing group. Sessions can be joined after this device belongs to a group.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if let status = model.deviceJoinStatus { Text(status).font(.subheadline) }
+            HStack {
+                Button("Create new group") { Task { await model.createDeviceGroup() } }
+                    .buttonStyle(.borderedProminent)
+                Button("Scan invitation") { showingJoin = true }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 

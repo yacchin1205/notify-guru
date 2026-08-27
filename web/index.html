@@ -20,9 +20,20 @@
       <section id="intro">
         <p class="eyebrow">EPHEMERAL AGENT NOTIFICATIONS</p>
         <h1>作業の続きを、手元で待つ。</h1>
-        <p>CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
+        <p>デバイスグループを準備した後、CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
       </section>
       <p id="message" role="status" aria-live="polite"></p>
+      <section id="device-group-setup" class="group-card" hidden>
+        <p class="card-label">DEVICE GROUP</p>
+        <h2>デバイスグループを準備</h2>
+        <p>セッションへ参加する前に、この端末用の新しいグループを作るか、既存グループから受け取った招待リンクを開いてください。</p>
+        <button id="create-device-group" type="button">新しいグループを作る</button>
+        <div class="group-join-controls">
+          <label for="device-invitation-url">既存グループへ参加</label>
+          <input id="device-invitation-url" type="url" inputmode="url" autocomplete="off" placeholder="https://notify.guru/device#…">
+          <button id="open-device-invitation" type="button">招待リンクを開く</button>
+        </div>
+      </section>
       <section id="device-group" class="group-card" hidden>
         <div class="card-head">
           <div>
