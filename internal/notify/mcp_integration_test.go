@@ -33,7 +33,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
-	command := exec.CommandContext(ctx, "go", "run", "../../cmd/notify", "--base-url", baseURL, "mcp")
+	command := exec.CommandContext(ctx, "go", "run", "../../cmd/notifyg", "--base-url", baseURL, "mcp")
 	command.Stderr = os.Stderr
 	client := mcp.NewClient(&mcp.Implementation{Name: "notify-guru-integration-test", Version: "0.1.0"}, nil)
 	clientSession, err := client.Connect(ctx, &mcp.CommandTransport{Command: command}, nil)

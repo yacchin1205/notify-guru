@@ -24,7 +24,7 @@ func main() {
 }
 
 func run() error {
-	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
+	flags := flag.NewFlagSet("notifyg", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	baseURL := flags.String("base-url", "https://notify.guru", "notify.guru service URL")
 	title := flags.String("title", "Development session", "interactive session title")
@@ -32,7 +32,7 @@ func run() error {
 		return err
 	}
 	if flags.NArg() > 1 {
-		return fmt.Errorf("usage: notify [--base-url URL] [--title TITLE] [mcp]")
+		return fmt.Errorf("usage: notifyg [--base-url URL] [--title TITLE] [mcp]")
 	}
 
 	api, err := notify.NewAPI(*baseURL)
@@ -71,7 +71,7 @@ func interactive(ctx context.Context, store *notify.Store, title string, input i
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 300_000)
 	for {
-		fmt.Fprint(output, "notify> ")
+		fmt.Fprint(output, "notifyg> ")
 		if !scanner.Scan() {
 			return scanner.Err()
 		}

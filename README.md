@@ -8,14 +8,14 @@ The PWA is available at [notify.guru](https://notify.guru).
 
 ## Install
 
-Download the archive for your operating system and architecture from [GitHub Releases](https://github.com/yacchin1205/notify-guru/releases), extract it, and place `notify` or `notify.exe` on your `PATH`.
+Download the archive for your operating system and architecture from [GitHub Releases](https://github.com/yacchin1205/notify-guru/releases), extract it, and place `notifyg` or `notifyg.exe` on your `PATH`.
 
 To build from source instead:
 
 ```sh
 git clone https://github.com/yacchin1205/notify-guru.git
 cd notify-guru
-go build -o notify ./cmd/notify
+go build -o notifyg ./cmd/notifyg
 ```
 
 ## Interactive CLI
@@ -23,7 +23,7 @@ go build -o notify ./cmd/notify
 Start a session:
 
 ```sh
-notify --title "Deployment"
+notifyg --title "Deployment"
 ```
 
 The CLI prints a QR code and its pairing URL. Open notify.guru on the receiving device, scan the QR code, then enter `join` in the CLI to refresh the joined devices.
@@ -49,7 +49,7 @@ quit
 Use `--base-url` before the optional mode argument when connecting to a development deployment:
 
 ```sh
-notify --base-url http://localhost:8787 --title "Local session"
+notifyg --base-url http://localhost:8787 --title "Local session"
 ```
 
 ## MCP server
@@ -57,7 +57,7 @@ notify --base-url http://localhost:8787 --title "Local session"
 Run the same binary as a stdio MCP server:
 
 ```sh
-notify mcp
+notifyg mcp
 ```
 
 A typical MCP client configuration is:
@@ -66,7 +66,7 @@ A typical MCP client configuration is:
 {
   "mcpServers": {
     "notify-guru": {
-      "command": "/absolute/path/to/notify",
+      "command": "/absolute/path/to/notifyg",
       "args": ["mcp"]
     }
   }
@@ -90,6 +90,6 @@ See [CONCEPT.md](CONCEPT.md) for the product model and [DESIGN.md](DESIGN.md) fo
 GoReleaser builds archives for Linux, macOS, and Windows on amd64 and arm64. Pushing a semantic version tag creates a GitHub Release with those archives and `checksums.txt`:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v2026.8.0
+git push origin v2026.8.0
 ```

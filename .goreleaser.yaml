@@ -1,11 +1,11 @@
 version: 2
 
-project_name: notify
+project_name: notifyg
 
 builds:
-  - id: notify
-    main: ./cmd/notify
-    binary: notify
+  - id: notifyg
+    main: ./cmd/notifyg
+    binary: notifyg
     env:
       - CGO_ENABLED=0
     flags:
