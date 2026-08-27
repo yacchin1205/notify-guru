@@ -1,5 +1,8 @@
 node_modules/
+.DS_Store
 .wrangler/
 dist/
 coverage/
 /notifyg
+/ios/*.xcodeproj/xcuserdata/
+*.xcuserstate

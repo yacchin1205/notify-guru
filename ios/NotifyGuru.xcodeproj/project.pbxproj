@@ -1,0 +1,412 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		D00000000000000000000001 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* APIClient.swift */; };
+		D00000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* AppModel.swift */; };
+		D00000000000000000000003 /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Base64URL.swift */; };
+		D00000000000000000000004 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000004 /* ContentView.swift */; };
+		D00000000000000000000005 /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* CryptoEngine.swift */; };
+		D00000000000000000000006 /* EventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* EventDecoder.swift */; };
+		D00000000000000000000007 /* JoinSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000007 /* JoinSessionView.swift */; };
+		D00000000000000000000008 /* KeychainVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* KeychainVault.swift */; };
+		D00000000000000000000009 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* Models.swift */; };
+		D0000000000000000000000A /* NotifyGuruApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000A /* NotifyGuruApp.swift */; };
+		D0000000000000000000000B /* PairingLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000B /* PairingLink.swift */; };
+		D0000000000000000000000C /* ProtocolError.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000C /* ProtocolError.swift */; };
+		D0000000000000000000000D /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000D /* QRScannerView.swift */; };
+		D0000000000000000000000E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000E /* Assets.xcassets */; };
+		D0000000000000000000000F /* ProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000010 /* ProtocolTests.swift */; };
+		D00000000000000000000010 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* AppDelegate.swift */; };
+		D00000000000000000000011 /* PushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* PushCoordinator.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A00000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E00000000000000000000001;
+			remoteInfo = NotifyGuru;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		C00000000000000000000001 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		C00000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		C00000000000000000000003 /* Base64URL.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base64URL.swift; sourceTree = "<group>"; };
+		C00000000000000000000004 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C00000000000000000000005 /* CryptoEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoEngine.swift; sourceTree = "<group>"; };
+		C00000000000000000000006 /* EventDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventDecoder.swift; sourceTree = "<group>"; };
+		C00000000000000000000007 /* JoinSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinSessionView.swift; sourceTree = "<group>"; };
+		C00000000000000000000008 /* KeychainVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainVault.swift; sourceTree = "<group>"; };
+		C00000000000000000000009 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		C0000000000000000000000A /* NotifyGuruApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotifyGuruApp.swift; sourceTree = "<group>"; };
+		C0000000000000000000000B /* PairingLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingLink.swift; sourceTree = "<group>"; };
+		C0000000000000000000000C /* ProtocolError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolError.swift; sourceTree = "<group>"; };
+		C0000000000000000000000D /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		C0000000000000000000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C0000000000000000000000F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C00000000000000000000010 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000011 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		C00000000000000000000012 /* PushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCoordinator.swift; sourceTree = "<group>"; };
+		C00000000000000000000013 /* NotifyGuru.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotifyGuru.entitlements; sourceTree = "<group>"; };
+		I00000000000000000000001 /* NotifyGuru.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotifyGuru.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		I00000000000000000000002 /* NotifyGuruTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NotifyGuruTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		H00000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		H00000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		B00000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000002 /* NotifyGuru */,
+				B00000000000000000000003 /* NotifyGuruTests */,
+				B00000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B00000000000000000000002 /* NotifyGuru */ = {
+			isa = PBXGroup;
+			children = (
+				C00000000000000000000001 /* APIClient.swift */,
+				C00000000000000000000011 /* AppDelegate.swift */,
+				C00000000000000000000002 /* AppModel.swift */,
+				C00000000000000000000003 /* Base64URL.swift */,
+				C00000000000000000000004 /* ContentView.swift */,
+				C00000000000000000000005 /* CryptoEngine.swift */,
+				C00000000000000000000006 /* EventDecoder.swift */,
+				C00000000000000000000007 /* JoinSessionView.swift */,
+				C00000000000000000000008 /* KeychainVault.swift */,
+				C00000000000000000000009 /* Models.swift */,
+				C0000000000000000000000A /* NotifyGuruApp.swift */,
+				C0000000000000000000000B /* PairingLink.swift */,
+				C0000000000000000000000C /* ProtocolError.swift */,
+				C00000000000000000000012 /* PushCoordinator.swift */,
+				C0000000000000000000000D /* QRScannerView.swift */,
+				C0000000000000000000000E /* Assets.xcassets */,
+				C0000000000000000000000F /* Info.plist */,
+				C00000000000000000000013 /* NotifyGuru.entitlements */,
+			);
+			path = NotifyGuru;
+			sourceTree = "<group>";
+		};
+		B00000000000000000000003 /* NotifyGuruTests */ = {
+			isa = PBXGroup;
+			children = (
+				C00000000000000000000010 /* ProtocolTests.swift */,
+			);
+			path = NotifyGuruTests;
+			sourceTree = "<group>";
+		};
+		B00000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				I00000000000000000000001 /* NotifyGuru.app */,
+				I00000000000000000000002 /* NotifyGuruTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E00000000000000000000001 /* NotifyGuru */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00000000000000000000002 /* Build configuration list for PBXNativeTarget "NotifyGuru" */;
+			buildPhases = (
+				H00000000000000000000001 /* Sources */,
+				H00000000000000000000002 /* Frameworks */,
+				H00000000000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotifyGuru;
+			productName = NotifyGuru;
+			productReference = I00000000000000000000001 /* NotifyGuru.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E00000000000000000000002 /* NotifyGuruTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00000000000000000000003 /* Build configuration list for PBXNativeTarget "NotifyGuruTests" */;
+			buildPhases = (
+				H00000000000000000000004 /* Sources */,
+				H00000000000000000000005 /* Frameworks */,
+				H00000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A00000000000000000000004 /* PBXTargetDependency */,
+			);
+			name = NotifyGuruTests;
+			productName = NotifyGuruTests;
+			productReference = I00000000000000000000002 /* NotifyGuruTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					E00000000000000000000001 = {
+						CreatedOnToolsVersion = 26.4;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
+					};
+					E00000000000000000000002 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = E00000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = F00000000000000000000001 /* Build configuration list for PBXProject "NotifyGuru" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = B00000000000000000000001;
+			productRefGroup = B00000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E00000000000000000000001 /* NotifyGuru */,
+				E00000000000000000000002 /* NotifyGuruTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		H00000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0000000000000000000000E /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		H00000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		H00000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D00000000000000000000001 /* APIClient.swift in Sources */,
+				D00000000000000000000010 /* AppDelegate.swift in Sources */,
+				D00000000000000000000002 /* AppModel.swift in Sources */,
+				D00000000000000000000003 /* Base64URL.swift in Sources */,
+				D00000000000000000000004 /* ContentView.swift in Sources */,
+				D00000000000000000000005 /* CryptoEngine.swift in Sources */,
+				D00000000000000000000006 /* EventDecoder.swift in Sources */,
+				D00000000000000000000007 /* JoinSessionView.swift in Sources */,
+				D00000000000000000000008 /* KeychainVault.swift in Sources */,
+				D00000000000000000000009 /* Models.swift in Sources */,
+				D0000000000000000000000A /* NotifyGuruApp.swift in Sources */,
+				D0000000000000000000000B /* PairingLink.swift in Sources */,
+				D0000000000000000000000C /* ProtocolError.swift in Sources */,
+				D00000000000000000000011 /* PushCoordinator.swift in Sources */,
+				D0000000000000000000000D /* QRScannerView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		H00000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0000000000000000000000F /* ProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A00000000000000000000004 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E00000000000000000000001 /* NotifyGuru */;
+			targetProxy = A00000000000000000000003 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		G00000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		G00000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		G00000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APS_ENVIRONMENT = development;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = NotifyGuru/NotifyGuru.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuru/Info.plist;
+				MARKETING_VERSION = 2026.8.0;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		G00000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APS_ENVIRONMENT = production;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = NotifyGuru/NotifyGuru.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuru/Info.plist;
+				MARKETING_VERSION = 2026.8.0;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		G00000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NotifyGuru.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NotifyGuru";
+			};
+			name = Debug;
+		};
+		G00000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NotifyGuru.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NotifyGuru";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F00000000000000000000001 /* Build configuration list for PBXProject "NotifyGuru" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G00000000000000000000001 /* Debug */,
+				G00000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F00000000000000000000002 /* Build configuration list for PBXNativeTarget "NotifyGuru" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G00000000000000000000003 /* Debug */,
+				G00000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F00000000000000000000003 /* Build configuration list for PBXNativeTarget "NotifyGuruTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G00000000000000000000005 /* Debug */,
+				G00000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000001 /* Project object */;
+}

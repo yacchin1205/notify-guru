@@ -1,4 +1,4 @@
-import { env, reset, runDurableObjectAlarm, SELF } from "cloudflare:test";
+import { env, reset, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 afterEach(reset);
@@ -108,6 +108,33 @@ describe("session relay", () => {
     expect(groupResponse.json.error).toBe("invalid_group_token");
   });
 
+  it("registers an APNs token only for its exact device-group capability", async () => {
+    const fixture = await createJoinedSession();
+    const registered = await api(`/api/sessions/${fixture.sessionId}/push`, {
+      method: "PUT",
+      token: fixture.groupToken,
+      body: {
+        groupId: fixture.groupId,
+        deviceToken: "aabbccdd",
+        environment: "sandbox",
+      },
+    });
+    expect(registered.status).toBe(200);
+    expect(registered.json).toEqual({ registered: true, expiresAt: expect.any(Number) });
+
+    const rejected = await api(`/api/sessions/${fixture.sessionId}/push`, {
+      method: "PUT",
+      token: "wrong-token",
+      body: {
+        groupId: fixture.groupId,
+        deviceToken: "aabbccdd",
+        environment: "sandbox",
+      },
+    });
+    expect(rejected.status).toBe(401);
+    expect(rejected.json.error).toBe("invalid_group_token");
+  });
+
   it("consumes each pairing exactly once", async () => {
     const fixture = await createJoinedSession();
     const response = await join(fixture);
@@ -118,6 +145,9 @@ describe("session relay", () => {
   it("deallocates all session storage when its alarm fires", async () => {
     const fixture = await createJoinedSession();
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(fixture.sessionId));
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE meta SET expires_at = 0 WHERE singleton = 1");
+    });
     expect(await runDurableObjectAlarm(stub)).toBe(true);
 
     const response = await api(`/api/sessions/${fixture.sessionId}/responses?after=0`, {

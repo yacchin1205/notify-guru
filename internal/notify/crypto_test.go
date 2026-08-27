@@ -70,6 +70,37 @@ func TestPairingProofAuthentication(t *testing.T) {
 	}
 }
 
+func TestProtocolVector(t *testing.T) {
+	first, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{3}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{4}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := encode(first.PublicKey().Bytes()); got != "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J_CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK-ZN70om_s0mPdmKkngPA" {
+		t.Fatalf("first public key = %q", got)
+	}
+	key, err := deriveKey(first, encode(second.PublicKey().Bytes()), "session-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := encode(key); got != "uaEVrcIWs4cNzciEiU3iqSyYpjF_bNrUm3lu4YXRUZA" {
+		t.Fatalf("derived key = %q", got)
+	}
+	aead, err := newAEAD(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes.Repeat([]byte{5}, aead.NonceSize())
+	plaintext := []byte(`{"id":"event","type":"notify","sessionTitle":"Build","message":"Done","createdAt":"2026-08-27T00:00:00Z"}`)
+	ciphertext := aead.Seal(nil, nonce, plaintext, []byte("notify.guru/v1/event/session-id/first/event-id"))
+	if got := encode(ciphertext); got != "OzZ_nSEMbRHBMJSlsDuAdnPzTFnot1-_kPLLyMolGCimmFQOP7y_PuDnxwK9X8DJj7pXPloDhoOVERbJEDqzoHkfmTMz6bX-_iXgBlJunarXseLIdfEUXc-DxfapQgI_Io4_SYhuu7RqGovKQ8uPpFn6XtONGgxPCQ" {
+		t.Fatalf("event ciphertext = %q", got)
+	}
+}
+
 func TestDecodeJSONRejectsProtocolDrift(t *testing.T) {
 	tests := []string{
 		`{"id":"response","requestId":"request","optionId":"option","createdAt":"2026-08-27T00:00:00Z","unknown":true}`,

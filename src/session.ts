@@ -12,9 +12,16 @@ import {
   sha256Hex,
   stringField,
 } from "./http";
+import { APNsClient, type APNsEnvironment } from "./apns";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
+
+interface SessionEnv {
+  APNS_KEY_ID?: string;
+  APNS_TEAM_ID?: string;
+  APNS_PRIVATE_KEY?: string;
+}
 
 interface MetaRow extends Record<string, SqlStorageValue> {
   manager_hash: string;
@@ -49,8 +56,32 @@ interface ResponseRow extends Record<string, SqlStorageValue> {
   created_at: number;
 }
 
+interface PushJobRow extends Record<string, SqlStorageValue> {
+  event_id: string;
+  group_id: string;
+  device_token: string;
+  environment: APNsEnvironment;
+}
+
 export class Session {
-  constructor(private readonly state: DurableObjectState) {}
+  private readonly apns: APNsClient;
+
+  constructor(
+    private readonly state: DurableObjectState,
+    env: SessionEnv,
+  ) {
+    this.apns = new APNsClient({
+      keyId: env.APNS_KEY_ID,
+      teamId: env.APNS_TEAM_ID,
+      privateKey: env.APNS_PRIVATE_KEY,
+      topic: "guru.notify.app",
+    });
+    this.state.blockConcurrencyWhile(async () => {
+      if ((await this.state.storage.get<boolean>(INITIALIZED_KEY)) === true) {
+        this.createSchema();
+      }
+    });
+  }
 
   async fetch(request: Request): Promise<Response> {
     try {
@@ -64,7 +95,62 @@ export class Session {
   }
 
   async alarm(): Promise<void> {
-    await this.state.storage.deleteAll();
+    const initialized = await this.state.storage.get<boolean>(INITIALIZED_KEY);
+    if (initialized !== true) {
+      return;
+    }
+    const initialMeta = Array.from(
+      this.state.storage.sql.exec<{ expires_at: number }>("SELECT expires_at FROM meta WHERE singleton = 1"),
+    );
+    if (initialMeta.length !== 1) {
+      throw new Error("Initialized session must contain exactly one meta row");
+    }
+    if (Date.now() >= initialMeta[0].expires_at) {
+      await this.state.storage.deleteAll();
+      return;
+    }
+    const jobs = Array.from(
+      this.state.storage.sql.exec<PushJobRow>(
+        "SELECT event_id, group_id, device_token, environment FROM push_jobs ORDER BY event_id LIMIT 100",
+      ),
+    );
+    if (jobs.length === 0) {
+      await this.scheduleExpiry(initialMeta[0].expires_at);
+      return;
+    }
+    await this.schedulePush(Date.now() + 60_000);
+    for (const job of jobs) {
+      const result = await this.apns.send(job.device_token, job.environment);
+      this.state.storage.transactionSync(() => {
+        this.state.storage.sql.exec(
+          "DELETE FROM push_jobs WHERE event_id = ? AND device_token = ?",
+          job.event_id,
+          job.device_token,
+        );
+        if (result === "invalid-token") {
+          this.state.storage.sql.exec(
+            "DELETE FROM push_tokens WHERE group_id = ? AND device_token = ?",
+            job.group_id,
+            job.device_token,
+          );
+          this.state.storage.sql.exec("DELETE FROM push_jobs WHERE device_token = ?", job.device_token);
+        }
+      });
+    }
+
+    const rows = Array.from(
+      this.state.storage.sql.exec<{ expires_at: number }>("SELECT expires_at FROM meta WHERE singleton = 1"),
+    );
+    if (rows.length !== 1) {
+      throw new Error("Initialized session must contain exactly one meta row");
+    }
+    await this.scheduleExpiry(rows[0].expires_at);
+    const remaining = Array.from(
+      this.state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM push_jobs"),
+    );
+    if (remaining[0].count > 0) {
+      await this.schedulePush(Date.now());
+    }
   }
 
   private async route(request: Request): Promise<Response> {
@@ -93,6 +179,9 @@ export class Session {
     }
     if (request.method === "GET" && url.pathname === "/events") {
       return this.events(request, url, meta);
+    }
+    if (request.method === "PUT" && url.pathname === "/push") {
+      return this.registerPush(request, meta);
     }
     if (request.method === "POST" && url.pathname === "/responses") {
       return this.addResponse(request, meta);
@@ -137,7 +226,7 @@ export class Session {
       now,
     );
     await this.state.storage.put(INITIALIZED_KEY, true);
-    await this.state.storage.setAlarm(expiresAt);
+    await this.scheduleExpiry(expiresAt);
     return json({ expiresAt }, 201);
   }
 
@@ -233,9 +322,50 @@ export class Session {
         now,
       );
       this.state.storage.sql.exec("UPDATE meta SET expires_at = ? WHERE singleton = 1", expiresAt);
+      this.state.storage.sql.exec(
+        `INSERT INTO push_jobs (event_id, group_id, device_token, environment)
+         SELECT ?, group_id, device_token, environment FROM push_tokens WHERE group_id = ?`,
+        eventId,
+        groupId,
+      );
     });
-    await this.state.storage.setAlarm(expiresAt);
+    const jobs = Array.from(
+      this.state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM push_jobs WHERE event_id = ?",
+        eventId,
+      ),
+    );
+    if (jobs[0].count > 0) {
+      await this.schedulePush(Date.now());
+    } else {
+      await this.scheduleExpiry(expiresAt);
+    }
     return json({ expiresAt }, 201);
+  }
+
+  private async registerPush(request: Request, meta: MetaRow): Promise<Response> {
+    const body = await readObject(request);
+    expectKeys(body, ["groupId", "deviceToken", "environment"]);
+    const groupId = stringField(body, "groupId", IDENTIFIER, 64);
+    const deviceToken = stringField(body, "deviceToken", /^[a-f0-9]+$/, 512);
+    if (deviceToken.length % 2 !== 0) {
+      throw new HttpError(400, "invalid_field", "Invalid field: deviceToken");
+    }
+    const environment = stringField(body, "environment", /^(sandbox|production)$/, 10) as APNsEnvironment;
+    await this.requireGroupAccess(request, groupId);
+    this.state.storage.sql.exec(
+      `INSERT INTO push_tokens (group_id, device_token, environment, registered_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET
+         device_token = excluded.device_token,
+         environment = excluded.environment,
+         registered_at = excluded.registered_at`,
+      groupId,
+      deviceToken,
+      environment,
+      Date.now(),
+    );
+    return json({ registered: true, expiresAt: meta.expires_at });
   }
 
   private async events(request: Request, url: URL, meta: MetaRow): Promise<Response> {
@@ -397,6 +527,27 @@ export class Session {
         ciphertext TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        group_id TEXT PRIMARY KEY REFERENCES groups(id),
+        device_token TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK (environment IN ('sandbox', 'production')),
+        registered_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS push_jobs (
+        event_id TEXT NOT NULL REFERENCES events(event_id),
+        group_id TEXT NOT NULL REFERENCES groups(id),
+        device_token TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK (environment IN ('sandbox', 'production')),
+        PRIMARY KEY (event_id, device_token)
+      );
     `);
+  }
+
+  private async scheduleExpiry(expiresAt: number): Promise<void> {
+    await this.state.storage.setAlarm(expiresAt);
+  }
+
+  private async schedulePush(at: number): Promise<void> {
+    await this.state.storage.setAlarm(at);
   }
 }
