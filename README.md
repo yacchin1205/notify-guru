@@ -26,7 +26,7 @@ Start a session:
 notifyg --title "Deployment"
 ```
 
-The CLI prints a QR code and its pairing URL. Open notify.guru on the receiving device, scan the QR code, then enter `join` in the CLI to refresh the joined devices.
+The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, scan it with the receiving device, then enter `join` in the CLI to refresh the joined devices.
 
 Available commands:
 
@@ -42,6 +42,7 @@ quit
 ```
 
 - `pair` creates another one-shot QR code for an additional browser.
+- Each local QR image remains available for 10 minutes or until `notifyg` exits. It is held only in process memory, and the response prevents browser caching.
 - `responses` retrieves every response without selecting or aggregating them.
 - `close` immediately deletes the session and removes its card from connected browsers.
 - `quit` only exits the CLI. The session remains until its normal expiry, but its creator keys are lost with the process.
@@ -73,11 +74,14 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a browser, send notifications and status updates, ask multiple-choice questions, receive responses, and close sessions. One MCP process can manage multiple independent notification sessions.
+The server exposes tools to create and pair sessions, wait for a browser, send notifications and status updates, ask multiple-choice questions, receive responses, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
+
+The image URL is reachable only from the same machine as the `notifyg` process. When MCP runs in a container, on a remote host, or across SSH without port forwarding, use the terminal QR code or pairing URL instead.
 
 ## Security notes
 
 - Treat an unused pairing QR code or URL as a temporary secret.
+- Local QR images use an opaque, independently generated loopback URL. The URL contains no pairing data and expires after 10 minutes, but anyone who can view the image can use the underlying one-shot pairing secret.
 - Session management keys exist only in the CLI process memory and are not recoverable.
 - The relay can observe metadata such as timestamps, identifiers, and ciphertext sizes.
 - Compromise of the served web application, the browser profile, or the CLI process is outside the end-to-end encryption guarantee.

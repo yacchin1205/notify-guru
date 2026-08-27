@@ -49,6 +49,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	created := callTool[pairingToolOutput](t, ctx, clientSession, "session_create", map[string]any{
 		"title": "MCP integration",
 	})
+	assertQRImage(t, created.QRImageURL)
 	joined := joinFromPairingURL(t, ctx, api, created.PairingURL)
 
 	waited := callTool[waitDeviceToolOutput](t, ctx, clientSession, "session_wait_for_device", map[string]any{
@@ -64,6 +65,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if additionalPairing.PairingURL == created.PairingURL {
 		t.Fatal("additional pairing reused the initial one-shot URL")
 	}
+	assertQRImage(t, additionalPairing.QRImageURL)
 	secondGroup := joinFromPairingURL(t, ctx, api, additionalPairing.PairingURL)
 	waited = callTool[waitDeviceToolOutput](t, ctx, clientSession, "session_wait_for_device", map[string]any{
 		"session_id": created.SessionID, "timeout_seconds": 5,
@@ -143,6 +145,26 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	}
 }
 
+func assertQRImage(t *testing.T, imageURL string) {
+	t.Helper()
+	parsed, err := url.Parse(imageURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" {
+		t.Fatalf("QR image URL = %q, want an HTTP IPv4 loopback URL", imageURL)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Get(imageURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" {
+		t.Fatalf("QR image response status = %d, Content-Type = %q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+}
+
 func postEncryptedResponse(
 	t *testing.T,
 	ctx context.Context,
@@ -193,6 +215,7 @@ type pairingToolOutput struct {
 	SessionID  string `json:"session_id"`
 	PairingURL string `json:"pairing_url"`
 	QRCode     string `json:"qr_code"`
+	QRImageURL string `json:"qr_image_url"`
 }
 
 type waitDeviceToolOutput struct {

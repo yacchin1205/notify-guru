@@ -10,14 +10,15 @@ import (
 	"notify.guru/internal/notify"
 )
 
-const instructions = "Create a notify.guru session for each agent task the user wants to follow. Show the returned QR code or pairing URL, then wait for a device before sending events. Send status and notifications as work changes. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
+const instructions = "Create a notify.guru session for each agent task the user wants to follow. Show the returned local QR image URL when the browser runs on the same machine as notifyg; otherwise show the terminal QR code or pairing URL. Then wait for a device before sending events. Send status and notifications as work changes. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
 
 type Server struct {
-	store *notify.Store
+	store  *notify.Store
+	viewer *notify.QRViewer
 }
 
-func New(store *notify.Store) *Server {
-	return &Server{store: store}
+func New(store *notify.Store, viewer *notify.QRViewer) *Server {
+	return &Server{store: store, viewer: viewer}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -73,6 +74,7 @@ type pairingOutput struct {
 	SessionID  string `json:"session_id"`
 	PairingURL string `json:"pairing_url"`
 	QRCode     string `json:"qr_code"`
+	QRImageURL string `json:"qr_image_url"`
 }
 
 func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input createInput) (*mcp.CallToolResult, pairingOutput, error) {
@@ -84,7 +86,11 @@ func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input creat
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	return nil, pairingOutput{SessionID: sessionID, PairingURL: pairingURL, QRCode: qr}, nil
+	imageURL, err := s.viewer.Publish(pairingURL)
+	if err != nil {
+		return nil, pairingOutput{}, err
+	}
+	return nil, pairingOutput{SessionID: sessionID, PairingURL: pairingURL, QRCode: qr, QRImageURL: imageURL}, nil
 }
 
 type sessionInput struct {
@@ -100,7 +106,11 @@ func (s *Server) addPairing(ctx context.Context, _ *mcp.CallToolRequest, input s
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	return nil, pairingOutput{SessionID: input.SessionID, PairingURL: pairingURL, QRCode: qr}, nil
+	imageURL, err := s.viewer.Publish(pairingURL)
+	if err != nil {
+		return nil, pairingOutput{}, err
+	}
+	return nil, pairingOutput{SessionID: input.SessionID, PairingURL: pairingURL, QRCode: qr, QRImageURL: imageURL}, nil
 }
 
 type waitInput struct {

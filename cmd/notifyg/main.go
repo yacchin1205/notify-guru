@@ -23,7 +23,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	flags := flag.NewFlagSet("notifyg", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	baseURL := flags.String("base-url", "https://notify.guru", "notify.guru service URL")
@@ -42,21 +42,51 @@ func run() error {
 	store := notify.NewStore(api)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if flags.NArg() == 1 {
-		if flags.Arg(0) != "mcp" {
-			return fmt.Errorf("unknown mode %q", flags.Arg(0))
-		}
-		err := mcpserver.New(store).Run(ctx)
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
+	viewer, err := notify.NewQRViewer()
+	if err != nil {
 		return err
 	}
-	return interactive(ctx, store, *title, os.Stdin, os.Stdout, os.Stderr)
+	defer func() {
+		runErr = errors.Join(runErr, viewer.Close())
+	}()
+
+	operation := func(ctx context.Context) error {
+		if flags.NArg() == 1 {
+			if flags.Arg(0) != "mcp" {
+				return fmt.Errorf("unknown mode %q", flags.Arg(0))
+			}
+			return mcpserver.New(store, viewer).Run(ctx)
+		}
+		return interactive(ctx, store, viewer, *title, os.Stdin, os.Stdout, os.Stderr)
+	}
+	err = supervise(ctx, viewer, operation)
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
-func interactive(ctx context.Context, store *notify.Store, title string, input io.Reader, output, errorOutput io.Writer) error {
+func supervise(ctx context.Context, viewer *notify.QRViewer, operation func(context.Context) error) error {
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- operation(operationCtx)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-viewer.Done():
+		if err := viewer.Wait(); err != nil {
+			return err
+		}
+		return fmt.Errorf("QR code viewer stopped unexpectedly")
+	}
+}
+
+func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, title string, input io.Reader, output, errorOutput io.Writer) error {
 	sessionID, pairingURL, err := store.Create(ctx, title)
 	if err != nil {
 		return err
@@ -65,7 +95,11 @@ func interactive(ctx context.Context, store *notify.Store, title string, input i
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Session: %s\n%s\n%s\n", sessionID, qr, pairingURL)
+	imageURL, err := viewer.Publish(pairingURL)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "Session: %s\n%s\n%s\nQR image: %s\n", sessionID, qr, pairingURL, imageURL)
 	fmt.Fprintln(output, "Commands: join, pair, notify TEXT, status TEXT, request PROMPT | OPTION | OPTION, responses, close, quit")
 
 	scanner := bufio.NewScanner(input)
@@ -96,10 +130,13 @@ func interactive(ctx context.Context, store *notify.Store, title string, input i
 			}
 			qr, err := notify.QRCode(url)
 			if err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
+				return err
 			}
-			fmt.Fprintf(output, "%s\n%s\n", qr, url)
+			imageURL, err := viewer.Publish(url)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(output, "%s\n%s\nQR image: %s\n", qr, url, imageURL)
 		case "notify":
 			if err := store.SendNotify(ctx, sessionID, argument); err != nil {
 				fmt.Fprintln(errorOutput, err)
