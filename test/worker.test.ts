@@ -82,6 +82,20 @@ describe("session relay", () => {
     const secure = await SELF.fetch("https://notify.guru/api/health");
     expect(secure.headers.get("strict-transport-security")).toBe("max-age=15552000");
   });
+
+  it("associates only QR link paths with the iOS app", async () => {
+    const response = await SELF.fetch("https://notify.guru/.well-known/apple-app-site-association");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({
+      applinks: {
+        details: [{
+          appIDs: ["TDW896YLJ7.guru.notify.app"],
+          components: [{ "/": "/join" }, { "/": "/device" }],
+        }],
+      },
+    });
+  });
 });
 
 async function createSession(): Promise<{ id: string; managerToken: string }> {

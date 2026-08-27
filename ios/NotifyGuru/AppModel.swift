@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     private var vault: Vault?
     private var groupState: DeviceGroupStateResult?
     private var pendingDeviceRequest: DeviceRequestRecord?
+    private var pendingUniversalLink: URL?
+    private var hasFinishedStarting = false
     private var isSyncing = false
 
     var isAwaitingDeviceApproval: Bool { pendingDeviceRequest != nil }
@@ -49,6 +51,8 @@ final class AppModel: ObservableObject {
             isReady = true
             await sync()
             await PushCoordinator.shared.resumeIfAuthorized()
+            hasFinishedStarting = true
+            await openPendingUniversalLink()
         } catch KeychainError.unsupportedVersion {
             failStartup(
                 "The saved notify.guru data on this device can no longer be opened. Erase it to set up this device again; saved sessions will be removed.",
@@ -80,6 +84,14 @@ final class AppModel: ObservableObject {
             await sync()
             return true
         } catch { show(error); return false }
+    }
+
+    func openUniversalLink(_ url: URL) async {
+        guard !hasFinishedStarting else {
+            _ = await join(link: url.absoluteString)
+            return
+        }
+        pendingUniversalLink = url
     }
 
     func createDeviceRequest(discardingCurrentState: Bool = false) async {
@@ -162,6 +174,12 @@ final class AppModel: ObservableObject {
     func dismissError() { errorMessage = nil }
     func dismissNotice() { noticeMessage = nil }
 
+    private func openPendingUniversalLink() async {
+        guard let url = pendingUniversalLink else { return }
+        pendingUniversalLink = nil
+        _ = await join(link: url.absoluteString)
+    }
+
     func resetLocalData() async {
         guard canResetLocalData else { return }
         do {
@@ -174,6 +192,7 @@ final class AppModel: ObservableObject {
             startupErrorMessage = nil
             canResetLocalData = false
             connectionState = .preparing
+            hasFinishedStarting = false
             await start()
         } catch {
             failStartup(error.localizedDescription, canReset: true)
@@ -423,6 +442,7 @@ final class AppModel: ObservableObject {
     }
 
     private func failStartup(_ message: String, canReset: Bool) {
+        hasFinishedStarting = false
         startupErrorMessage = message
         canResetLocalData = canReset
         connectionState = .failed

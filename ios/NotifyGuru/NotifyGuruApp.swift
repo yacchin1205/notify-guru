@@ -9,6 +9,9 @@ struct NotifyGuruApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .onOpenURL { url in
+                    Task { await model.openUniversalLink(url) }
+                }
         }
     }
 }

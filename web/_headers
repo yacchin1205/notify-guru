@@ -5,3 +5,6 @@
   Strict-Transport-Security: max-age=15552000
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
+
+/.well-known/apple-app-site-association
+  Content-Type: application/json

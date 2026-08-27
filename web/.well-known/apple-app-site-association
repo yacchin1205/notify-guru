@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "TDW896YLJ7.guru.notify.app"
+        ],
+        "components": [
+          {
+            "/": "/join"
+          },
+          {
+            "/": "/device"
+          }
+        ]
+      }
+    ]
+  }
+}

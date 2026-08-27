@@ -8,6 +8,7 @@ const source = join(root, "web");
 const output = join(root, ".web-dist");
 const staticFiles = [
   "_headers",
+  ".well-known/apple-app-site-association",
   "icon-192.png",
   "icon-512.png",
   "icon.svg",
@@ -21,7 +22,11 @@ const staticFiles = [
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output);
-await Promise.all(staticFiles.map((name) => copyFile(join(source, name), join(output, name))));
+await Promise.all(staticFiles.map(async (name) => {
+  const destination = join(output, name);
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(join(source, name), destination);
+}));
 await build({
   entryPoints: [join(source, "app.js")],
   bundle: true,
