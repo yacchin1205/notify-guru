@@ -1,0 +1,7 @@
+/*
+  Cache-Control: no-cache
+  Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  Strict-Transport-Security: max-age=15552000
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY

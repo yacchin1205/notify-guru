@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "notify-guru",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-26",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "routes": [
+    {
+      "pattern": "notify.guru",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "Session"
+      }
+    ]
+  },
+  "exports": {
+    "Session": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
