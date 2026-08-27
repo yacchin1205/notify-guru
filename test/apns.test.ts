@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { APNsClient, APNsTransportError } from "../src/apns";
 
 describe("APNs client", () => {
-  it("sends only a generic alert with token authentication", async () => {
+  it("sends a generic alert with the default notification sound", async () => {
     const privateKey = await signingKey();
     let receivedURL = "";
     let receivedInit: RequestInit | undefined;
@@ -21,7 +21,7 @@ describe("APNs client", () => {
       transport,
     );
 
-    await expect(client.send("aabbccdd", "sandbox")).resolves.toEqual({ outcome: "delivered" });
+    await expect(client.send("aabbccdd", "sandbox", "notify")).resolves.toEqual({ outcome: "delivered" });
     expect(receivedURL).toBe("https://api.sandbox.push.apple.com/3/device/aabbccdd");
     expect(receivedInit?.headers).toMatchObject({
       "apns-push-type": "alert",
@@ -29,11 +29,26 @@ describe("APNs client", () => {
       "apns-topic": "guru.notify.app",
     });
     expect(JSON.parse(String(receivedInit?.body))).toEqual({
-      aps: { alert: "A new notification is available." },
+      aps: { alert: "A new notification is available.", sound: "default" },
     });
     const authorization = (receivedInit?.headers as Record<string, string>).authorization;
     expect(authorization.startsWith("bearer ")).toBe(true);
     expect(authorization.slice(7).split(".")).toHaveLength(3);
+  });
+
+  it("asks for a response without exposing the encrypted prompt", async () => {
+    const privateKey = await signingKey();
+    let body: unknown;
+    const client = new APNsClient(
+      { keyId: "REQUEST001", teamId: "REQUEST002", privateKey, topic: "guru.notify.app" },
+      (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body));
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    );
+
+    await client.send("aabb", "sandbox", "request");
+    expect(body).toEqual({ aps: { alert: "Your input is requested.", sound: "default" } });
   });
 
   it("reuses one provider token across APNs clients in the same Worker isolate", async () => {
@@ -51,8 +66,8 @@ describe("APNs client", () => {
     };
 
     await Promise.all([
-      new APNsClient(config, transport).send("aabb", "sandbox"),
-      new APNsClient(config, transport).send("ccdd", "sandbox"),
+      new APNsClient(config, transport).send("aabb", "sandbox", "notify"),
+      new APNsClient(config, transport).send("ccdd", "sandbox", "request"),
     ]);
 
     expect(authorizations).toHaveLength(2);
@@ -74,11 +89,11 @@ describe("APNs client", () => {
         transport,
       );
 
-      await client.send("aabb", "sandbox");
+      await client.send("aabb", "sandbox", "notify");
       vi.setSystemTime(new Date("2026-08-27T00:49:00Z"));
-      await client.send("aabb", "sandbox");
+      await client.send("aabb", "sandbox", "notify");
       vi.setSystemTime(new Date("2026-08-27T00:51:00Z"));
-      await client.send("aabb", "sandbox");
+      await client.send("aabb", "sandbox", "notify");
 
       expect(authorizations[0]).toBe(authorizations[1]);
       expect(authorizations[2]).not.toBe(authorizations[1]);
@@ -102,15 +117,15 @@ describe("APNs client", () => {
       (async () => Response.json({ reason: "ServiceUnavailable" }, { status: 503 })) as typeof fetch,
     );
 
-    await expect(invalid.send("aabb", "production")).resolves.toEqual({
+    await expect(invalid.send("aabb", "production", "notify")).resolves.toEqual({
       outcome: "invalid-token",
       reason: "Unregistered",
     });
-    await expect(providerFailure.send("aabb", "production")).resolves.toEqual({
+    await expect(providerFailure.send("aabb", "production", "notify")).resolves.toEqual({
       outcome: "permanent-failure",
       reason: "BadTopic",
     });
-    await expect(retryable.send("aabb", "production")).resolves.toEqual({
+    await expect(retryable.send("aabb", "production", "request")).resolves.toEqual({
       outcome: "retry",
       reason: "ServiceUnavailable",
       minimumDelayMs: 15 * 60 * 1000,
@@ -123,12 +138,12 @@ describe("APNs client", () => {
       { keyId: "NETWORK001", teamId: "NETWORK002", privateKey, topic: "guru.notify.app" },
       (async () => { throw new TypeError("network unavailable"); }) as typeof fetch,
     );
-    await expect(transportFailure.send("aabb", "production")).rejects.toBeInstanceOf(APNsTransportError);
+    await expect(transportFailure.send("aabb", "production", "notify")).rejects.toBeInstanceOf(APNsTransportError);
 
     const invalidConfiguration = new APNsClient(
       { keyId: "invalid", teamId: "NETWORK002", privateKey, topic: "guru.notify.app" },
     );
-    await expect(invalidConfiguration.send("aabb", "production")).rejects.toThrow(
+    await expect(invalidConfiguration.send("aabb", "production", "notify")).rejects.toThrow(
       "APNS_KEY_ID must be a 10-character uppercase identifier",
     );
   });

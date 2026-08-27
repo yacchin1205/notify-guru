@@ -6,6 +6,7 @@ struct PairingLink: Equatable {
     let pairingToken: String
     let authSecret: String
     let creatorPublicKey: String
+    let color: String
 
     init(_ value: String) throws {
         guard let components = URLComponents(string: value),
@@ -20,7 +21,7 @@ struct PairingLink: Equatable {
               let items = fragmentComponents.queryItems else {
             throw ProtocolError.invalidPairingLink("fragment is not a query string")
         }
-        let expected = Set(["v", "s", "p", "t", "a", "k"])
+        let expected = Set(["v", "s", "p", "t", "a", "k", "c"])
         guard items.count == expected.count, Set(items.map(\.name)) == expected else {
             throw ProtocolError.invalidPairingLink("fragment fields do not match protocol version 3")
         }
@@ -50,11 +51,16 @@ struct PairingLink: Equatable {
         guard try Base64URL.decode(creatorPublicKey).count == 65 else {
             throw ProtocolError.invalidPairingLink("creator public key must be an uncompressed P-256 key")
         }
+        let color = fields["c"]!
+        guard color.range(of: #"^[0-9a-fA-F]{6}$"#, options: .regularExpression) != nil else {
+            throw ProtocolError.invalidPairingLink("session color must contain six hexadecimal digits")
+        }
         self.sessionID = sessionID
         self.pairingID = pairingID
         self.pairingToken = pairingToken
         self.authSecret = authSecret
         self.creatorPublicKey = creatorPublicKey
+        self.color = "#\(color.lowercased())"
     }
 
     static func requireIdentifier(_ value: String, name: String) throws {

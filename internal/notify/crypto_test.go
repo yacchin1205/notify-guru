@@ -52,7 +52,7 @@ func TestECDHEncryptionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := decryptedResponse{ID: "response-id", RequestID: "request-id", OptionID: "option-id"}
+	want := decryptedResponse{ID: "response-id", Type: "response", RequestID: "request-id", OptionID: "option-id"}
 	nonce, ciphertext, err := encryptJSON(creatorKey, "authenticated-context", want)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestECDHEncryptionRoundTrip(t *testing.T) {
 	if err := decryptJSON(deviceGroupKey, "authenticated-context", nonce, ciphertext, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != want.ID || got.RequestID != want.RequestID || got.OptionID != want.OptionID {
+	if got.ID != want.ID || got.Type != want.Type || got.RequestID != want.RequestID || got.OptionID != want.OptionID {
 		t.Fatalf("decrypted response = %+v", got)
 	}
 	if err := decryptJSON(deviceGroupKey, "different-context", nonce, ciphertext, &got); err == nil {

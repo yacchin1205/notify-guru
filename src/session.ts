@@ -16,7 +16,7 @@ import {
   sha256Hex,
   stringField,
 } from "./http";
-import { APNsClient, APNsTransportError, type APNsEnvironment } from "./apns";
+import { APNsClient, APNsTransportError, type APNsAlertKind, type APNsEnvironment } from "./apns";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
@@ -24,6 +24,7 @@ const MAX_PUSH_ATTEMPTS = 8;
 const PUSH_RETRY_BASE_MS = 30_000;
 const PUSH_RETRY_CAP_MS = 30 * 60 * 1000;
 const PUSH_ALARM_FALLBACK_MS = 15 * 60 * 1000;
+const NOTIFICATION_KIND = /^(none|notify|request)$/;
 
 interface SessionEnv {
   GROUPS: DurableObjectNamespace<DeviceGroup>;
@@ -75,6 +76,7 @@ interface PushJobRow extends Record<string, SqlStorageValue> {
   device_id: string;
   attempt_count: number;
   next_attempt_at: number;
+  notification_kind: APNsAlertKind;
 }
 
 export class Session extends DurableObject<SessionEnv> {
@@ -123,7 +125,7 @@ export class Session extends DurableObject<SessionEnv> {
     const now = Date.now();
     await this.state.storage.setAlarm(Math.min(meta.expires_at, now + PUSH_ALARM_FALLBACK_MS));
     const jobs = Array.from(this.state.storage.sql.exec<PushJobRow>(
-      `SELECT event_id, device_id, attempt_count, next_attempt_at
+      `SELECT event_id, device_id, attempt_count, next_attempt_at, notification_kind
        FROM push_jobs_v3 WHERE next_attempt_at <= ?
        ORDER BY next_attempt_at, event_id LIMIT 100`,
       now,
@@ -141,7 +143,7 @@ export class Session extends DurableObject<SessionEnv> {
         continue;
       }
       try {
-        const result = await this.apns.send(target.token, target.environment);
+        const result = await this.apns.send(target.token, target.environment, job.notification_kind);
         switch (result.outcome) {
           case "delivered":
             this.deletePushJob(job);
@@ -319,12 +321,13 @@ export class Session extends DurableObject<SessionEnv> {
 
   private async addEvent(request: Request, meta: MetaRow): Promise<Response> {
     const body = await readObject(request);
-    expectKeys(body, ["eventId", "groupId", "keyTimestamp", "nonce", "ciphertext"]);
+    expectKeys(body, ["eventId", "groupId", "keyTimestamp", "nonce", "ciphertext", "notificationKind"]);
     const eventId = stringField(body, "eventId", IDENTIFIER, 64);
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
     const keyTimestamp = integerField(body, "keyTimestamp");
     const nonce = stringField(body, "nonce", BASE64URL, 32);
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
+    const notificationKind = stringField(body, "notificationKind", NOTIFICATION_KIND, 16);
     this.requireGroup(groupId);
     const recipients = await this.groupKeyRecipients(groupId, keyTimestamp);
     const now = Date.now();
@@ -348,17 +351,20 @@ export class Session extends DurableObject<SessionEnv> {
           eventId,
           deviceId,
         );
-        this.state.storage.sql.exec(
-          `INSERT INTO push_jobs_v3 (event_id, device_id, attempt_count, next_attempt_at)
-           VALUES (?, ?, 0, ?)`,
-          eventId,
-          deviceId,
-          now,
-        );
+        if (notificationKind !== "none") {
+          this.state.storage.sql.exec(
+            `INSERT INTO push_jobs_v3 (event_id, device_id, attempt_count, next_attempt_at, notification_kind)
+             VALUES (?, ?, 0, ?, ?)`,
+            eventId,
+            deviceId,
+            now,
+            notificationKind,
+          );
+        }
       }
       this.state.storage.sql.exec("UPDATE meta SET expires_at = ? WHERE singleton = 1", expiresAt);
     });
-    await this.state.storage.setAlarm(recipients.length === 0 ? expiresAt : now);
+    await this.scheduleNextAlarm(expiresAt);
     return json({ expiresAt }, 201);
   }
 
@@ -588,11 +594,16 @@ export class Session extends DurableObject<SessionEnv> {
         device_id TEXT NOT NULL,
         attempt_count INTEGER NOT NULL,
         next_attempt_at INTEGER NOT NULL,
+        notification_kind TEXT NOT NULL DEFAULT 'notify',
         PRIMARY KEY (event_id, device_id)
       );
       CREATE INDEX IF NOT EXISTS push_jobs_v3_due
         ON push_jobs_v3(next_attempt_at, event_id);
     `);
+    const pushColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(push_jobs_v3)"));
+    if (!pushColumns.some((column) => column.name === "notification_kind")) {
+      this.state.storage.sql.exec("ALTER TABLE push_jobs_v3 ADD COLUMN notification_kind TEXT NOT NULL DEFAULT 'notify'");
+    }
   }
 
   private deletePushJob(job: PushJobRow): void {

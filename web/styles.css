@@ -158,8 +158,50 @@ body.managing-devices #empty {
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 1.15rem;
   background: rgba(15, 23, 42, 0.76);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--session-color, #cdeff2) 24%, #0f172a), rgba(15, 23, 42, 0.82));
   box-shadow: 0 1rem 4rem rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(1rem);
+}
+
+.feedback {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.feedback-toggle {
+  min-width: 2.75rem;
+  padding-inline: 0.75rem;
+}
+
+.feedback-form {
+  width: 100%;
+}
+
+.feedback-form label {
+  display: grid;
+  gap: 0.5rem;
+  color: #bae6fd;
+  font-size: 0.85rem;
+}
+
+.feedback-message {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 5rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 0.75rem;
+  background: rgba(15, 23, 42, 0.72);
+  color: #f8fafc;
+  font: inherit;
+  resize: vertical;
+}
+
+.feedback-actions {
+  display: flex;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
 }
 
 .card-head {

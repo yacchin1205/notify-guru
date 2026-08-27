@@ -184,6 +184,7 @@ func postEncryptedResponse(
 	}
 	responseBody := decryptedResponse{
 		ID:        responseID,
+		Type:      "response",
 		RequestID: requestID,
 		OptionID:  optionID,
 		CreatedAt: time.Now().UTC(),
@@ -285,7 +286,7 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if err != nil {
 		t.Fatalf("parse pairing fragment: %v", err)
 	}
-	if len(parameters) != 6 || parameters.Get("v") != "3" {
+	if len(parameters) != 7 || parameters.Get("v") != "3" {
 		t.Fatalf("unexpected pairing fragment: %q", pairingURL.Fragment)
 	}
 	sessionID := parameters.Get("s")
@@ -293,9 +294,10 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	pairingToken := parameters.Get("t")
 	authSecret := parameters.Get("a")
 	creatorPublicKey := parameters.Get("k")
+	color := parameters.Get("c")
 	for field, value := range map[string]string{
 		"session ID": sessionID, "pairing ID": pairingID, "pairing token": pairingToken,
-		"auth secret": authSecret, "creator public key": creatorPublicKey,
+		"auth secret": authSecret, "creator public key": creatorPublicKey, "color": color,
 	} {
 		if value == "" {
 			t.Fatalf("pairing URL is missing %s", field)

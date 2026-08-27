@@ -171,7 +171,18 @@ enum CryptoEngine {
 
     static func encryptResponse(session: SessionRecord, timestamp: Int64, responseID: String, requestID: String, optionID: String, createdAt: String) throws -> EncryptedPayload {
         guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("response key is unavailable") }
-        let response = ResponsePayload(id: responseID, requestID: requestID, optionID: optionID, createdAt: createdAt)
+        let response = ResponsePayload(id: responseID, type: "response", requestID: requestID, optionID: optionID, createdAt: createdAt)
+
+        return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
+    }
+
+    static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String, createdAt: String) throws -> EncryptedPayload {
+        guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("feedback key is unavailable") }
+        let response = FeedbackPayload(id: responseID, type: "feedback", message: message, createdAt: createdAt)
+        return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
+    }
+
+    private static func encryptResponsePayload<T: Encodable>(_ response: T, session: SessionRecord, timestamp: Int64, responseID: String, key: Data) throws -> EncryptedPayload {
         let aad = Data("notify.guru/v3/response/\(session.sessionID)/\(session.groupID)/\(timestamp)/\(responseID)".utf8)
         let nonceData = try randomData(count: 12)
         let sealed = try AES.GCM.seal(
@@ -212,14 +223,23 @@ struct EncryptedPayload: Equatable { let nonce: String; let ciphertext: String }
 
 private struct ResponsePayload: Encodable {
     let id: String
+    let type: String
     let requestID: String
     let optionID: String
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
         case id
+        case type
         case requestID = "requestId"
         case optionID = "optionId"
         case createdAt
     }
+}
+
+private struct FeedbackPayload: Encodable {
+    let id: String
+    let type: String
+    let message: String
+    let createdAt: String
 }

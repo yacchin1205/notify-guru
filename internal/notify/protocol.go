@@ -28,16 +28,20 @@ type Choice struct {
 
 type Response struct {
 	ID        string    `json:"id"`
-	RequestID string    `json:"requestId"`
-	OptionID  string    `json:"optionId"`
+	Type      string    `json:"type"`
+	RequestID string    `json:"requestId,omitempty"`
+	OptionID  string    `json:"optionId,omitempty"`
+	Message   string    `json:"message,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	GroupID   string    `json:"groupId"`
 }
 
 type decryptedResponse struct {
 	ID        string    `json:"id"`
-	RequestID string    `json:"requestId"`
-	OptionID  string    `json:"optionId"`
+	Type      string    `json:"type"`
+	RequestID string    `json:"requestId,omitempty"`
+	OptionID  string    `json:"optionId,omitempty"`
+	Message   string    `json:"message,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -50,6 +54,7 @@ type event struct {
 	RequestID    string    `json:"requestId,omitempty"`
 	Prompt       string    `json:"prompt,omitempty"`
 	Options      []Choice  `json:"options,omitempty"`
+	Color        string    `json:"color"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
 

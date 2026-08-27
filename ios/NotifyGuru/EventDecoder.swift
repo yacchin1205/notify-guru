@@ -8,21 +8,23 @@ enum EventDecoder {
         }
         switch type {
         case "notify":
-            try requireKeys(fields, ["id", "type", "sessionTitle", "message", "createdAt"])
+            try requireKeys(fields, ["id", "type", "sessionTitle", "message", "color", "createdAt"])
             try validateCommon(fields)
             return .notification(
                 title: try text(fields, "sessionTitle"),
-                message: try text(fields, "message")
+                message: try text(fields, "message"),
+                color: try color(fields)
             )
         case "status":
-            try requireKeys(fields, ["id", "type", "sessionTitle", "status", "createdAt"])
+            try requireKeys(fields, ["id", "type", "sessionTitle", "status", "color", "createdAt"])
             try validateCommon(fields)
             return .status(
                 title: try text(fields, "sessionTitle"),
-                value: try text(fields, "status")
+                value: try text(fields, "status"),
+                color: try color(fields)
             )
         case "request":
-            try requireKeys(fields, ["id", "type", "sessionTitle", "requestId", "prompt", "options", "createdAt"])
+            try requireKeys(fields, ["id", "type", "sessionTitle", "requestId", "prompt", "options", "color", "createdAt"])
             try validateCommon(fields)
             let requestID = try text(fields, "requestId")
             let prompt = try text(fields, "prompt")
@@ -35,8 +37,19 @@ enum EventDecoder {
             }
             return .request(
                 title: try text(fields, "sessionTitle"),
-                value: SessionRequest(id: requestID, prompt: prompt, options: options)
+                value: SessionRequest(id: requestID, prompt: prompt, options: options),
+                color: try color(fields)
             )
+        case "close_request":
+            try requireKeys(fields, ["id", "type", "sessionTitle", "requestId", "color", "createdAt"])
+            try validateCommon(fields)
+            return .closeRequest(
+                title: try text(fields, "sessionTitle"), requestID: try text(fields, "requestId"), color: try color(fields)
+            )
+        case "color":
+            try requireKeys(fields, ["id", "type", "sessionTitle", "color", "createdAt"])
+            try validateCommon(fields)
+            return .color(title: try text(fields, "sessionTitle"), value: try color(fields))
         default:
             throw ProtocolError.invalidEvent("unsupported event type \(type)")
         }
@@ -62,6 +75,14 @@ enum EventDecoder {
             throw ProtocolError.invalidEvent("\(name) must be a non-empty string")
         }
         return value
+    }
+
+    private static func color(_ fields: [String: Any]) throws -> String {
+        let value = try text(fields, "color")
+        guard value.range(of: #"^#[0-9a-fA-F]{6}$"#, options: .regularExpression) != nil else {
+            throw ProtocolError.invalidEvent("color must be #rrggbb")
+        }
+        return value.lowercased()
     }
 }
 

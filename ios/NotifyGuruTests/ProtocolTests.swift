@@ -8,9 +8,10 @@ final class ProtocolTests: XCTestCase {
         let secret = Base64URL.encode(Data(repeating: 2, count: 32))
         let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
         let publicKey = Base64URL.encode(privateKey.publicKey.x963Representation)
-        let link = try PairingLink("https://notify.guru/join#v=3&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)")
+        let link = try PairingLink("https://notify.guru/join#v=3&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0")
         XCTAssertEqual(link.sessionID, "session_identifier")
-        XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)"))
+        XCTAssertEqual(link.color, "#ffd6e0")
+        XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0"))
     }
 
     func testDeviceRequestLinkContainsOnlyOpaqueRequestID() throws {
@@ -118,6 +119,24 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try EventDecoder.decode(data))
     }
 
+    func testEventDecoderAcceptsColorAndRequestClosure() throws {
+        let notification = Data(##"{"id":"event","type":"notify","sessionTitle":"Build","message":"Done","color":"#D9F2D0","createdAt":"2026-08-27T00:00:00Z"}"##.utf8)
+        guard case .notification(let title, let message, let color) = try EventDecoder.decode(notification) else {
+            return XCTFail("notify event decoded as another type")
+        }
+        XCTAssertEqual(title, "Build")
+        XCTAssertEqual(message, "Done")
+        XCTAssertEqual(color, "#d9f2d0")
+
+        let closure = Data(##"{"id":"event","type":"close_request","sessionTitle":"Build","requestId":"request","color":"#D9F2D0","createdAt":"2026-08-27T00:00:00Z"}"##.utf8)
+        guard case .closeRequest(let closeTitle, let requestID, let closeColor) = try EventDecoder.decode(closure) else {
+            return XCTFail("close_request event decoded as another type")
+        }
+        XCTAssertEqual(closeTitle, "Build")
+        XCTAssertEqual(requestID, "request")
+        XCTAssertEqual(closeColor, "#d9f2d0")
+    }
+
     func testVaultRoundTripAndExpiry() throws {
         let vault = Vault(version: 3, identity: try fixedIdentity(), sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)])
         XCTAssertEqual(try JSONDecoder().decode(Vault.self, from: JSONEncoder().encode(vault)), vault)
@@ -161,7 +180,7 @@ final class ProtocolTests: XCTestCase {
         SessionRecord(
             protocolVersion: 3, sessionID: id, groupID: groupID, creatorPublicKey: "creator-public-key",
             keys: [:], cursor: 0, title: "Session", status: "Connected", notification: "",
-            request: nil, requestKeyTimestamp: nil, expiresAt: expiresAt
+            request: nil, requestKeyTimestamp: nil, color: nil, updatedAt: nil, expiresAt: expiresAt
         )
     }
 }

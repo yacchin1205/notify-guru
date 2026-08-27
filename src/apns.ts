@@ -6,6 +6,7 @@ export interface APNsConfig {
 }
 
 export type APNsEnvironment = "sandbox" | "production";
+export type APNsAlertKind = "notify" | "request";
 
 export type APNsResult =
   | { outcome: "delivered" }
@@ -50,7 +51,7 @@ export class APNsClient {
     private readonly transport?: typeof fetch,
   ) {}
 
-  async send(deviceToken: string, environment: APNsEnvironment): Promise<APNsResult> {
+  async send(deviceToken: string, environment: APNsEnvironment, kind: APNsAlertKind): Promise<APNsResult> {
     if (!DEVICE_TOKEN.test(deviceToken)) {
       throw new Error("APNs device token must be lowercase hexadecimal");
     }
@@ -71,7 +72,12 @@ export class APNsClient {
         "apns-topic": this.config.topic,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ aps: { alert: "A new notification is available." } }),
+      body: JSON.stringify({
+        aps: {
+          alert: kind === "notify" ? "A new notification is available." : "Your input is requested.",
+          sound: "default",
+        },
+      }),
     };
     const transport = this.transport;
     let response: Response;

@@ -358,8 +358,10 @@ enum InvitationQRCode {
 
 private struct SessionCard: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     let session: SessionRecord
     @State private var responding = false
+    @State private var showingFeedback = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -404,14 +406,28 @@ private struct SessionCard: View {
                     .disabled(responding)
                 }
             }
+            HStack {
+                Spacer()
+                Button("Send a message", systemImage: "bubble.left") { showingFeedback = true }
+                    .labelStyle(.iconOnly)
+                    .accessibilityLabel("Send a message")
+                    .buttonStyle(.bordered)
+            }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(panelColor.opacity(colorScheme == .dark ? 0.35 : 0.75), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(Color.primary.opacity(0.08))
         }
+        .sheet(isPresented: $showingFeedback) {
+            FeedbackView(sessionID: session.sessionID, isPresented: $showingFeedback)
+        }
+    }
+
+    private var panelColor: Color {
+        session.color.flatMap(Color.init(hex:)) ?? Color(uiColor: .systemBackground)
     }
 
     private var expiryLabel: String {
@@ -422,7 +438,51 @@ private struct SessionCard: View {
     }
 }
 
+private struct FeedbackView: View {
+    @EnvironmentObject private var model: AppModel
+    let sessionID: String
+    @Binding var isPresented: Bool
+    @State private var message = ""
+    @State private var sending = false
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $message)
+                .padding()
+                .navigationTitle("Send a message")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { isPresented = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Send") {
+                            sending = true
+                            Task {
+                                if await model.sendFeedback(sessionID: sessionID, message: message) {
+                                    isPresented = false
+                                }
+                                sending = false
+                            }
+                        }
+                        .disabled(sending || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+        }
+    }
+}
+
 private extension Color {
     static let brandBackground = Color(uiColor: .secondarySystemBackground)
     static let brandAccent = Color(red: 0.22, green: 0.70, blue: 0.92)
+
+    init?(hex: String) {
+        guard hex.range(of: #"^#[0-9a-fA-F]{6}$"#, options: .regularExpression) != nil,
+              let value = UInt64(hex.dropFirst(), radix: 16) else { return nil }
+        self.init(
+            red: Double((value >> 16) & 0xff) / 255,
+            green: Double((value >> 8) & 0xff) / 255,
+            blue: Double(value & 0xff) / 255
+        )
+    }
 }

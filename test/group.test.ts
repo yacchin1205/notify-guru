@@ -1,4 +1,4 @@
-import { reset, SELF } from "cloudflare:test";
+import { env, reset, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 afterEach(reset);
@@ -24,6 +24,28 @@ describe("devices and persistent groups", () => {
     });
     expect(rejected.status).toBe(401);
     expect(rejected.json.error).toBe("invalid_device_signature");
+  });
+
+  it("queues distinct request alerts and suppresses status alerts", async () => {
+    const device = await newDevice();
+    const group = await createGroup(device);
+    const key = await registerKey(group.id, device, [device], true);
+    const session = await createJoinedSession(group, device, key);
+
+    expect((await postEvent(session, key.timestamp, "request")).status).toBe(201);
+    expect((await postEvent(session, key.timestamp, "none")).status).toBe(201);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session.id));
+    const { alarm, kinds } = await runInDurableObject(stub, async (_instance, state) => ({
+      alarm: await state.storage.getAlarm(),
+      kinds: Array.from(state.storage.sql.exec<{ notification_kind: string }>(
+        "SELECT notification_kind FROM push_jobs_v3 ORDER BY event_id",
+      )),
+    }));
+    expect(kinds).toEqual([{ notification_kind: "request" }]);
+    expect(alarm).not.toBeNull();
+    expect(alarm!).toBeLessThan(Date.now() + 5_000);
+
+    expect((await postEvent(session, key.timestamp, "loud")).status).toBe(400);
   });
 
   it("reverses device approval and binds group keys to their members", async () => {
@@ -384,7 +406,7 @@ async function createJoinedSession(
   return { id: sessionId, managerToken, groupId: group.id };
 }
 
-async function postEvent(session: JoinedSession, keyTimestamp: number) {
+async function postEvent(session: JoinedSession, keyTimestamp: number, notificationKind = "notify") {
   const eventId = randomId();
   const result = await api(`/api/sessions/${session.id}/events`, {
     method: "POST",
@@ -395,6 +417,7 @@ async function postEvent(session: JoinedSession, keyTimestamp: number) {
       keyTimestamp,
       nonce: "A".repeat(16),
       ciphertext: randomToken(),
+      notificationKind,
     },
   });
   return { ...result, json: result.status === 201 ? { ...result.json, eventId } : result.json };

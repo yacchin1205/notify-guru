@@ -45,7 +45,7 @@ func NewAPI(rawURL string) (*API, error) {
 	return &API{baseURL: baseURL, client: &http.Client{Timeout: 20 * time.Second}}, nil
 }
 
-func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey string) string {
+func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey, color string) string {
 	joinURL := *a.baseURL
 	joinURL.Path = "/join"
 	fragment := url.Values{}
@@ -55,6 +55,7 @@ func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey string
 	fragment.Set("t", pairing.Token)
 	fragment.Set("a", pairing.AuthSecret)
 	fragment.Set("k", creatorPublicKey)
+	fragment.Set("c", strings.TrimPrefix(color, "#"))
 	joinURL.Fragment = fragment.Encode()
 	return joinURL.String()
 }
@@ -112,14 +113,15 @@ func (a *API) joins(ctx context.Context, sessionID, managerToken string) (joinsR
 	return result, err
 }
 
-func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, groupID string, timestamp int64, nonce, ciphertext string) error {
+func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, groupID string, timestamp int64, nonce, ciphertext, notificationKind string) error {
 	request := struct {
-		EventID      string `json:"eventId"`
-		GroupID      string `json:"groupId"`
-		KeyTimestamp int64  `json:"keyTimestamp"`
-		Nonce        string `json:"nonce"`
-		Ciphertext   string `json:"ciphertext"`
-	}{eventID, groupID, timestamp, nonce, ciphertext}
+		EventID          string `json:"eventId"`
+		GroupID          string `json:"groupId"`
+		KeyTimestamp     int64  `json:"keyTimestamp"`
+		Nonce            string `json:"nonce"`
+		Ciphertext       string `json:"ciphertext"`
+		NotificationKind string `json:"notificationKind"`
+	}{eventID, groupID, timestamp, nonce, ciphertext, notificationKind}
 	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", managerToken, request, &struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}{})

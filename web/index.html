@@ -83,6 +83,18 @@
           <p class="request-prompt"></p>
           <div class="request-options"></div>
         </section>
+        <section class="feedback">
+          <button class="feedback-toggle" type="button" aria-label="メッセージを送る" title="メッセージを送る">💬</button>
+          <form class="feedback-form" hidden>
+            <label>このセッションへメッセージを送る
+              <textarea class="feedback-message" name="message" maxlength="20000" required></textarea>
+            </label>
+            <div class="feedback-actions">
+              <button type="submit">送信</button>
+              <button class="feedback-cancel" type="button">キャンセル</button>
+            </div>
+          </form>
+        </section>
       </article>
     </template>
     <script type="module" src="/app.js"></script>

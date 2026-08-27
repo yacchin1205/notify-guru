@@ -166,6 +166,36 @@ final class AppModel: ObservableObject {
         } catch { show(error) }
     }
 
+    func sendFeedback(sessionID: String, message: String) async -> Bool {
+        do {
+            let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, text.count <= 20_000 else {
+                throw ProtocolError.invalidResponse("message must contain between 1 and 20000 characters")
+            }
+            var current = try requiredVault()
+            guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
+                  let group = current.identity.group,
+                  let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
+                throw ProtocolError.invalidResponse("session feedback key is unavailable")
+            }
+            try populateSessionKeys(&current.sessions[index], group: group)
+            let responseID = try CryptoEngine.randomID()
+            let payload = try CryptoEngine.encryptFeedback(
+                session: current.sessions[index], timestamp: key.timestamp, responseID: responseID,
+                message: text, createdAt: RFC3339.string(from: Date())
+            )
+            current.sessions[index].expiresAt = try await api.postResponse(
+                session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
+                responseID: responseID, payload: payload
+            )
+            try persist(current)
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
     func enableNotifications() async {
         do { _ = try await PushCoordinator.shared.enable() } catch { show(error) }
     }
@@ -227,6 +257,7 @@ final class AppModel: ObservableObject {
                             let event = try CryptoEngine.decryptEvent(session: current.sessions[index], envelope: envelope)
                             apply(event, timestamp: envelope.keyTimestamp, to: &current.sessions[index])
                             current.sessions[index].cursor = envelope.sequence
+                            current.sessions[index].updatedAt = envelope.createdAt
                         }
                         current.sessions[index].expiresAt = result.expiresAt
                     } catch let error as APIError
@@ -273,7 +304,8 @@ final class AppModel: ObservableObject {
             protocolVersion: 3, sessionID: pairing.sessionID, groupID: group.groupID,
             creatorPublicKey: pairing.creatorPublicKey, keys: [:], cursor: 0,
             title: "Session \(pairing.sessionID.prefix(8))", status: "Connected", notification: "",
-            request: nil, requestKeyTimestamp: nil, expiresAt: expiresAt
+            request: nil, requestKeyTimestamp: nil, color: pairing.color,
+            updatedAt: Self.currentTimeMilliseconds(), expiresAt: expiresAt
         )
         try populateSessionKeys(&record, group: group)
         current.sessions.append(record)
@@ -366,7 +398,8 @@ final class AppModel: ObservableObject {
                 protocolVersion: 3, sessionID: remote.sessionID, groupID: group.groupID,
                 creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
                 title: "Session \(remote.sessionID.prefix(8))", status: "Connected", notification: "",
-                request: nil, requestKeyTimestamp: nil, expiresAt: remote.expiresAt
+                request: nil, requestKeyTimestamp: nil, color: nil,
+                updatedAt: Self.currentTimeMilliseconds(), expiresAt: remote.expiresAt
             )
             try populateSessionKeys(&record, group: group)
             current.sessions.append(record)
@@ -383,10 +416,17 @@ final class AppModel: ObservableObject {
 
     private func apply(_ event: SessionEvent, timestamp: Int64, to session: inout SessionRecord) {
         switch event {
-        case .notification(let title, let message): session.title = title; session.notification = message
-        case .status(let title, let value): session.title = title; session.status = value
-        case .request(let title, let value):
-            session.title = title; session.request = value; session.requestKeyTimestamp = timestamp
+        case .notification(let title, let message, let color):
+            session.title = title; session.notification = message; session.color = color
+        case .status(let title, let value, let color):
+            session.title = title; session.status = value; session.color = color
+        case .request(let title, let value, let color):
+            session.title = title; session.request = value; session.requestKeyTimestamp = timestamp; session.color = color
+        case .closeRequest(let title, let requestID, let color):
+            session.title = title; session.color = color
+            if session.request?.id == requestID { session.request = nil; session.requestKeyTimestamp = nil }
+        case .color(let title, let value):
+            session.title = title; session.color = value
         }
     }
 
@@ -426,7 +466,7 @@ final class AppModel: ObservableObject {
     }
 
     private func publish(_ value: Vault) {
-        sessions = value.sessions.sorted { $0.expiresAt > $1.expiresAt }
+        sessions = value.sessions.sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
         hasDeviceGroup = value.identity.group != nil
         deviceID = value.identity.deviceID
     }

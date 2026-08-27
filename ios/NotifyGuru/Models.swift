@@ -124,6 +124,8 @@ struct SessionRecord: Codable, Equatable, Identifiable {
     var notification: String
     var request: SessionRequest?
     var requestKeyTimestamp: Int64?
+    var color: String?
+    var updatedAt: Int64?
     var expiresAt: Int64
 }
 
@@ -147,7 +149,9 @@ enum ConnectionState: Equatable {
 }
 
 enum SessionEvent {
-    case notification(title: String, message: String)
-    case status(title: String, value: String)
-    case request(title: String, value: SessionRequest)
+    case notification(title: String, message: String, color: String)
+    case status(title: String, value: String, color: String)
+    case request(title: String, value: SessionRequest, color: String)
+    case closeRequest(title: String, requestID: String, color: String)
+    case color(title: String, value: String)
 }

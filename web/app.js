@@ -77,6 +77,7 @@ let managingDevices = false;
 let synchronizing = false;
 let requestURL;
 let pendingDeviceRequest = null;
+let sessionRenderSignature = "";
 
 window.addEventListener("unhandledrejection", (event) => showError(event.reason));
 document.querySelector("#open-device-management").addEventListener("click", () => setDeviceManagement(true));
@@ -324,7 +325,7 @@ async function currentLocalKey() {
 
 async function joinFromFragment() {
   const parameters = new URLSearchParams(location.hash.slice(1));
-  requireFragmentFields(parameters, ["v", "s", "p", "t", "a", "k"]);
+  requireFragmentFields(parameters, ["v", "s", "p", "t", "a", "k", "c"]);
   if (parameters.get("v") !== "3") throw new Error("Unsupported pairing protocol version");
   if (identity.group === null) await createSoloGroup();
   await syncGroup();
@@ -346,8 +347,8 @@ async function joinFromFragment() {
     groupPublicKey: groupKey.publicKey,
     proof,
   });
-  await putSession(newSession(sessionId, identity.group.groupId, parameters.get("k"), expiresAt));
-  history.replaceState(null, "", `${location.pathname}${location.search}`);
+  await putSession(newSession(sessionId, identity.group.groupId, parameters.get("k"), expiresAt, colorValue(`#${parameters.get("c")}`)));
+  history.replaceState(null, "", "/");
   messageElement.textContent = "セッションへ参加しました。";
 }
 
@@ -372,6 +373,7 @@ async function syncSession(session) {
     }
     applyEvent(session, await decryptEvent(key, session.sessionId, envelope), envelope.keyTimestamp);
     session.cursor = envelope.sequence;
+    session.updatedAt = envelope.createdAt;
   }
   session.expiresAt = result.expiresAt;
   await putSession(session);
@@ -385,7 +387,7 @@ async function respond(sessionId, optionId, button) {
   const key = session.keys[String(timestamp)];
   if (key === undefined) throw new Error("Response encryption key is unavailable");
   const responseId = randomId();
-  const response = { id: responseId, requestId: session.request.requestId, optionId, createdAt: new Date().toISOString() };
+  const response = { id: responseId, type: "response", requestId: session.request.requestId, optionId, createdAt: new Date().toISOString() };
   const encrypted = await encryptResponse(key, session.sessionId, session.groupId, timestamp, responseId, response);
   session.expiresAt = await postResponse(session, identity, {
     responseId,
@@ -400,27 +402,71 @@ async function respond(sessionId, optionId, button) {
   await render();
 }
 
+async function sendFeedback(sessionId, message) {
+  const session = await getSession(sessionId);
+  if (session === undefined) throw new Error("Session disappeared before feedback was sent");
+  const text = message.trim();
+  if (text.length === 0 || text.length > 20_000) throw new Error("メッセージは1文字以上20000文字以内で入力してください");
+  const groupKey = await currentLocalKey();
+  let key = session.keys[String(groupKey.timestamp)];
+  if (key === undefined) {
+    key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId);
+    session.keys[String(groupKey.timestamp)] = key;
+  }
+  const responseId = randomId();
+  const response = { id: responseId, type: "feedback", message: text, createdAt: new Date().toISOString() };
+  const encrypted = await encryptResponse(key, session.sessionId, session.groupId, groupKey.timestamp, responseId, response);
+  session.expiresAt = await postResponse(session, identity, {
+    responseId,
+    groupId: session.groupId,
+    deviceId: identity.deviceId,
+    keyTimestamp: groupKey.timestamp,
+    ...encrypted,
+  });
+  await putSession(session);
+  messageElement.textContent = "メッセージを送信しました。";
+}
+
 function applyEvent(session, event, keyTimestamp) {
   if (event === null || typeof event !== "object" || Array.isArray(event)) throw new Error("Decrypted event must be an object");
   if (event.type === "notify") {
-    requireExactKeys(event, ["id", "type", "sessionTitle", "message", "createdAt"]);
+    requireExactKeys(event, ["id", "type", "sessionTitle", "message", "color", "createdAt"]);
     session.title = stringValue(event.sessionTitle, "sessionTitle");
     session.notification = stringValue(event.message, "message");
+    session.color = colorValue(event.color);
     return;
   }
   if (event.type === "status") {
-    requireExactKeys(event, ["id", "type", "sessionTitle", "status", "createdAt"]);
+    requireExactKeys(event, ["id", "type", "sessionTitle", "status", "color", "createdAt"]);
     session.title = stringValue(event.sessionTitle, "sessionTitle");
     session.status = stringValue(event.status, "status");
+    session.color = colorValue(event.color);
     return;
   }
   if (event.type === "request") {
-    requireExactKeys(event, ["id", "type", "sessionTitle", "requestId", "prompt", "options", "createdAt"]);
+    requireExactKeys(event, ["id", "type", "sessionTitle", "requestId", "prompt", "options", "color", "createdAt"]);
     if (!Array.isArray(event.options) || event.options.length < 2) throw new Error("Request options must contain at least two choices");
     for (const option of event.options) requireExactKeys(option, ["id", "label"]);
     session.title = stringValue(event.sessionTitle, "sessionTitle");
+    session.color = colorValue(event.color);
     session.request = event;
     session.requestKeyTimestamp = keyTimestamp;
+    return;
+  }
+  if (event.type === "close_request") {
+    requireExactKeys(event, ["id", "type", "sessionTitle", "requestId", "color", "createdAt"]);
+    session.title = stringValue(event.sessionTitle, "sessionTitle");
+    session.color = colorValue(event.color);
+    if (session.request?.requestId === stringValue(event.requestId, "requestId")) {
+      session.request = null;
+      session.requestKeyTimestamp = null;
+    }
+    return;
+  }
+  if (event.type === "color") {
+    requireExactKeys(event, ["id", "type", "sessionTitle", "color", "createdAt"]);
+    session.title = stringValue(event.sessionTitle, "sessionTitle");
+    session.color = colorValue(event.color);
     return;
   }
   throw new Error(`Unsupported event type: ${String(event.type)}`);
@@ -501,11 +547,15 @@ async function renderGroup() {
 }
 
 async function render() {
-  const sessions = await listSessions();
+  const sessions = (await listSessions()).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+  const signature = JSON.stringify(sessions.map(({ keys: _keys, ...session }) => session));
+  if (signature === sessionRenderSignature) return;
+  sessionRenderSignature = signature;
   cardsElement.replaceChildren();
   emptyElement.hidden = sessions.length !== 0;
   for (const session of sessions) {
     const card = cardTemplate.content.firstElementChild.cloneNode(true);
+    if (session.color !== null && session.color !== undefined) card.style.setProperty("--session-color", colorValue(session.color));
     card.querySelector(".session-title").textContent = session.title;
     card.querySelector(".expiry").textContent = expiryText(session.expiresAt);
     card.querySelector(".status").textContent = session.status;
@@ -522,16 +572,44 @@ async function render() {
         element.querySelector(".request-options").append(button);
       }
     }
+    const feedbackToggle = card.querySelector(".feedback-toggle");
+    const feedbackForm = card.querySelector(".feedback-form");
+    const feedbackMessage = card.querySelector(".feedback-message");
+    feedbackToggle.addEventListener("click", () => {
+      feedbackToggle.hidden = true;
+      feedbackForm.hidden = false;
+      feedbackMessage.focus();
+    });
+    card.querySelector(".feedback-cancel").addEventListener("click", () => {
+      feedbackForm.reset();
+      feedbackForm.hidden = true;
+      feedbackToggle.hidden = false;
+    });
+    feedbackForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const submit = feedbackForm.querySelector('button[type="submit"]');
+      submit.disabled = true;
+      sendFeedback(session.sessionId, feedbackMessage.value).then(() => {
+        feedbackForm.reset();
+        feedbackForm.hidden = true;
+        feedbackToggle.hidden = false;
+      }).catch(showError).finally(() => { submit.disabled = false; });
+    });
     cardsElement.append(card);
   }
 }
 
-function newSession(sessionId, groupId, creatorPublicKey, expiresAt) {
+function newSession(sessionId, groupId, creatorPublicKey, expiresAt, color = null) {
   return {
     protocolVersion: 3, sessionId, groupId, creatorPublicKey, keys: {}, cursor: 0,
     title: `Session ${sessionId.slice(0, 8)}`, status: "接続しました", notification: "",
-    request: null, requestKeyTimestamp: null, expiresAt,
+    request: null, requestKeyTimestamp: null, color, updatedAt: Date.now(), expiresAt,
   };
+}
+
+function colorValue(value) {
+  if (typeof value !== "string" || !/^#[0-9a-fA-F]{6}$/.test(value)) throw new Error("Session color must be #rrggbb");
+  return value.toLowerCase();
 }
 
 function parseDeviceRequestFragment() {

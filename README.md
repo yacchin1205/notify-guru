@@ -26,7 +26,9 @@ Start a session:
 notifyg --title "Deployment"
 ```
 
-The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, scan it with the receiving device, then enter `join` in the CLI to refresh the joined devices.
+The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, then scan it with the receiving device. The CLI reports when a new device group starts receiving the session.
+
+Session cards use a randomly selected pastel color by default. Pass `--color '#a1b2c3'` to choose an exact color at startup.
 
 The PWA and iOS app prepare a single-device cryptographic group automatically. To receive the same notifications on another device, open device management, create a 10-minute invitation, scan it on the other device, compare the six-digit code, and approve it on the inviting device. Invitation QR codes and links disappear as soon as approval is pending. A device can stop sharing only while two or more devices are connected; it then returns automatically to single-device use. Different people should join the Agent session as separate device groups instead of sharing one group.
 
@@ -37,15 +39,20 @@ join
 pair
 notify Deployment completed
 status Waiting for approval
+color #d9f2d0
 request Continue deployment? | Continue | Stop
+close-request REQUEST_ID
 responses
 close
 quit
 ```
 
-- `pair` creates another one-shot QR code for an additional browser.
+- `pair` creates another one-shot QR code for an additional device group.
+- `color` changes the card color during the session; use `color random` to select another pastel color.
+- `status` updates the card silently. `notify` shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in either OS alert.
+- `close-request` ends the identified request on connected devices.
 - Each local QR image remains available for 10 minutes or until `notifyg` exits. It is held only in process memory, and the response prevents browser caching.
-- `responses` retrieves every response without selecting or aggregating them.
+- `responses` retrieves every choice response and free-form message without selecting or aggregating them.
 - `close` immediately deletes the session and removes its card from connected browsers.
 - `quit` only exits the CLI. The session remains until its normal expiry, but its creator keys are lost with the process.
 
@@ -76,7 +83,7 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a browser, send notifications and status updates, ask multiple-choice questions, receive responses, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choice responses and free-form messages, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
 
 The image URL is reachable only from the same machine as the `notifyg` process. When MCP runs in a container, on a remote host, or across SSH without port forwarding, use the terminal QR code or pairing URL instead.
 

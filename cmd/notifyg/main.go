@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"notify.guru/internal/mcpserver"
 	"notify.guru/internal/notify"
@@ -28,11 +29,12 @@ func run() (runErr error) {
 	flags.SetOutput(os.Stderr)
 	baseURL := flags.String("base-url", "https://notify.guru", "notify.guru service URL")
 	title := flags.String("title", "Development session", "interactive session title")
+	color := flags.String("color", "random", "session panel color: random or #rrggbb")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() > 1 {
-		return fmt.Errorf("usage: notifyg [--base-url URL] [--title TITLE] [mcp]")
+		return fmt.Errorf("usage: notifyg [--base-url URL] [--title TITLE] [--color random|#rrggbb] [mcp]")
 	}
 
 	api, err := notify.NewAPI(*baseURL)
@@ -57,7 +59,7 @@ func run() (runErr error) {
 			}
 			return mcpserver.New(store, viewer).Run(ctx)
 		}
-		return interactive(ctx, store, viewer, *title, os.Stdin, os.Stdout, os.Stderr)
+		return interactive(ctx, store, viewer, *title, *color, os.Stdin, os.Stdout, os.Stderr)
 	}
 	err = supervise(ctx, viewer, operation)
 	if errors.Is(err, context.Canceled) {
@@ -86,8 +88,8 @@ func supervise(ctx context.Context, viewer *notify.QRViewer, operation func(cont
 	}
 }
 
-func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, title string, input io.Reader, output, errorOutput io.Writer) error {
-	sessionID, pairingURL, err := store.Create(ctx, title)
+func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, title, color string, input io.Reader, output, errorOutput io.Writer) error {
+	sessionID, pairingURL, err := store.Create(ctx, title, color)
 	if err != nil {
 		return err
 	}
@@ -100,90 +102,149 @@ func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRView
 		return err
 	}
 	fmt.Fprintf(output, "Session: %s\n%s\n%s\nQR image: %s\n", sessionID, qr, pairingURL, imageURL)
-	fmt.Fprintln(output, "Commands: join, pair, notify TEXT, status TEXT, request PROMPT | OPTION | OPTION, responses, close, quit")
+	fmt.Fprintln(output, "Commands: join, pair, notify TEXT, status TEXT, color #rrggbb|random, request PROMPT | OPTION | OPTION, close-request REQUEST_ID, responses, close, quit")
 
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 300_000)
+	lines := make(chan string)
+	scanDone := make(chan error, 1)
+	go func() {
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-ctx.Done():
+				return
+			}
+		}
+		scanDone <- scanner.Err()
+	}()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	knownGroups := 0
+	fmt.Fprint(output, "notifyg> ")
 	for {
-		fmt.Fprint(output, "notifyg> ")
-		if !scanner.Scan() {
-			return scanner.Err()
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		command, argument, _ := strings.Cut(line, " ")
-		switch command {
-		case "join":
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-scanDone:
+			return err
+		case <-ticker.C:
 			count, err := store.RefreshGroups(ctx, sessionID)
 			if err != nil {
-				fmt.Fprintln(errorOutput, err)
+				return fmt.Errorf("detect joined device groups: %w", err)
+			}
+			if count > knownGroups {
+				fmt.Fprintf(output, "\n%d new device group(s) joined; %d total\nnotifyg> ", count-knownGroups, count)
+				knownGroups = count
+			}
+			continue
+		case scanned := <-lines:
+			line := strings.TrimSpace(scanned)
+			if line == "" {
+				fmt.Fprint(output, "notifyg> ")
 				continue
 			}
-			fmt.Fprintf(output, "%d device group(s) joined\n", count)
-		case "pair":
-			url, err := store.AddPairing(ctx, sessionID)
-			if err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			qr, err := notify.QRCode(url)
+			command, argument, _ := strings.Cut(line, " ")
+			exit, err := runCommand(ctx, store, viewer, sessionID, command, argument, &knownGroups, output, errorOutput)
 			if err != nil {
 				return err
 			}
-			imageURL, err := viewer.Publish(url)
-			if err != nil {
-				return err
+			if exit {
+				return nil
 			}
-			fmt.Fprintf(output, "%s\n%s\nQR image: %s\n", qr, url, imageURL)
-		case "notify":
-			if err := store.SendNotify(ctx, sessionID, argument); err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			fmt.Fprintln(output, "sent")
-		case "status":
-			if err := store.SendStatus(ctx, sessionID, argument); err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			fmt.Fprintln(output, "sent")
-		case "request":
-			parts := strings.Split(argument, "|")
-			if len(parts) < 3 {
-				fmt.Fprintln(errorOutput, "request requires a prompt and at least two options separated by |")
-				continue
-			}
-			for index := range parts {
-				parts[index] = strings.TrimSpace(parts[index])
-			}
-			requestID, choices, err := store.SendRequest(ctx, sessionID, parts[0], parts[1:])
-			if err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			fmt.Fprintf(output, "request %s sent: %v\n", requestID, choices)
-		case "responses":
-			responses, err := store.Responses(ctx, sessionID)
-			if err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			for _, response := range responses {
-				fmt.Fprintf(output, "response request=%s option=%s group=%s at=%s\n", response.RequestID, response.OptionID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			}
-		case "close":
-			if err := store.Close(ctx, sessionID); err != nil {
-				fmt.Fprintln(errorOutput, err)
-				continue
-			}
-			fmt.Fprintln(output, "closed")
-			return nil
-		case "quit":
-			return nil
-		default:
-			fmt.Fprintf(errorOutput, "unknown command %q\n", command)
+			fmt.Fprint(output, "notifyg> ")
 		}
 	}
+}
+
+func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, sessionID, command, argument string, knownGroups *int, output, errorOutput io.Writer) (bool, error) {
+	switch command {
+	case "join":
+		count, err := store.RefreshGroups(ctx, sessionID)
+		if err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		*knownGroups = count
+		fmt.Fprintf(output, "%d device group(s) joined\n", count)
+	case "pair":
+		url, err := store.AddPairing(ctx, sessionID)
+		if err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		qr, err := notify.QRCode(url)
+		if err != nil {
+			return false, err
+		}
+		imageURL, err := viewer.Publish(url)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(output, "%s\n%s\nQR image: %s\n", qr, url, imageURL)
+	case "notify":
+		if err := store.SendNotify(ctx, sessionID, argument); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintln(output, "sent")
+	case "status":
+		if err := store.SendStatus(ctx, sessionID, argument); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintln(output, "sent")
+	case "color":
+		if err := store.SetColor(ctx, sessionID, argument); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintln(output, "color changed")
+	case "request":
+		parts := strings.Split(argument, "|")
+		if len(parts) < 3 {
+			fmt.Fprintln(errorOutput, "request requires a prompt and at least two options separated by |")
+			return false, nil
+		}
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
+		requestID, choices, err := store.SendRequest(ctx, sessionID, parts[0], parts[1:])
+		if err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintf(output, "request %s sent: %v\n", requestID, choices)
+	case "close-request":
+		if err := store.CloseRequest(ctx, sessionID, argument); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintln(output, "request closed")
+	case "responses":
+		responses, err := store.Responses(ctx, sessionID)
+		if err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		for _, response := range responses {
+			if response.Type == "feedback" {
+				fmt.Fprintf(output, "feedback message=%q group=%s at=%s\n", response.Message, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+			} else {
+				fmt.Fprintf(output, "response request=%s option=%s group=%s at=%s\n", response.RequestID, response.OptionID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+			}
+		}
+	case "close":
+		if err := store.Close(ctx, sessionID); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return false, nil
+		}
+		fmt.Fprintln(output, "closed")
+		return true, nil
+	case "quit":
+		return true, nil
+	default:
+		fmt.Fprintf(errorOutput, "unknown command %q\n", command)
+	}
+	return false, nil
 }

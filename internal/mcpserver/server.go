@@ -48,12 +48,20 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.notify)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "status",
-		Description: "Update the encrypted current status shown on a session card.",
+		Description: "Update the encrypted current status shown on a session card without showing an OS notification.",
 	}, s.status)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "session_color",
+		Description: "Change the encrypted #rrggbb color of a session card, or choose another random pastel color.",
+	}, s.color)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "request",
 		Description: "Send an encrypted question with two or more choices to every joined device group.",
 	}, s.request)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "request_close",
+		Description: "End an open request on every joined device group.",
+	}, s.closeRequest)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "responses_wait",
 		Description: "Wait for and return every newly received encrypted response. The agent decides how to interpret them.",
@@ -68,6 +76,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 type createInput struct {
 	Title string `json:"title" jsonschema:"short title shown on the session card"`
+	Color string `json:"color,omitempty" jsonschema:"optional panel color as #rrggbb; omit or use random to select from the pastel palette"`
 }
 
 type pairingOutput struct {
@@ -78,7 +87,7 @@ type pairingOutput struct {
 }
 
 func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input createInput) (*mcp.CallToolResult, pairingOutput, error) {
-	sessionID, pairingURL, err := s.store.Create(ctx, input.Title)
+	sessionID, pairingURL, err := s.store.Create(ctx, input.Title, input.Color)
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
@@ -162,6 +171,18 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, input statu
 	return nil, deliveredOutput{Delivered: true}, nil
 }
 
+type colorInput struct {
+	SessionID string `json:"session_id" jsonschema:"session identifier"`
+	Color     string `json:"color" jsonschema:"panel color as #rrggbb or random"`
+}
+
+func (s *Server) color(ctx context.Context, _ *mcp.CallToolRequest, input colorInput) (*mcp.CallToolResult, deliveredOutput, error) {
+	if err := s.store.SetColor(ctx, input.SessionID, input.Color); err != nil {
+		return nil, deliveredOutput{}, err
+	}
+	return nil, deliveredOutput{Delivered: true}, nil
+}
+
 type requestInput struct {
 	SessionID string   `json:"session_id" jsonschema:"session identifier"`
 	Prompt    string   `json:"prompt" jsonschema:"question shown to the device group"`
@@ -179,6 +200,18 @@ func (s *Server) request(ctx context.Context, _ *mcp.CallToolRequest, input requ
 		return nil, requestOutput{}, err
 	}
 	return nil, requestOutput{RequestID: requestID, Choices: choices}, nil
+}
+
+type closeRequestInput struct {
+	SessionID string `json:"session_id" jsonschema:"session identifier"`
+	RequestID string `json:"request_id" jsonschema:"request identifier returned by request"`
+}
+
+func (s *Server) closeRequest(ctx context.Context, _ *mcp.CallToolRequest, input closeRequestInput) (*mcp.CallToolResult, closeOutput, error) {
+	if err := s.store.CloseRequest(ctx, input.SessionID, input.RequestID); err != nil {
+		return nil, closeOutput{}, err
+	}
+	return nil, closeOutput{Closed: true}, nil
 }
 
 type responsesOutput struct {

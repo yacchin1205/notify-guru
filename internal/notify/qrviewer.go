@@ -143,6 +143,9 @@ func (v *QRViewer) Close() error {
 		listenerErr = nil
 	}
 	closeErr := v.server.Close()
+	if errors.Is(closeErr, http.ErrServerClosed) || errors.Is(closeErr, net.ErrClosed) {
+		closeErr = nil
+	}
 	<-v.done
 	return errors.Join(listenerErr, closeErr, v.serveError())
 }
