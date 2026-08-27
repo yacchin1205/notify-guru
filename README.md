@@ -1,6 +1,6 @@
 # notify.guru
 
-notify.guru connects a short-lived Agent or CLI session to one or more browsers. The sender displays a one-shot QR code, a browser scans it, and subsequent notifications, status updates, questions, and responses are end-to-end encrypted.
+notify.guru connects a short-lived Agent or CLI session to one or more device groups. The sender displays a one-shot QR code, a PWA or iOS device scans it, and subsequent notifications, status updates, questions, and responses are end-to-end encrypted.
 
 There are no user accounts and no recovery flow. A session expires one day after its creator's last activity. The relay stores ciphertext and routing metadata, but does not receive application payloads in plaintext. The web client must still trust the JavaScript served by notify.guru.
 
@@ -27,6 +27,8 @@ notifyg --title "Deployment"
 ```
 
 The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, scan it with the receiving device, then enter `join` in the CLI to refresh the joined devices.
+
+After joining, the PWA or iOS app can create a 10-minute device invitation. Open that link on a new device, compare the six-digit code on both devices, and approve it on the inviting device. The new device then receives the group's active sessions. Different people should join the Agent session as separate device groups instead of sharing one group.
 
 Available commands:
 
@@ -85,7 +87,7 @@ The image URL is reachable only from the same machine as the `notifyg` process. 
 - Session management keys exist only in the CLI process memory and are not recoverable.
 - The relay can observe metadata such as timestamps, identifiers, and ciphertext sizes.
 - Compromise of the served web application, the browser profile, or the CLI process is outside the end-to-end encryption guarantee.
-- A browser profile currently acts as one independent device group. Cross-device group key sharing and approval are not implemented yet.
+- Each app installation or browser profile belongs to at most one device group. Adding or removing a device rotates the group's key generation; removal cannot revoke ciphertext already received by that device.
 
 See [CONCEPT.md](CONCEPT.md) for the product model and [DESIGN.md](DESIGN.md) for design rationale.
 

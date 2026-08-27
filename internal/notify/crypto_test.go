@@ -3,12 +3,64 @@ package notify
 import (
 	"bytes"
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestV2GenerationKeyAndSignedTransition(t *testing.T) {
+	creator, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{3}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{4}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := deriveGenerationKey(group, encode(creator.PublicKey().Bytes()), "session-id", "group-id", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := encode(key); got != "gXfVAK1yzHMsFX5qQc5sXTEFOXSfDSEVcmNWknyoHgQ" {
+		t.Fatalf("v2 generation key = %q", got)
+	}
+
+	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := encode(elliptic.Marshal(elliptic.P256(), signingKey.X, signingKey.Y))
+	transition := GenerationTransition{
+		Revision: 2, PreviousGeneration: 1, Generation: 2,
+		GenerationPublicKey: publicKey, Action: "add",
+		ActorDeviceID: "actor-device", TargetDeviceID: "target-device",
+		PackagesHash: strings.Repeat("a", 64),
+	}
+	transcript := fmt.Sprintf(
+		"notify.guru/group-transition/v1\ngroup-id\n2\n1\n2\n%s\nadd\nactor-device\ntarget-device\n%s",
+		publicKey, transition.PackagesHash,
+	)
+	digest := sha256.Sum256([]byte(transcript))
+	r, s, err := ecdsa.Sign(rand.Reader, signingKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	transition.GroupSignature = encode(signature)
+	if err := verifyGenerationTransition("group-id", transition, publicKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyGenerationTransition("another-group", transition, publicKey); err == nil {
+		t.Fatal("transition signature was accepted for another group")
+	}
+}
 
 func TestECDHEncryptionRoundTrip(t *testing.T) {
 	creator, err := ecdh.P256().GenerateKey(rand.Reader)

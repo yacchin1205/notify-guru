@@ -24,11 +24,19 @@
       {
         "name": "SESSIONS",
         "class_name": "Session"
+      },
+      {
+        "name": "GROUPS",
+        "class_name": "DeviceGroup"
       }
     ]
   },
   "exports": {
     "Session": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "DeviceGroup": {
       "type": "durable-object",
       "storage": "sqlite"
     }

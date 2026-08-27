@@ -52,7 +52,7 @@ func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey string
 	joinURL := *a.baseURL
 	joinURL.Path = "/join"
 	fragment := url.Values{}
-	fragment.Set("v", "1")
+	fragment.Set("v", "2")
 	fragment.Set("s", sessionID)
 	fragment.Set("p", pairing.ID)
 	fragment.Set("t", pairing.Token)
@@ -105,9 +105,33 @@ type joinsResult struct {
 	ExpiresAt int64 `json:"expiresAt"`
 }
 
+type joinsV2Result struct {
+	Groups []struct {
+		Sequence          int64                  `json:"sequence"`
+		GroupID           string                 `json:"groupId"`
+		PairingID         string                 `json:"pairingId"`
+		InitialRevision   int64                  `json:"initialRevision"`
+		InitialGeneration int64                  `json:"initialGeneration"`
+		InitialPublicKey  string                 `json:"initialPublicKey"`
+		Proof             string                 `json:"proof"`
+		JoinedAt          int64                  `json:"joinedAt"`
+		CurrentRevision   int64                  `json:"currentRevision"`
+		CurrentGeneration int64                  `json:"currentGeneration"`
+		CurrentPublicKey  string                 `json:"currentPublicKey"`
+		Transitions       []GenerationTransition `json:"transitions"`
+	} `json:"groups"`
+	ExpiresAt int64 `json:"expiresAt"`
+}
+
 func (a *API) joins(ctx context.Context, sessionID, managerToken string, after int64) (joinsResult, error) {
 	var result joinsResult
 	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/joins?after=%d", sessionID, after), managerToken, nil, &result)
+	return result, err
+}
+
+func (a *API) joinsV2(ctx context.Context, sessionID, managerToken string) (joinsV2Result, error) {
+	var result joinsV2Result
+	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/v2/joins", sessionID), managerToken, nil, &result)
 	return result, err
 }
 
@@ -119,6 +143,24 @@ func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, gr
 		Ciphertext string `json:"ciphertext"`
 	}{eventID, groupID, nonce, ciphertext}
 	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", managerToken, request, &struct {
+		ExpiresAt int64 `json:"expiresAt"`
+	}{})
+}
+
+func (a *API) addEventV2(
+	ctx context.Context,
+	sessionID, managerToken, eventID, groupID string,
+	generation int64,
+	nonce, ciphertext string,
+) error {
+	request := struct {
+		EventID    string `json:"eventId"`
+		GroupID    string `json:"groupId"`
+		Generation int64  `json:"generation"`
+		Nonce      string `json:"nonce"`
+		Ciphertext string `json:"ciphertext"`
+	}{eventID, groupID, generation, nonce, ciphertext}
+	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/v2/events", managerToken, request, &struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}{})
 }
@@ -135,9 +177,28 @@ type responsesResult struct {
 	ExpiresAt int64 `json:"expiresAt"`
 }
 
+type responsesV2Result struct {
+	Responses []struct {
+		Sequence   int64  `json:"sequence"`
+		ResponseID string `json:"responseId"`
+		GroupID    string `json:"groupId"`
+		Generation int64  `json:"generation"`
+		Nonce      string `json:"nonce"`
+		Ciphertext string `json:"ciphertext"`
+		CreatedAt  int64  `json:"createdAt"`
+	} `json:"responses"`
+	ExpiresAt int64 `json:"expiresAt"`
+}
+
 func (a *API) responses(ctx context.Context, sessionID, managerToken string, after int64) (responsesResult, error) {
 	var result responsesResult
 	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/responses?after=%d", sessionID, after), managerToken, nil, &result)
+	return result, err
+}
+
+func (a *API) responsesV2(ctx context.Context, sessionID, managerToken string, after int64) (responsesV2Result, error) {
+	var result responsesV2Result
+	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/v2/responses?after=%d", sessionID, after), managerToken, nil, &result)
 	return result, err
 }
 

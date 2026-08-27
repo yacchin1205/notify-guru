@@ -10,20 +10,24 @@ struct ContentView: View {
             Group {
                 if !model.isReady {
                     ProgressView("Preparing secure storage…")
-                } else if model.sessions.isEmpty {
-                    ContentUnavailableView {
-                        Label("No sessions", systemImage: "link.badge.plus")
-                    } description: {
-                        Text("Scan the one-shot QR code shown by notifyg.")
-                    } actions: {
-                        Button("Join a session") { showingJoin = true }
-                            .buttonStyle(.borderedProminent)
-                    }
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
+                            if model.groupGeneration != nil || model.deviceJoinStatus != nil {
+                                DeviceGroupCard()
+                            }
                             ForEach(model.sessions) { session in
                                 SessionCard(session: session)
+                            }
+                            if model.sessions.isEmpty {
+                                ContentUnavailableView {
+                                    Label("No sessions", systemImage: "link.badge.plus")
+                                } description: {
+                                    Text("Scan the one-shot QR code shown by notifyg, or a device invitation.")
+                                } actions: {
+                                    Button("Scan a link") { showingJoin = true }
+                                        .buttonStyle(.borderedProminent)
+                                }
                             }
                         }
                         .padding()
@@ -82,6 +86,65 @@ struct ContentView: View {
         case .current: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
         }
+    }
+}
+
+private struct DeviceGroupCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("DEVICE GROUP")
+                        .font(.caption2.weight(.bold))
+                        .tracking(1.5)
+                        .foregroundStyle(Color.brandAccent)
+                    Text(model.groupGeneration.map { "Key generation \($0)" } ?? "Joining device")
+                        .font(.headline)
+                }
+                Spacer()
+                if model.groupGeneration != nil {
+                    Button("Invite") { Task { await model.createDeviceInvitation() } }
+                        .buttonStyle(.bordered)
+                }
+            }
+            if let status = model.deviceJoinStatus { Text(status).font(.subheadline) }
+            if let code = model.verificationCode {
+                Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
+            }
+            if let link = model.invitationLink {
+                ShareLink(item: link) { Label("Share device invitation", systemImage: "square.and.arrow.up") }
+            }
+            ForEach(model.pendingDevices) { pending in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Pending · \(pending.deviceID.prefix(8))")
+                    if let code = model.verificationCode(for: pending) {
+                        Text(code).font(.title2.monospacedDigit().weight(.bold)).tracking(3)
+                    }
+                    HStack {
+                        Button("Approve") { Task { await model.approve(invitationID: pending.invitationID) } }
+                            .buttonStyle(.borderedProminent)
+                        Button("Reject", role: .destructive) { Task { await model.reject(invitationID: pending.invitationID) } }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+            ForEach(model.groupDevices) { device in
+                HStack {
+                    Text(device.deviceID == model.deviceID ? "This device" : "Device \(device.deviceID.prefix(8))")
+                    Spacer()
+                    if device.deviceID != model.deviceID {
+                        Button("Remove", role: .destructive) { Task { await model.remove(deviceID: device.deviceID) } }
+                            .buttonStyle(.bordered)
+                    }
+                }
+                .font(.subheadline)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 

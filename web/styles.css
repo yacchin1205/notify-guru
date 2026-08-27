@@ -81,6 +81,49 @@ h1 {
   margin-top: 1rem;
 }
 
+.group-card {
+  margin-top: 1rem;
+  padding: 1.35rem;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 1.15rem;
+  background: rgba(8, 47, 73, 0.28);
+}
+
+.group-card h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+#group-generation {
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
+#invitation {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+#invitation-link {
+  color: #7dd3fc;
+  font-size: 0.78rem;
+}
+
+#pending-devices section,
+#group-devices {
+  margin-top: 1rem;
+}
+
+.verification-code {
+  margin: 1rem 0 0;
+  color: #7dd3fc;
+  font-size: 2rem;
+  font-weight: 750;
+  letter-spacing: 0.18em;
+}
+
 .card {
   padding: 1.35rem;
   overflow: hidden;

@@ -85,6 +85,14 @@ export function integerQuery(url: URL, key: string): number {
   return value;
 }
 
+export function integerField(value: Record<string, unknown>, key: string): number {
+  const field = value[key];
+  if (!Number.isSafeInteger(field) || (field as number) < 0) {
+    throw new HttpError(400, "invalid_field", `Invalid field: ${key}`);
+  }
+  return field as number;
+}
+
 export function bearerToken(request: Request): string {
   const header = request.headers.get("authorization");
   if (header === null || !header.startsWith("Bearer ")) {

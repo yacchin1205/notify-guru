@@ -23,6 +23,29 @@
         <p>CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
       </section>
       <p id="message" role="status" aria-live="polite"></p>
+      <section id="device-group" class="group-card" hidden>
+        <div class="card-head">
+          <div>
+            <p class="card-label">DEVICE GROUP</p>
+            <h2>この端末のグループ</h2>
+          </div>
+          <span id="group-generation"></span>
+        </div>
+        <p id="group-status"></p>
+        <button id="invite-device" type="button">端末を追加</button>
+        <div id="invitation" hidden>
+          <p>追加する端末で次のリンクを開いてください。有効期間は10分です。</p>
+          <a id="invitation-link"></a>
+        </div>
+        <div id="pending-devices"></div>
+        <div id="group-devices"></div>
+      </section>
+      <section id="join-device" class="group-card" hidden>
+        <p class="card-label">DEVICE VERIFICATION</p>
+        <h2>端末追加の確認</h2>
+        <p id="join-device-status"></p>
+        <p id="verification-code" class="verification-code"></p>
+      </section>
       <section id="cards" aria-label="セッション"></section>
       <section id="empty" hidden>
         <div class="empty-mark" aria-hidden="true">⌁</div>

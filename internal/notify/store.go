@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -23,8 +24,7 @@ type managedSession struct {
 	privateKey     *ecdh.PrivateKey
 	publicKey      string
 	pairings       map[string]Pairing
-	groups         map[string]Group
-	joinCursor     int64
+	groups         map[string]*Group
 	responseCursor int64
 }
 
@@ -63,7 +63,7 @@ func (s *Store) Create(ctx context.Context, title string) (sessionID, pairingURL
 		privateKey:   privateKey,
 		publicKey:    publicKey,
 		pairings:     map[string]Pairing{pairing.ID: pairing},
-		groups:       make(map[string]Group),
+		groups:       make(map[string]*Group),
 	}
 	s.mu.Lock()
 	s.sessions[sessionID] = session
@@ -96,24 +96,97 @@ func (s *Store) RefreshGroups(ctx context.Context, sessionID string) (int, error
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	result, err := s.api.joins(ctx, session.id, session.managerToken, session.joinCursor)
+	return s.refreshGroupsLocked(ctx, session)
+}
+
+func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession) (int, error) {
+	result, err := s.api.joinsV2(ctx, session.id, session.managerToken)
 	if err != nil {
 		return 0, err
 	}
 	for _, joined := range result.Groups {
-		pairing, exists := session.pairings[joined.PairingID]
+		group, exists := session.groups[joined.GroupID]
 		if !exists {
-			return 0, fmt.Errorf("join references unknown pairing %q", joined.PairingID)
+			pairing, known := session.pairings[joined.PairingID]
+			if !known {
+				return 0, fmt.Errorf("join references unknown pairing %q", joined.PairingID)
+			}
+			if err := verifyPairingProofV2(
+				pairing.AuthSecret,
+				session.id,
+				joined.PairingID,
+				joined.GroupID,
+				joined.InitialRevision,
+				joined.InitialGeneration,
+				joined.InitialPublicKey,
+				joined.Proof,
+			); err != nil {
+				return 0, fmt.Errorf("authenticate device group %q: %w", joined.GroupID, err)
+			}
+			key, err := deriveGenerationKey(
+				session.privateKey,
+				joined.InitialPublicKey,
+				session.id,
+				joined.GroupID,
+				joined.InitialGeneration,
+			)
+			if err != nil {
+				return 0, err
+			}
+			group = &Group{
+				ID:                joined.GroupID,
+				PairingID:         joined.PairingID,
+				InitialRevision:   joined.InitialRevision,
+				InitialGeneration: joined.InitialGeneration,
+				InitialPublicKey:  joined.InitialPublicKey,
+				Revision:          joined.InitialRevision,
+				Generation:        joined.InitialGeneration,
+				PublicKey:         joined.InitialPublicKey,
+				Keys:              map[int64][]byte{joined.InitialGeneration: key},
+			}
+			session.groups[joined.GroupID] = group
+		} else if group.PairingID != joined.PairingID ||
+			group.InitialRevision != joined.InitialRevision ||
+			group.InitialGeneration != joined.InitialGeneration ||
+			group.InitialPublicKey != joined.InitialPublicKey {
+			return 0, fmt.Errorf("server changed authenticated initial state for device group %q", joined.GroupID)
 		}
-		if err := verifyPairingProof(pairing.AuthSecret, session.id, joined.PairingID, joined.GroupID, joined.PublicKey, joined.Proof); err != nil {
-			return 0, fmt.Errorf("authenticate device group %q: %w", joined.GroupID, err)
+
+		if joined.CurrentGeneration < group.Generation || joined.CurrentRevision < group.Revision {
+			return 0, fmt.Errorf("server rolled back device group %q", joined.GroupID)
 		}
-		key, err := deriveKey(session.privateKey, joined.PublicKey, session.id)
-		if err != nil {
-			return 0, err
+		for _, transition := range joined.Transitions {
+			if transition.Generation <= group.Generation {
+				continue
+			}
+			if transition.PreviousGeneration != group.Generation ||
+				transition.Generation != group.Generation+1 ||
+				transition.Revision != group.Revision+1 {
+				return 0, fmt.Errorf("device group %q has a discontinuous generation transition", joined.GroupID)
+			}
+			if err := verifyGenerationTransition(group.ID, transition, group.PublicKey); err != nil {
+				return 0, fmt.Errorf("device group %q: %w", joined.GroupID, err)
+			}
+			key, err := deriveGenerationKey(
+				session.privateKey,
+				transition.GenerationPublicKey,
+				session.id,
+				group.ID,
+				transition.Generation,
+			)
+			if err != nil {
+				return 0, err
+			}
+			group.Revision = transition.Revision
+			group.Generation = transition.Generation
+			group.PublicKey = transition.GenerationPublicKey
+			group.Keys[transition.Generation] = key
 		}
-		session.groups[joined.GroupID] = Group{ID: joined.GroupID, Key: key}
-		session.joinCursor = joined.Sequence
+		if group.Revision != joined.CurrentRevision ||
+			group.Generation != joined.CurrentGeneration ||
+			group.PublicKey != joined.CurrentPublicKey {
+			return 0, fmt.Errorf("device group %q current state does not match its signed transition chain", joined.GroupID)
+		}
 	}
 	return len(session.groups), nil
 }
@@ -170,7 +243,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	result, err := s.api.responses(ctx, session.id, session.managerToken, session.responseCursor)
+	result, err := s.api.responsesV2(ctx, session.id, session.managerToken, session.responseCursor)
 	if err != nil {
 		return nil, err
 	}
@@ -180,8 +253,18 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		if !exists {
 			return nil, fmt.Errorf("response references unknown device group %q", envelope.GroupID)
 		}
+		key, exists := group.Keys[envelope.Generation]
+		if !exists {
+			return nil, fmt.Errorf("response references unknown generation %d for device group %q", envelope.Generation, envelope.GroupID)
+		}
 		var decrypted decryptedResponse
-		if err := decryptJSON(group.Key, responseAAD(session.id, group.ID, envelope.ResponseID), envelope.Nonce, envelope.Ciphertext, &decrypted); err != nil {
+		if err := decryptJSON(
+			key,
+			responseAAD(session.id, group.ID, envelope.ResponseID, envelope.Generation),
+			envelope.Nonce,
+			envelope.Ciphertext,
+			&decrypted,
+		); err != nil {
 			return nil, fmt.Errorf("decrypt response %q: %w", envelope.ResponseID, err)
 		}
 		if decrypted.ID != envelope.ResponseID {
@@ -292,19 +375,49 @@ func (s *Store) send(ctx context.Context, sessionID string, value event) error {
 	value.SessionTitle = session.title
 	value.CreatedAt = time.Now().UTC()
 	for _, group := range session.groups {
-		envelopeID, err := randomValue(18)
-		if err != nil {
-			return err
-		}
-		nonce, ciphertext, err := encryptJSON(group.Key, eventAAD(session.id, group.ID, envelopeID), value)
-		if err != nil {
-			return err
-		}
-		if err := s.api.addEvent(ctx, session.id, session.managerToken, envelopeID, group.ID, nonce, ciphertext); err != nil {
-			return err
+		if err := s.sendToGroup(ctx, session, group, value); err != nil {
+			var apiError *APIError
+			if !errors.As(err, &apiError) || apiError.Code != "stale_group_generation" {
+				return err
+			}
+			if _, refreshErr := s.refreshGroupsLocked(ctx, session); refreshErr != nil {
+				return fmt.Errorf("refresh stale device group: %w", refreshErr)
+			}
+			if retryErr := s.sendToGroup(ctx, session, group, value); retryErr != nil {
+				return fmt.Errorf("send after one generation refresh: %w", retryErr)
+			}
 		}
 	}
 	return nil
+}
+
+func (s *Store) sendToGroup(ctx context.Context, session *managedSession, group *Group, value event) error {
+	envelopeID, err := randomValue(18)
+	if err != nil {
+		return err
+	}
+	key, exists := group.Keys[group.Generation]
+	if !exists {
+		return fmt.Errorf("missing current key for device group %q generation %d", group.ID, group.Generation)
+	}
+	nonce, ciphertext, err := encryptJSON(
+		key,
+		eventAAD(session.id, group.ID, envelopeID, group.Generation),
+		value,
+	)
+	if err != nil {
+		return err
+	}
+	return s.api.addEventV2(
+		ctx,
+		session.id,
+		session.managerToken,
+		envelopeID,
+		group.ID,
+		group.Generation,
+		nonce,
+		ciphertext,
+	)
 }
 
 func (s *Store) session(sessionID string) (*managedSession, error) {
