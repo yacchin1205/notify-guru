@@ -22,7 +22,6 @@ struct DeviceIdentity: Codable, Equatable {
     let encryptionPrivateKey: Data
     let signingPrivateKey: Data
     var group: DeviceGroup?
-    var deviceRequest: DeviceRequestRecord?
 }
 
 struct GroupDevice: Codable, Equatable, Identifiable {

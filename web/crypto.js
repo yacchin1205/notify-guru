@@ -17,7 +17,6 @@ export async function createDeviceIdentity() {
     signingKeyPair,
     signingPublicKey: encode(await crypto.subtle.exportKey("raw", signingKeyPair.publicKey)),
     group: null,
-    deviceRequest: null,
   };
 }
 

@@ -20,7 +20,7 @@
       <section id="intro">
         <p class="eyebrow">EPHEMERAL AGENT NOTIFICATIONS</p>
         <h1>作業の続きを、手元で待つ。</h1>
-        <p>CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
+        <p>CLIに表示されたQRコードをデバイスのカメラで読み取ると、この画面にセッションが追加されます。</p>
       </section>
       <p id="message" role="status" aria-live="polite"></p>
       <section id="startup-error" class="group-card error-card" hidden>
@@ -28,39 +28,39 @@
         <h2>起動できません</h2>
         <p id="startup-error-message" role="alert"></p>
         <div id="reset-local-data-actions" hidden>
-          <p>このブラウザに保存された端末鍵とセッションを削除すると、現在のバージョンで再登録できます。</p>
-          <button id="reset-local-data" class="destructive" type="button">この端末のデータをリセット</button>
+          <p>保存データを削除すると、このブラウザを新しいデバイスとして設定し直せます。保存済みのセッションも削除されます。</p>
+          <button id="reset-local-data" class="destructive" type="button">このデバイスのデータをリセット</button>
         </div>
       </section>
       <section id="device-summary" class="group-card" hidden>
         <div class="card-head">
           <div>
-            <p class="card-label">DEVICES</p>
-            <h2 id="device-summary-title">この端末のみ</h2>
+            <p class="card-label">DEVICE GROUP</p>
+            <h2 id="device-summary-title">共有なし</h2>
           </div>
-          <button id="open-device-management" type="button">端末の管理</button>
+          <button id="open-device-management" type="button">デバイスグループの管理</button>
         </div>
       </section>
       <section id="device-management" class="group-card" hidden>
         <div class="card-head">
           <div>
-            <p class="card-label">DEVICES</p>
-            <h2>端末の管理</h2>
+            <p class="card-label">DEVICE GROUP</p>
+            <h2>デバイスグループの管理</h2>
           </div>
           <button id="close-device-management" type="button">完了</button>
         </div>
         <p id="group-status"></p>
         <p id="group-key-time"></p>
-        <button id="request-device-sharing" type="button">この端末を共有へ追加する</button>
+        <button id="request-device-sharing" type="button">このデバイスを別のグループに追加する</button>
         <div id="group-devices"></div>
-        <button id="leave-device-group" class="destructive" type="button" hidden>この端末での共有をやめる</button>
+        <button id="leave-device-group" class="destructive" type="button" hidden>このデバイスをグループから除外する</button>
       </section>
       <section id="join-device" class="group-card" hidden>
-        <p class="card-label">DEVICE REQUEST</p>
-        <h2>共有への追加待ち</h2>
+        <p class="card-label">DEVICE GROUP</p>
+        <h2>別のグループへの追加待ち</h2>
         <p id="join-device-status"></p>
         <div id="invitation-qr"></div>
-        <button id="share-invitation" type="button">追加依頼リンクを共有</button>
+        <button id="share-invitation" type="button">グループ追加用リンクを共有</button>
       </section>
       <section id="cards" aria-label="セッション"></section>
       <section id="empty" hidden>

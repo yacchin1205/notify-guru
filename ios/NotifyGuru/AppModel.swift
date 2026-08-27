@@ -19,9 +19,10 @@ final class AppModel: ObservableObject {
     private let api = APIClient()
     private var vault: Vault?
     private var groupState: DeviceGroupStateResult?
+    private var pendingDeviceRequest: DeviceRequestRecord?
     private var isSyncing = false
 
-    var isAwaitingDeviceApproval: Bool { vault?.identity.deviceRequest != nil }
+    var isAwaitingDeviceApproval: Bool { pendingDeviceRequest != nil }
     var deviceCount: Int { max(1, groupDevices.count) }
     var isSharingAcrossDevices: Bool { groupDevices.count > 1 }
     var deviceRequestWouldDiscardCurrentState: Bool { isSharingAcrossDevices || !sessions.isEmpty }
@@ -43,14 +44,14 @@ final class AppModel: ObservableObject {
                 identity.deviceID = try await api.registerDevice(identity: identity)
                 current = Vault(version: 3, identity: identity, sessions: [])
             }
-            if current.identity.group == nil && current.identity.deviceRequest == nil { try await createSoloGroup(&current) }
+            if current.identity.group == nil { try await createSoloGroup(&current) }
             try persist(current)
             isReady = true
             await sync()
             await PushCoordinator.shared.resumeIfAuthorized()
         } catch KeychainError.unsupportedVersion {
             failStartup(
-                "Stored data uses an older protocol and cannot be opened by this version.",
+                "The saved notify.guru data on this device can no longer be opened. Erase it to set up this device again; saved sessions will be removed.",
                 canReset: true
             )
         } catch {
@@ -84,13 +85,13 @@ final class AppModel: ObservableObject {
     func createDeviceRequest(discardingCurrentState: Bool = false) async {
         do {
             var current = try requiredVault()
-            if current.identity.deviceRequest != nil {
-                deviceRequestLink = try deviceRequestURL(current.identity.deviceRequest!)
+            if let pendingDeviceRequest {
+                deviceRequestLink = try deviceRequestURL(pendingDeviceRequest)
                 return
             }
             try await synchronizeGroup(&current)
             if deviceRequestWouldDiscardCurrentState && !discardingCurrentState {
-                throw ProtocolError.invalidResponse("confirm discarding the current device sharing and sessions")
+                throw ProtocolError.invalidResponse("confirm removing this device from its current group and deleting its saved sessions")
             }
             if let groupID = current.identity.group?.groupID {
                 try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
@@ -98,9 +99,10 @@ final class AppModel: ObservableObject {
                 clearPublishedGroupState()
             }
             let requestID = try CryptoEngine.randomID()
-            current.identity.deviceRequest = try await api.createDeviceRequest(identity: current.identity, requestID: requestID)
+            let created = try await api.createDeviceRequest(identity: current.identity, requestID: requestID)
+            pendingDeviceRequest = created
             try persist(current)
-            deviceRequestLink = try deviceRequestURL(current.identity.deviceRequest!)
+            deviceRequestLink = try deviceRequestURL(created)
             errorMessage = nil
         } catch { show(error) }
     }
@@ -119,14 +121,13 @@ final class AppModel: ObservableObject {
         do {
             var current = try requiredVault()
             guard groupDevices.count > 1, let groupID = current.identity.group?.groupID else {
-                throw ProtocolError.invalidResponse("a device used alone cannot leave")
+                throw ProtocolError.invalidResponse("this device cannot be removed from a group with no other devices")
             }
             try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
             current = Self.detachingFromDeviceGroup(current, groupID: groupID)
             clearPublishedGroupState()
             try await createSoloGroup(&current)
             try persist(current)
-            noticeMessage = "This device is now used on its own."
         } catch { show(error) }
     }
 
@@ -227,8 +228,8 @@ final class AppModel: ObservableObject {
 
     private func approveDeviceRequest(_ link: DeviceRequestLink) async throws {
         var current = try requiredVault()
-        guard current.identity.group != nil, current.identity.deviceRequest == nil else {
-            throw ProtocolError.invalidPairingLink("this device has no group that can approve the request")
+        guard current.identity.group != nil, pendingDeviceRequest == nil else {
+            throw ProtocolError.invalidPairingLink("this device cannot add another device to a group")
         }
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
@@ -236,7 +237,6 @@ final class AppModel: ObservableObject {
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
         try persist(current)
-        noticeMessage = "The device was added to this sharing group."
     }
 
     private func joinSession(_ pairing: PairingLink) async throws {
@@ -259,7 +259,6 @@ final class AppModel: ObservableObject {
         try populateSessionKeys(&record, group: group)
         current.sessions.append(record)
         try persist(current)
-        noticeMessage = "Session connected."
         await enableNotifications()
     }
 
@@ -272,21 +271,20 @@ final class AppModel: ObservableObject {
     }
 
     private func pollDeviceRequest(_ current: inout Vault) async throws {
-        guard let pending = current.identity.deviceRequest else { return }
+        guard let pending = pendingDeviceRequest else { return }
         switch try await api.deviceRequestStatus(identity: current.identity, requestID: pending.requestID) {
         case .waiting:
             deviceRequestLink = try deviceRequestURL(pending)
         case .expired:
-            current.identity.deviceRequest = nil; deviceRequestLink = nil
+            pendingDeviceRequest = nil; deviceRequestLink = nil
             try await createSoloGroup(&current)
-            noticeMessage = "The device request expired. This device is now used on its own."
+            noticeMessage = "The add-to-group link expired. This device is now used on its own."
         case .approved(let groupID, _):
-            current.identity.deviceRequest = nil
+            pendingDeviceRequest = nil
             current.identity.group = DeviceGroup(groupID: groupID, keys: [:])
             deviceRequestLink = nil
             try await synchronizeGroup(&current)
             try await ensureExactGroupKey(&current)
-            noticeMessage = "This device was added to device sharing."
             await enableNotifications()
         }
     }
@@ -380,7 +378,7 @@ final class AppModel: ObservableObject {
         clearPublishedGroupState()
         try await createSoloGroup(&current)
         try persist(current)
-        noticeMessage = "Sharing ended for this device. It is now used on its own."
+        noticeMessage = "This device was removed from its group. It is now used on its own."
         connectionState = .current
     }
 
@@ -395,7 +393,7 @@ final class AppModel: ObservableObject {
         ]
         var result = URLComponents(string: "https://notify.guru/device")!
         result.percentEncodedFragment = fragment.percentEncodedQuery
-        guard let value = result.url?.absoluteString else { throw ProtocolError.invalidResponse("could not construct device request URL") }
+        guard let value = result.url?.absoluteString else { throw ProtocolError.invalidResponse("could not create the link for adding this device") }
         return value
     }
 
@@ -415,7 +413,8 @@ final class AppModel: ObservableObject {
     }
 
     private func clearPublishedGroupState() {
-        groupState = nil; groupDevices = []; currentKeyTimestamp = nil; deviceRequestLink = nil
+        groupState = nil; groupDevices = []; currentKeyTimestamp = nil
+        pendingDeviceRequest = nil; deviceRequestLink = nil
     }
 
     private func requiredVault() throws -> Vault {
@@ -441,7 +440,6 @@ final class AppModel: ObservableObject {
     nonisolated static func detachingFromDeviceGroup(_ vault: Vault, groupID: String) -> Vault {
         var result = vault
         result.identity.group = nil
-        result.identity.deviceRequest = nil
         result.sessions.removeAll { $0.protocolVersion == 3 && $0.groupID == groupID }
         return result
     }

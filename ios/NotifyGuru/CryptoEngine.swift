@@ -9,8 +9,7 @@ enum CryptoEngine {
             accessToken: try randomToken(),
             encryptionPrivateKey: P256.KeyAgreement.PrivateKey().rawRepresentation,
             signingPrivateKey: P256.Signing.PrivateKey().rawRepresentation,
-            group: nil,
-            deviceRequest: nil
+            group: nil
         )
     }
 

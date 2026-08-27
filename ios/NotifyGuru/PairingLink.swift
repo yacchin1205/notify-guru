@@ -85,17 +85,19 @@ struct DeviceRequestLink: Equatable {
         }
         let expected = Set(["v", "r"])
         guard items.count == expected.count, Set(items.map(\.name)) == expected else {
-            throw ProtocolError.invalidPairingLink("device request fields do not match protocol version 2")
+            throw ProtocolError.invalidPairingLink("the add-to-group link has an invalid format")
         }
         var fields: [String: String] = [:]
         for item in items {
             guard let itemValue = item.value, !itemValue.isEmpty, fields[item.name] == nil else {
-                throw ProtocolError.invalidPairingLink("device invitation contains an empty or duplicate field")
+                throw ProtocolError.invalidPairingLink("the add-to-group link has an empty or duplicate field")
             }
             fields[item.name] = itemValue
         }
-        guard fields["v"] == "2" else { throw ProtocolError.invalidPairingLink("unsupported device request version") }
-        try PairingLink.requireIdentifier(fields["r"]!, name: "device request ID")
+        guard fields["v"] == "2" else {
+            throw ProtocolError.invalidPairingLink("this add-to-group link cannot be used by this app")
+        }
+        try PairingLink.requireIdentifier(fields["r"]!, name: "link identifier")
         requestID = fields["r"]!
     }
 }

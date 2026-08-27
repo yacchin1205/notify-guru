@@ -143,7 +143,7 @@ final class ProtocolTests: XCTestCase {
             deviceID: "device-identifier", accessToken: Base64URL.encode(Data(repeating: 8, count: 32)),
             encryptionPrivateKey: try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 6, count: 32)).rawRepresentation,
             signingPrivateKey: try P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32)).rawRepresentation,
-            group: nil, deviceRequest: nil
+            group: nil
         )
     }
 

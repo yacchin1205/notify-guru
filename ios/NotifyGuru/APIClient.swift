@@ -113,7 +113,9 @@ struct APIClient {
         ]
         let data = try await request(method: "POST", path: "/api/device-requests", token: nil, body: try encode(body), expectedStatus: 201)
         let fields = try object(data, keys: ["requestId", "expiresAt"])
-        guard try text(fields, "requestId") == requestID else { throw ProtocolError.invalidResponse("device request ID changed") }
+        guard try text(fields, "requestId") == requestID else {
+            throw ProtocolError.invalidResponse("the server response did not match the add-to-group link")
+        }
         return DeviceRequestRecord(requestID: requestID, expiresAt: try integer(fields, "expiresAt"))
     }
 
@@ -125,7 +127,7 @@ struct APIClient {
         let data = try await request(method: "GET", path: path, token: signature, body: nil, expectedStatus: 200)
         let raw = try JSONSerialization.jsonObject(with: data)
         guard let fields = raw as? [String: Any], let status = fields["status"] as? String else {
-            throw ProtocolError.invalidResponse("device request status is invalid")
+            throw ProtocolError.invalidResponse("the server returned an invalid add-to-group status")
         }
         switch status {
         case "waiting":
@@ -137,7 +139,7 @@ struct APIClient {
         case "approved":
             try requireKeys(fields, ["status", "groupId", "expiresAt"])
             return .approved(groupID: try text(fields, "groupId"), expiresAt: try integer(fields, "expiresAt"))
-        default: throw ProtocolError.invalidResponse("unknown device request status")
+        default: throw ProtocolError.invalidResponse("the server returned an unknown add-to-group status")
         }
     }
 
@@ -155,7 +157,7 @@ struct APIClient {
             body: try encode(["actorSignature": signature]), expectedStatus: 200
         )
         guard try object(data, keys: ["approved", "deviceId", "approvedByDeviceId"])["approved"] as? Bool == true else {
-            throw ProtocolError.invalidResponse("device request approval was not confirmed")
+            throw ProtocolError.invalidResponse("the server did not confirm that the device was added to the group")
         }
     }
 

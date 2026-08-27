@@ -55,7 +55,7 @@ struct JoinSessionView: View {
             ContentUnavailableView {
                 Label("Camera access", systemImage: "camera")
             } description: {
-                Text("Camera access is used only to scan a session or device request QR code.")
+                Text("Camera access is used only to scan a session QR code or a QR code for adding a device to a group.")
             } actions: {
                 Button("Allow camera") { requestCameraAccess() }
                     .buttonStyle(.borderedProminent)

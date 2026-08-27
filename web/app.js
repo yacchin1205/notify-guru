@@ -76,6 +76,7 @@ let groupState;
 let managingDevices = false;
 let synchronizing = false;
 let requestURL;
+let pendingDeviceRequest = null;
 
 window.addEventListener("unhandledrejection", (event) => showError(event.reason));
 document.querySelector("#open-device-management").addEventListener("click", () => setDeviceManagement(true));
@@ -95,7 +96,7 @@ async function initialize() {
   if (scannedRequest !== null) {
     await approveScannedRequest(scannedRequest);
   } else {
-    if (identity.group === null && identity.deviceRequest === null) await createSoloGroup();
+    if (identity.group === null) await createSoloGroup();
     if (location.hash.length > 1) await joinFromFragment();
   }
   await syncAll();
@@ -106,8 +107,9 @@ async function identityOrCreate() {
   const current = await getIdentity();
   if (current !== undefined) {
     if (current.protocolVersion !== 3) {
-      throw new LegacyProtocolError("保存済みデータは旧プロトコルのため、このバージョンでは読み込めません。");
+      throw new LegacyProtocolError("このブラウザに保存されているnotify.guruのデータを読み込めません。");
     }
+    delete current.deviceRequest;
     return current;
   }
   const created = await createDeviceIdentity();
@@ -122,7 +124,7 @@ async function identityOrCreate() {
 }
 
 async function createSoloGroup() {
-  if (identity.group !== null || identity.deviceRequest !== null) throw new Error("Device already has an active destination");
+  if (identity.group !== null || pendingDeviceRequest !== null) throw new Error("Device already has an active destination");
   const groupId = randomId();
   const accessHash = await hashToken(identity.accessToken);
   await createDeviceGroup({
@@ -138,15 +140,15 @@ async function createSoloGroup() {
 }
 
 async function beginDeviceRequest() {
-  if (identity.deviceRequest !== null) {
-    showDeviceRequest(identity.deviceRequest);
+  if (pendingDeviceRequest !== null) {
+    showDeviceRequest(pendingDeviceRequest);
     return;
   }
   if (identity.group !== null) {
     await syncGroup();
     const sessions = (await listSessions()).filter((session) => session.protocolVersion === 3 && session.groupId === identity.group.groupId);
     if ((groupState.members.length > 1 || sessions.length > 0)
-      && !window.confirm("現在の端末共有とセッションを捨て、この端末を別の共有へ追加しますか？")) return;
+      && !window.confirm("このデバイスを現在のグループから除外し、表示中のセッションを削除して、別のグループへの追加を続けますか？")) return;
     const groupId = identity.group.groupId;
     await removeDevice(identity, identity.deviceId, {
       actorSignature: await signDevice(
@@ -167,10 +169,9 @@ async function beginDeviceRequest() {
     deviceEncryptionPublicKey: identity.encryptionPublicKey,
     deviceSignature: await signDevice(identity, deviceRequestTranscript(requestId, identity, accessHash)),
   });
-  identity.deviceRequest = created;
-  await putIdentity(identity);
+  pendingDeviceRequest = created;
   showDeviceRequest(created);
-  await renderGroup();
+  setDeviceManagement(false);
 }
 
 function showDeviceRequest(deviceRequest) {
@@ -179,12 +180,12 @@ function showDeviceRequest(deviceRequest) {
   requestURL = link.toString();
   renderQR(requestURL);
   waitingElement.hidden = false;
-  waitingStatusElement.textContent = "既存端末でQRコードを読み取ると、この端末が共有へ追加されます。";
+  waitingStatusElement.textContent = "追加先のグループに所属しているデバイスでこのQRコードを読み取ってください。";
 }
 
 async function approveScannedRequest(requestId) {
-  if (identity.group === null || identity.deviceRequest !== null) {
-    throw new Error("追加依頼を承認できる端末共有がありません");
+  if (identity.group === null || pendingDeviceRequest !== null) {
+    throw new Error("このデバイスでは、別のデバイスをグループに追加できません");
   }
   await syncGroup();
   await ensureExactGroupKey();
@@ -197,33 +198,32 @@ async function approveScannedRequest(requestId) {
   await syncGroup();
   await ensureExactGroupKey();
   history.replaceState(null, "", "/");
-  messageElement.textContent = "端末を共有へ追加しました。";
+  messageElement.textContent = "デバイスをグループへ追加しました。";
 }
 
 async function pollDeviceRequest() {
-  if (identity.deviceRequest === null) return;
-  const requestId = identity.deviceRequest.requestId;
+  if (pendingDeviceRequest === null) return;
+  const requestId = pendingDeviceRequest.requestId;
   const signature = await signDevice(identity, deviceRequestReadTranscript(requestId, identity.deviceId));
   const state = await getDeviceRequest(identity, requestId, signature);
   if (state.status === "waiting") {
-    showDeviceRequest(identity.deviceRequest);
+    showDeviceRequest(pendingDeviceRequest);
     return;
   }
   waitingElement.hidden = true;
   requestQRElement.replaceChildren();
   requestURL = undefined;
-  identity.deviceRequest = null;
+  pendingDeviceRequest = null;
   if (state.status === "expired") {
-    await putIdentity(identity);
     await createSoloGroup();
-    messageElement.textContent = "端末追加依頼が失効したため、単独利用に戻りました。";
+    messageElement.textContent = "グループへの追加が時間切れになったため、このデバイスは単独利用に戻りました。";
     return;
   }
   identity.group = { groupId: state.groupId, keys: {} };
   await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
-  messageElement.textContent = "端末共有へ追加されました。";
+  messageElement.textContent = "デバイスグループへ追加されました。";
 }
 
 async function syncAll() {
@@ -427,7 +427,7 @@ function applyEvent(session, event, keyTimestamp) {
 }
 
 async function removeGroupDevice(deviceId) {
-  if (!window.confirm("この端末との共有を解除しますか？")) return;
+  if (!window.confirm("このデバイスをグループから除外しますか？")) return;
   await removeDevice(identity, deviceId, {
     actorSignature: await signDevice(
       identity,
@@ -440,8 +440,8 @@ async function removeGroupDevice(deviceId) {
 }
 
 async function leaveCurrentGroup() {
-  if (groupState === undefined || groupState.members.length <= 1) throw new Error("単独利用中の端末は離脱できません");
-  if (!window.confirm("この端末での共有をやめ、共有中のセッションと鍵を削除しますか？")) return;
+  if (groupState === undefined || groupState.members.length <= 1) throw new Error("単独利用中のデバイスはグループから除外できません");
+  if (!window.confirm("このデバイスをグループから除外しますか？このデバイスに表示されているセッションも削除されます。")) return;
   const groupId = identity.group.groupId;
   await removeDevice(identity, identity.deviceId, {
     actorSignature: await signDevice(
@@ -454,7 +454,7 @@ async function leaveCurrentGroup() {
   groupState = undefined;
   await createSoloGroup();
   setDeviceManagement(false);
-  messageElement.textContent = "この端末は単独利用に戻りました。";
+  messageElement.textContent = "このデバイスは単独利用に戻りました。";
 }
 
 async function recoverRemovedDevice() {
@@ -463,22 +463,22 @@ async function recoverRemovedDevice() {
   await detachDeviceGroup(identity, groupId);
   groupState = undefined;
   await createSoloGroup();
-  messageElement.textContent = "端末共有が解除されたため、この端末は単独利用に戻りました。";
+  messageElement.textContent = "デバイスグループから除外されたため、このデバイスは単独利用に戻りました。";
   await renderGroup();
   await render();
   connectionElement.textContent = "接続中";
 }
 
 async function renderGroup() {
-  const waiting = identity.deviceRequest !== null;
+  const waiting = pendingDeviceRequest !== null;
   waitingElement.hidden = !waiting;
   deviceSummaryElement.hidden = waiting || identity.group === null || managingDevices;
   deviceManagementElement.hidden = waiting || identity.group === null || !managingDevices;
-  if (waiting) showDeviceRequest(identity.deviceRequest);
+  if (waiting) showDeviceRequest(pendingDeviceRequest);
   if (identity.group === null || groupState === undefined) return;
   const sharing = groupState.members.length > 1;
-  deviceSummaryTitleElement.textContent = sharing ? `${groupState.members.length}台で通知を共有中` : "この端末のみ";
-  groupStatusElement.textContent = sharing ? `${groupState.members.length}台で通知を共有しています。` : "現在はこの端末だけで通知を受け取ります。";
+  deviceSummaryTitleElement.textContent = sharing ? `${groupState.members.length}台で通知を共有中` : "共有なし";
+  groupStatusElement.textContent = sharing ? `${groupState.members.length}台で通知を共有しています。` : "現在はこのデバイスだけで通知を受け取ります。";
   const current = selectUsableGroupKey(groupState);
   groupKeyTimeElement.textContent = current === null ? "利用可能な鍵なし" : `鍵 ${new Date(current.timestamp).toLocaleString()}`;
   leaveButton.hidden = !sharing;
@@ -487,12 +487,12 @@ async function renderGroup() {
     const row = document.createElement("div");
     row.className = "device-row";
     const label = document.createElement("span");
-    label.textContent = member.deviceId === identity.deviceId ? `この端末 · ${member.deviceId.slice(0, 8)}` : `端末 · ${member.deviceId.slice(0, 8)}`;
+    label.textContent = member.deviceId === identity.deviceId ? `このデバイス · ${member.deviceId.slice(0, 8)}` : `デバイス · ${member.deviceId.slice(0, 8)}`;
     row.append(label);
     if (member.deviceId !== identity.deviceId) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = "共有を解除";
+      button.textContent = "グループから除外";
       button.addEventListener("click", () => removeGroupDevice(member.deviceId).catch(showError));
       row.append(button);
     }
@@ -538,7 +538,7 @@ function parseDeviceRequestFragment() {
   if (location.pathname !== "/device" || location.hash.length <= 1) return null;
   const parameters = new URLSearchParams(location.hash.slice(1));
   requireFragmentFields(parameters, ["v", "r"]);
-  if (parameters.get("v") !== "2") throw new Error("Unsupported device request version");
+  if (parameters.get("v") !== "2") throw new Error("このグループ追加用リンクは使用できません");
   return parameters.get("r");
 }
 
@@ -586,11 +586,11 @@ function setDeviceManagement(enabled) {
 }
 
 async function shareDeviceRequest() {
-  if (requestURL === undefined) throw new Error("有効な端末追加依頼がありません");
-  if (navigator.share !== undefined) await navigator.share({ title: "notify.guru device request", url: requestURL });
+  if (requestURL === undefined) throw new Error("有効な追加用リンクがありません");
+  if (navigator.share !== undefined) await navigator.share({ title: "notify.guru device group", url: requestURL });
   else {
     await navigator.clipboard.writeText(requestURL);
-    messageElement.textContent = "端末追加依頼リンクをコピーしました。";
+    messageElement.textContent = "追加用リンクをコピーしました。";
   }
 }
 
@@ -600,7 +600,7 @@ function renderQR(value) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${size + quietZone * 2} ${size + quietZone * 2}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "端末追加依頼QRコード");
+  svg.setAttribute("aria-label", "このデバイスをグループに追加するQRコード");
   const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
   background.setAttribute("width", "100%"); background.setAttribute("height", "100%"); background.setAttribute("fill", "white");
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -646,7 +646,7 @@ async function resetCurrentDevice() {
     location.replace("/");
   } catch (error) {
     resetLocalDataButton.disabled = false;
-    resetLocalDataButton.textContent = "この端末のデータをリセット";
+    resetLocalDataButton.textContent = "このデバイスのデータをリセット";
     throw error;
   }
 }

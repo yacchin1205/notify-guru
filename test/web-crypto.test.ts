@@ -12,6 +12,10 @@ import {
 import { verifyP256Signature } from "../src/protocol";
 
 describe("web device-group cryptography", () => {
+  it("keeps an in-progress device request out of the saved identity", async () => {
+    expect(await createDeviceIdentity()).not.toHaveProperty("deviceRequest");
+  });
+
   it("wraps a group private key for exactly one registered device", async () => {
     const device = await registeredIdentity("device_identifier_1234");
     const other = await registeredIdentity("other_device_identifier");
