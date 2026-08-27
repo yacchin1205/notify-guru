@@ -24,6 +24,21 @@ export async function deleteSession(sessionId) {
   await complete(transaction);
 }
 
+export async function detachDeviceGroup(identity, groupId) {
+  const database = await openDatabase();
+  const transaction = database.transaction(["identity", "sessions"], "readwrite");
+  transaction.objectStore("identity").put(identity, "device-group");
+  const sessions = transaction.objectStore("sessions");
+  const cursorRequest = sessions.openCursor();
+  cursorRequest.onsuccess = () => {
+    const cursor = cursorRequest.result;
+    if (cursor === null) return;
+    if (cursor.value.protocolVersion === 2 && cursor.value.groupId === groupId) cursor.delete();
+    cursor.continue();
+  };
+  await complete(transaction);
+}
+
 export async function listSessions() {
   const database = await openDatabase();
   const transaction = database.transaction("sessions", "readonly");

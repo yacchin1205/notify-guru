@@ -14,12 +14,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectionState: ConnectionState = .preparing
     @Published private(set) var isReady = false
     @Published var errorMessage: String?
+    @Published var noticeMessage: String?
 
     private let keychain = KeychainVault()
     private let api = APIClient()
     private var vault: Vault?
     private var groupState: DeviceGroupStateResult?
     private var isSyncing = false
+
+    var isAwaitingDeviceApproval: Bool { vault?.identity.pendingInvitation != nil }
+    var deviceCount: Int { max(1, groupDevices.count) }
+    var isSharingAcrossDevices: Bool { groupDevices.count > 1 }
 
     func start() async {
         guard !isReady else { return }
@@ -57,11 +62,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func join(link: String) async -> Bool {
+    func join(link: String, replacingStandaloneSessions: Bool = false) async -> Bool {
         let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if let components = URLComponents(string: value), components.path == "/device" {
-                try await joinDevice(DeviceInvitationLink(value))
+                try await joinDevice(
+                    DeviceInvitationLink(value),
+                    replacingStandaloneSessions: replacingStandaloneSessions
+                )
             } else {
                 try await joinSession(PairingLink(value))
             }
@@ -74,11 +82,29 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func deviceInvitationWouldReplaceSessions(_ value: String) -> Bool {
+        guard let link = try? DeviceInvitationLink(value),
+              let group = vault?.identity.group,
+              group.groupID != link.groupID,
+              groupDevices.count == 1 else { return false }
+        return sessions.contains { $0.protocolVersion == 2 && $0.groupID == group.groupID }
+    }
+
     func createDeviceInvitation() async {
         do {
             var current = requiredVault()
             try await synchronizeGroup(&current)
             guard let group = current.identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
+            guard pendingDevices.isEmpty else {
+                throw ProtocolError.invalidResponse("finish the pending device approval before creating another invitation")
+            }
+            pruneExpiredInvitations(&current)
+            if let existing = current.identity.invitations.values.max(by: { ($0.expiresAt ?? 0) < ($1.expiresAt ?? 0) }) {
+                invitationLink = try deviceInvitationURL(existing)
+                try persist(current)
+                errorMessage = nil
+                return
+            }
             let invitationID = try CryptoEngine.randomID()
             let token = try CryptoEngine.randomToken()
             let expiresAt = try await api.createInvitation(
@@ -158,6 +184,41 @@ final class AppModel: ObservableObject {
         } catch { show(error) }
     }
 
+    func leaveDeviceGroup() async {
+        do {
+            var current = requiredVault()
+            try await synchronizeGroup(&current)
+            guard let group = current.identity.group else {
+                throw ProtocolError.invalidResponse("device group is not ready")
+            }
+            guard let state = groupState, state.devices.count > 1 else {
+                throw ProtocolError.invalidResponse("this device is already being used on its own")
+            }
+            let transition = try buildTransition(
+                action: "remove",
+                targetDeviceID: current.identity.deviceID,
+                pending: nil,
+                vault: current
+            )
+            try await api.removeDevice(
+                identity: current.identity,
+                deviceID: current.identity.deviceID,
+                body: transition.body
+            )
+            current = Self.detachingFromDeviceGroup(current, groupID: group.groupID)
+            groupState = nil
+            groupDevices = []
+            pendingDevices = []
+            invitationLink = nil
+            verificationCode = nil
+            deviceJoinStatus = nil
+            try persist(current)
+            try await createInitialGroup(&current)
+            errorMessage = nil
+            await sync()
+        } catch { show(error) }
+    }
+
     func respond(sessionID: String, optionID: String) async {
         do {
             try pruneExpiredSessions()
@@ -201,6 +262,9 @@ final class AppModel: ObservableObject {
         do {
             try pruneExpiredSessions()
             var current = requiredVault()
+            if current.identity.group == nil, current.identity.pendingInvitation == nil {
+                try await createInitialGroup(&current)
+            }
             if current.identity.pendingInvitation != nil {
                 try await pollDeviceJoin(&current)
             }
@@ -230,12 +294,26 @@ final class AppModel: ObservableObject {
             connectionState = .current
         } catch {
             if isExpectedCancellation(error) { connectionState = .current; return }
+            if let apiError = error as? APIError,
+               apiError.status == 403,
+               apiError.code == "device_removed" {
+                do {
+                    try await detachRemovedDevice()
+                    connectionState = .current
+                    return
+                } catch {
+                    connectionState = .failed
+                    show(error)
+                    return
+                }
+            }
             connectionState = .failed
             show(error)
         }
     }
 
     func dismissError() { errorMessage = nil }
+    func dismissNotice() { noticeMessage = nil }
 
     func resumeNotifications() async {
         guard isReady, !sessions.isEmpty else { return }
@@ -248,9 +326,7 @@ final class AppModel: ObservableObject {
         guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }) else {
             throw ProtocolError.invalidPairingLink("this device group already joined the session")
         }
-        guard current.identity.group != nil else {
-            throw ProtocolError.invalidPairingLink("create or join a device group before joining a session")
-        }
+        if current.identity.group == nil { try await createInitialGroup(&current) }
         try await synchronizeGroup(&current)
         guard let group = current.identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
         let expiresAt = try await api.join(pairing, identity: current.identity)
@@ -276,10 +352,37 @@ final class AppModel: ObservableObject {
         await enableNotifications()
     }
 
-    private func joinDevice(_ link: DeviceInvitationLink) async throws {
+    private func joinDevice(_ link: DeviceInvitationLink, replacingStandaloneSessions: Bool) async throws {
         var current = requiredVault()
+        if let existing = current.identity.group, existing.groupID != link.groupID {
+            try await synchronizeGroup(&current)
+            guard let state = groupState,
+                  state.devices.count == 1,
+                  state.devices[0].deviceID == current.identity.deviceID else {
+                throw ProtocolError.invalidPairingLink("stop sharing on this device before joining another set of devices")
+            }
+            let hasSessions = current.sessions.contains { $0.protocolVersion == 2 && $0.groupID == existing.groupID }
+            guard !hasSessions || replacingStandaloneSessions else {
+                throw ProtocolError.invalidPairingLink("joining will remove this device's current sessions")
+            }
+            let transition = try buildTransition(
+                action: "remove",
+                targetDeviceID: current.identity.deviceID,
+                pending: nil,
+                vault: current
+            )
+            try await api.removeDevice(
+                identity: current.identity,
+                deviceID: current.identity.deviceID,
+                body: transition.body
+            )
+            current = Self.detachingFromDeviceGroup(current, groupID: existing.groupID)
+            clearPublishedGroupState()
+            try persist(current)
+        }
+        if current.identity.pendingInvitation?.invitationID == link.invitationID { return }
         guard current.identity.group == nil else {
-            throw ProtocolError.invalidPairingLink("this device already belongs to a device group")
+            throw ProtocolError.invalidPairingLink("this device already receives notifications with these devices")
         }
         let expiresAt = try await api.submitJoinRequest(link, identity: current.identity)
         let invitation = DeviceInvitationRecord(
@@ -349,16 +452,20 @@ final class AppModel: ObservableObject {
         case "approved":
             try await synchronizeGroup(&current)
             current.identity.pendingInvitation = nil
-            deviceJoinStatus = "This device joined the group."
+            verificationCode = nil
+            deviceJoinStatus = nil
             try persist(current)
         case "rejected", "expired":
-            deviceJoinStatus = status == "rejected"
-                ? "The device invitation was rejected."
+            noticeMessage = status == "rejected"
+                ? "Device sharing was not approved."
                 : "The device invitation expired."
-            current.identity.pendingInvitation = nil
-            current.identity.group = nil
+            deviceJoinStatus = nil
+            let groupID = invitation.groupID
+            current = Self.detachingFromDeviceGroup(current, groupID: groupID)
+            clearPublishedGroupState()
             verificationCode = nil
             try persist(current)
+            try await createInitialGroup(&current)
         case "waiting", "pending": break
         default: throw ProtocolError.invalidResponse("unknown join request status")
         }
@@ -414,6 +521,13 @@ final class AppModel: ObservableObject {
         groupDevices = state.devices
         pendingDevices = state.pending
         groupGeneration = generation
+        pruneExpiredInvitations(&current)
+        if state.pending.isEmpty,
+           let active = current.identity.invitations.values.max(by: { ($0.expiresAt ?? 0) < ($1.expiresAt ?? 0) }) {
+            invitationLink = try deviceInvitationURL(active)
+        } else {
+            invitationLink = nil
+        }
         try persist(current)
     }
 
@@ -549,6 +663,33 @@ final class AppModel: ObservableObject {
         publish(value)
     }
 
+    private func detachRemovedDevice() async throws {
+        var current = requiredVault()
+        guard let group = current.identity.group else { return }
+        current = Self.detachingFromDeviceGroup(current, groupID: group.groupID)
+        clearPublishedGroupState()
+        deviceJoinStatus = nil
+        noticeMessage = "Sharing ended on this device. It is now being used on its own."
+        try persist(current)
+        try await createInitialGroup(&current)
+        errorMessage = nil
+    }
+
+    private func clearPublishedGroupState() {
+        groupState = nil
+        groupDevices = []
+        pendingDevices = []
+        invitationLink = nil
+        verificationCode = nil
+    }
+
+    private func pruneExpiredInvitations(_ current: inout Vault) {
+        current.identity.invitations = Self.retainingActiveInvitations(
+            current.identity.invitations,
+            nowMilliseconds: Self.currentTimeMilliseconds()
+        )
+    }
+
     private func publish(_ value: Vault) {
         sessions = value.sessions.sorted { $0.expiresAt > $1.expiresAt }
         hasDeviceGroup = value.identity.group != nil
@@ -599,6 +740,25 @@ final class AppModel: ObservableObject {
         var result = vault
         result.sessions.removeAll { $0.expiresAt <= nowMilliseconds }
         return result
+    }
+
+    nonisolated static func detachingFromDeviceGroup(_ vault: Vault, groupID: String) -> Vault {
+        var result = vault
+        result.identity.group = nil
+        result.identity.pendingInvitation = nil
+        result.identity.invitations.removeAll()
+        result.sessions.removeAll { $0.protocolVersion == 2 && $0.groupID == groupID }
+        return result
+    }
+
+    nonisolated static func retainingActiveInvitations(
+        _ invitations: [String: DeviceInvitationRecord],
+        nowMilliseconds: Int64
+    ) -> [String: DeviceInvitationRecord] {
+        invitations.filter { _, invitation in
+            guard let expiresAt = invitation.expiresAt else { return false }
+            return expiresAt > nowMilliseconds
+        }
     }
 
     nonisolated private static func currentTimeMilliseconds() -> Int64 {

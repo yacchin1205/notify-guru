@@ -1,9 +1,12 @@
+import CoreImage.CIFilterBuiltins
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingJoin = false
+    @State private var showingDeviceManagement = false
 
     var body: some View {
         NavigationStack {
@@ -13,10 +16,10 @@ struct ContentView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
-                            if model.hasDeviceGroup {
-                                DeviceGroupCard()
+                            if model.isAwaitingDeviceApproval {
+                                DeviceApprovalWaitingCard()
                             } else {
-                                DeviceGroupSetupCard(showingJoin: $showingJoin)
+                                DeviceSummaryCard(showingManagement: $showingDeviceManagement)
                             }
                             ForEach(model.sessions) { session in
                                 SessionCard(session: session)
@@ -25,9 +28,9 @@ struct ContentView: View {
                                 ContentUnavailableView {
                                     Label("No sessions", systemImage: "link.badge.plus")
                                 } description: {
-                                    Text("Once this device belongs to a group, scan the one-shot QR code shown by notifyg.")
+                                    Text("Scan the one-shot QR code shown by notifyg.")
                                 } actions: {
-                                    Button("Scan a link") { showingJoin = true }
+                                    Button("Scan QR code") { showingJoin = true }
                                         .buttonStyle(.borderedProminent)
                                 }
                             }
@@ -46,17 +49,25 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Join", systemImage: "qrcode.viewfinder") { showingJoin = true }
+                    Button("Scan QR code", systemImage: "qrcode.viewfinder") { showingJoin = true }
                         .disabled(!model.isReady)
                 }
             }
             .sheet(isPresented: $showingJoin) {
                 JoinSessionView(isPresented: $showingJoin)
             }
+            .sheet(isPresented: $showingDeviceManagement) {
+                DeviceManagementView(isPresented: $showingDeviceManagement)
+            }
             .alert("notify.guru error", isPresented: errorPresented) {
                 Button("OK") { model.dismissError() }
             } message: {
                 Text(model.errorMessage ?? "")
+            }
+            .alert("notify.guru", isPresented: noticePresented) {
+                Button("OK") { model.dismissNotice() }
+            } message: {
+                Text(model.noticeMessage ?? "")
             }
             .task { await model.start() }
             .task(id: model.isReady) {
@@ -81,6 +92,13 @@ struct ContentView: View {
         )
     }
 
+    private var noticePresented: Binding<Bool> {
+        Binding(
+            get: { model.noticeMessage != nil },
+            set: { if !$0 { model.dismissNotice() } }
+        )
+    }
+
     private var connectionSymbol: String {
         switch model.connectionState {
         case .preparing: "circle.dotted"
@@ -91,27 +109,46 @@ struct ContentView: View {
     }
 }
 
-private struct DeviceGroupSetupCard: View {
+private struct DeviceSummaryCard: View {
     @EnvironmentObject private var model: AppModel
-    @Binding var showingJoin: Bool
+    @Binding var showingManagement: Bool
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DEVICES")
+                    .font(.caption2.weight(.bold))
+                    .tracking(1.5)
+                    .foregroundStyle(Color.brandAccent)
+                Text(model.isSharingAcrossDevices ? "Shared across \(model.deviceCount) devices" : "This device only")
+                    .font(.headline)
+            }
+            Spacer()
+            Button("Manage") { showingManagement = true }
+                .buttonStyle(.bordered)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+private struct DeviceApprovalWaitingCard: View {
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("DEVICE GROUP")
+            Text("DEVICE VERIFICATION")
                 .font(.caption2.weight(.bold))
                 .tracking(1.5)
                 .foregroundStyle(Color.brandAccent)
-            Text("Set up this device")
+            Text("Waiting for approval")
                 .font(.headline)
-            Text("Create a new group, or scan an invitation from a device in an existing group. Sessions can be joined after this device belongs to a group.")
+            Text("Confirm that the same code is shown on the inviting device, then approve there.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            if let status = model.deviceJoinStatus { Text(status).font(.subheadline) }
-            HStack {
-                Button("Create new group") { Task { await model.createDeviceGroup() } }
-                    .buttonStyle(.borderedProminent)
-                Button("Scan invitation") { showingJoin = true }
-                    .buttonStyle(.bordered)
+            if let code = model.verificationCode {
+                Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
             }
         }
         .padding(18)
@@ -120,62 +157,172 @@ private struct DeviceGroupSetupCard: View {
     }
 }
 
-private struct DeviceGroupCard: View {
+private struct DeviceManagementView: View {
     @EnvironmentObject private var model: AppModel
+    @Binding var isPresented: Bool
+    @State private var showingLeaveConfirmation = false
+    @State private var removalTarget: GroupDevice?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("DEVICE GROUP")
-                        .font(.caption2.weight(.bold))
-                        .tracking(1.5)
-                        .foregroundStyle(Color.brandAccent)
-                    Text(model.groupGeneration.map { "Key generation \($0)" } ?? "Joining device")
-                        .font(.headline)
-                }
-                Spacer()
-                if model.groupGeneration != nil {
-                    Button("Invite") { Task { await model.createDeviceInvitation() } }
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    invitationSection
+                    Divider()
+                    deviceSection
+                    if model.isSharingAcrossDevices {
+                        Divider()
+                        Button("Stop sharing on this device", role: .destructive) {
+                            showingLeaveConfirmation = true
+                        }
                         .buttonStyle(.bordered)
-                }
-            }
-            if let status = model.deviceJoinStatus { Text(status).font(.subheadline) }
-            if let code = model.verificationCode {
-                Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
-            }
-            if let link = model.invitationLink {
-                ShareLink(item: link) { Label("Share device invitation", systemImage: "square.and.arrow.up") }
-            }
-            ForEach(model.pendingDevices) { pending in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Pending · \(pending.deviceID.prefix(8))")
-                    if let code = model.verificationCode(for: pending) {
-                        Text(code).font(.title2.monospacedDigit().weight(.bold)).tracking(3)
-                    }
-                    HStack {
-                        Button("Approve") { Task { await model.approve(invitationID: pending.invitationID) } }
-                            .buttonStyle(.borderedProminent)
-                        Button("Reject", role: .destructive) { Task { await model.reject(invitationID: pending.invitationID) } }
-                            .buttonStyle(.bordered)
                     }
                 }
+                .padding()
             }
-            ForEach(model.groupDevices) { device in
-                HStack {
-                    Text(device.deviceID == model.deviceID ? "This device" : "Device \(device.deviceID.prefix(8))")
-                    Spacer()
-                    if device.deviceID != model.deviceID {
-                        Button("Remove", role: .destructive) { Task { await model.remove(deviceID: device.deviceID) } }
-                            .buttonStyle(.bordered)
-                    }
+            .background(Color.brandBackground)
+            .navigationTitle("Devices")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { isPresented = false }
                 }
-                .font(.subheadline)
             }
         }
-        .padding(18)
+        .confirmationDialog(
+            "Stop sharing on this device?",
+            isPresented: $showingLeaveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Stop sharing", role: .destructive) {
+                Task {
+                    await model.leaveDeviceGroup()
+                    if !model.isSharingAcrossDevices { isPresented = false }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Shared sessions and keys will be removed from this device. Other devices will continue to receive them.")
+        }
+        .confirmationDialog(
+            "Stop sharing with this device?",
+            isPresented: Binding(
+                get: { removalTarget != nil },
+                set: { if !$0 { removalTarget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let target = removalTarget {
+                Button("Remove device", role: .destructive) {
+                    Task {
+                        await model.remove(deviceID: target.deviceID)
+                        removalTarget = nil
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { removalTarget = nil }
+        } message: {
+            Text("That device will stop receiving new content shared with these devices.")
+        }
+    }
+
+    @ViewBuilder
+    private var invitationSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("USE ON ANOTHER DEVICE")
+                .font(.caption2.weight(.bold))
+                .tracking(1.5)
+                .foregroundStyle(Color.brandAccent)
+            if let pending = model.pendingDevices.first {
+                Text("Approve the new device")
+                    .font(.headline)
+                Text("Confirm that the same code is shown on both devices.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if let code = model.verificationCode(for: pending) {
+                    Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
+                }
+                HStack {
+                    Button("Approve") { Task { await model.approve(invitationID: pending.invitationID) } }
+                        .buttonStyle(.borderedProminent)
+                    Button("Reject", role: .destructive) { Task { await model.reject(invitationID: pending.invitationID) } }
+                        .buttonStyle(.bordered)
+                }
+            } else if let link = model.invitationLink {
+                Text("Scan this code with the other device. This invitation expires after 10 minutes.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                InvitationQRCodeView(value: link)
+                    .frame(maxWidth: 320)
+                    .frame(maxWidth: .infinity)
+                ShareLink(item: link) { Label("Share invitation", systemImage: "square.and.arrow.up") }
+            } else {
+                Button("Use on another device") { Task { await model.createDeviceInvitation() } }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var deviceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("DEVICES")
+                .font(.caption2.weight(.bold))
+                .tracking(1.5)
+                .foregroundStyle(Color.brandAccent)
+            ForEach(model.groupDevices) { device in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(device.deviceID == model.deviceID ? "This device" : "Device")
+                        Text(device.deviceID.prefix(8))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if device.deviceID != model.deviceID {
+                        Button("Remove", role: .destructive) { removalTarget = device }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct InvitationQRCodeView: View {
+    let value: String
+
+    var body: some View {
+        Group {
+            if let image = InvitationQRCode.image(for: value) {
+                Image(uiImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .accessibilityLabel("Device invitation QR code")
+            } else {
+                ContentUnavailableView("QR code unavailable", systemImage: "qrcode")
+            }
+        }
+        .padding(16)
+        .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+enum InvitationQRCode {
+    static func image(for value: String) -> UIImage? {
+        guard !value.isEmpty else { return nil }
+
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(value.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage else { return nil }
+
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let context = CIContext()
+        guard let image = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: image)
     }
 }
 

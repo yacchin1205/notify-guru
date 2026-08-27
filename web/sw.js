@@ -1,5 +1,5 @@
-const CACHE_NAME = "notify-guru-shell-v5";
-const SHELL = ["/", "/styles.css", "/app.js", "/api.js", "/crypto.js", "/db.js", "/expiry.js", "/icon.svg", "/icon-192.png", "/icon-512.png"];
+const CACHE_NAME = "notify-guru-shell-v8";
+const SHELL = ["/", "/styles.css", "/app.js", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));

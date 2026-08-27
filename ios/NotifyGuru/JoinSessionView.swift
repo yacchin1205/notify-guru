@@ -8,6 +8,7 @@ struct JoinSessionView: View {
     @State private var pairingLink = ""
     @State private var joining = false
     @State private var scanGeneration = 0
+    @State private var replacementLink: String?
 
     var body: some View {
         NavigationStack {
@@ -25,22 +26,41 @@ struct JoinSessionView: View {
                     .padding(12)
                     .background(.background, in: RoundedRectangle(cornerRadius: 12))
 
-                Button("Join") {
-                    Task { await join(pairingLink) }
-                }
+                Button("Continue") { beginJoin(pairingLink) }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(pairingLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || joining)
             }
             .padding()
             .background(Color(uiColor: .secondarySystemBackground))
-            .navigationTitle("Scan a link")
+            .navigationTitle("Scan QR code")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { isPresented = false }
                 }
             }
+        }
+        .confirmationDialog(
+            "Replace this device's current sessions?",
+            isPresented: Binding(
+                get: { replacementLink != nil },
+                set: { if !$0 { replacementLink = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let value = replacementLink {
+                Button("Replace and continue", role: .destructive) {
+                    replacementLink = nil
+                    Task { await join(value, replacingStandaloneSessions: true) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                replacementLink = nil
+                scanGeneration += 1
+            }
+        } message: {
+            Text("The sessions and keys currently stored on this device will be removed before it starts sharing with the other devices.")
         }
     }
 
@@ -50,7 +70,7 @@ struct JoinSessionView: View {
         case .authorized:
             QRScannerView { value in
                 pairingLink = value
-                Task { await join(value) }
+                beginJoin(value)
             }
             .id(scanGeneration)
         case .notDetermined:
@@ -81,10 +101,19 @@ struct JoinSessionView: View {
         }
     }
 
-    private func join(_ value: String) async {
+    private func beginJoin(_ value: String) {
+        guard !joining, replacementLink == nil else { return }
+        if model.deviceInvitationWouldReplaceSessions(value) {
+            replacementLink = value
+            return
+        }
+        Task { await join(value, replacingStandaloneSessions: false) }
+    }
+
+    private func join(_ value: String, replacingStandaloneSessions: Bool) async {
         guard !joining else { return }
         joining = true
-        let joined = await model.join(link: value)
+        let joined = await model.join(link: value, replacingStandaloneSessions: replacingStandaloneSessions)
         joining = false
         if joined {
             isPresented = false

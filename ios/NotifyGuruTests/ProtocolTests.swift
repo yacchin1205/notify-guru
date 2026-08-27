@@ -105,6 +105,66 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(pruned.sessions.map(\.sessionID), ["current"])
     }
 
+    func testDetachingGroupRemovesOnlyItsV2State() throws {
+        var identity = try fixedIdentity()
+        identity.group = DeviceGroup(
+            groupID: "current-group",
+            revision: 1,
+            generation: 1,
+            publicKey: "public-key",
+            generations: [:]
+        )
+        identity.pendingInvitation = DeviceInvitationRecord(
+            groupID: "current-group",
+            invitationID: "invitation-id",
+            invitationToken: "invitation-token",
+            revision: 1,
+            generation: 1,
+            publicKey: "public-key",
+            expiresAt: 1_000
+        )
+        identity.invitations["invitation-id"] = identity.pendingInvitation
+        let vault = Vault(
+            version: 2,
+            identity: identity,
+            sessions: [legacySession(id: "legacy", expiresAt: 1_000), v2Session(id: "v2", groupID: "current-group")]
+        )
+
+        let detached = AppModel.detachingFromDeviceGroup(vault, groupID: "current-group")
+
+        XCTAssertNil(detached.identity.group)
+        XCTAssertNil(detached.identity.pendingInvitation)
+        XCTAssertTrue(detached.identity.invitations.isEmpty)
+        XCTAssertEqual(detached.sessions.map(\.sessionID), ["legacy"])
+    }
+
+    func testInvitationQRCodeGeneration() {
+        XCTAssertNotNil(InvitationQRCode.image(for: "https://notify.guru/join#v=2&g=group&d=device"))
+        XCTAssertNil(InvitationQRCode.image(for: ""))
+    }
+
+    func testPrunesExpiredDeviceInvitationSecrets() {
+        let active = DeviceInvitationRecord(
+            groupID: "group", invitationID: "active", invitationToken: "secret",
+            revision: 1, generation: 1, publicKey: "key", expiresAt: 1_001
+        )
+        let expired = DeviceInvitationRecord(
+            groupID: "group", invitationID: "expired", invitationToken: "secret",
+            revision: 1, generation: 1, publicKey: "key", expiresAt: 1_000
+        )
+        let unknown = DeviceInvitationRecord(
+            groupID: "group", invitationID: "unknown", invitationToken: "secret",
+            revision: 1, generation: 1, publicKey: "key", expiresAt: nil
+        )
+
+        let retained = AppModel.retainingActiveInvitations(
+            ["active": active, "expired": expired, "unknown": unknown],
+            nowMilliseconds: 1_000
+        )
+
+        XCTAssertEqual(retained, ["active": active])
+    }
+
     private func fixedIdentity() throws -> DeviceIdentity {
         DeviceIdentity(
             deviceID: "device-identifier",
@@ -133,6 +193,25 @@ final class ProtocolTests: XCTestCase {
             request: nil,
             requestGeneration: nil,
             expiresAt: expiresAt
+        )
+    }
+
+    private func v2Session(id: String, groupID: String) -> SessionRecord {
+        SessionRecord(
+            protocolVersion: 2,
+            sessionID: id,
+            groupID: groupID,
+            groupAccessToken: "",
+            sharedKey: Data(),
+            creatorPublicKey: "creator-public-key",
+            generationKeys: ["1": Data(repeating: 1, count: 32)],
+            cursor: 0,
+            title: "Session",
+            status: "Connected",
+            notification: "",
+            request: nil,
+            requestGeneration: nil,
+            expiresAt: 1_000
         )
     }
 }

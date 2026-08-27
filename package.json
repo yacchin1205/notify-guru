@@ -3,15 +3,23 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:web": "node scripts/build-web.mjs",
     "check": "npm run typecheck && npm test",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "predeploy": "npm run build:web",
+    "predev": "npm run build:web",
+    "pretest": "npm run build:web",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.1.0",
     "@cloudflare/workers-types": "^5.20260826.1",
+    "esbuild": "^0.28.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.126.0"

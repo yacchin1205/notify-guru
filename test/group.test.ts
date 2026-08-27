@@ -120,28 +120,58 @@ describe("persistent device groups", () => {
       expect.objectContaining({ eventId: retainedEvent.eventId, generation: 1 }),
     ]);
 
-    const cannotRemoveSelf = await api(`/api/groups/${group.id}/devices/${first.id}/remove?deviceId=${first.id}`, {
-      method: "POST",
-      token: first.token,
-      body: {},
-    });
-    expect(cannotRemoveSelf.status).toBe(409);
-    expect(cannotRemoveSelf.json.error).toBe("cannot_remove_self");
-
     const generation3 = await generateSigningKey();
-    const removed = await transition(group, first, generation2, generation3, {
+    const missingRemainingPackage = await transition(group, first, generation2, generation3, {
       action: "remove",
-      targetDeviceId: second.id,
+      targetDeviceId: first.id,
       revision: 3,
       previousGeneration: 2,
       generation: 3,
-      packages: [keyPackage(3, first.id)],
+      packages: [],
     });
-    expect(removed.status).toBe(200);
+    expect(missingRemainingPackage.status).toBe(400);
+    expect(missingRemainingPackage.json.error).toBe("invalid_package_set");
 
-    const blocked = await api(`/api/groups/${group.id}/state?deviceId=${second.id}`, { token: second.token });
+    const left = await transition(group, first, generation2, generation3, {
+      action: "remove",
+      targetDeviceId: first.id,
+      revision: 3,
+      previousGeneration: 2,
+      generation: 3,
+      packages: [keyPackage(3, second.id)],
+    });
+    expect(left.status).toBe(200);
+
+    const blocked = await api(`/api/groups/${group.id}/state?deviceId=${first.id}`, { token: first.token });
     expect(blocked.status).toBe(403);
     expect(blocked.json.error).toBe("device_removed");
+
+    const remaining = await api(`/api/groups/${group.id}/state?deviceId=${second.id}&afterGeneration=2`, {
+      token: second.token,
+    });
+    expect(remaining.status).toBe(200);
+    expect(remaining.json.devices).toEqual([expect.objectContaining({ deviceId: second.id })]);
+
+    const generation4 = await generateSigningKey();
+    const lastLeft = await transition(group, second, generation3, generation4, {
+      action: "remove",
+      targetDeviceId: second.id,
+      revision: 4,
+      previousGeneration: 3,
+      generation: 4,
+      packages: [],
+    });
+    expect(lastLeft.status).toBe(200);
+    const nobodyRemains = await api(`/api/groups/${group.id}/state?deviceId=${second.id}`, { token: second.token });
+    expect(nobodyRemains.status).toBe(403);
+    expect(nobodyRemains.json.error).toBe("device_removed");
+
+    const replacement = await createGroup(second);
+    const replacementState = await api(`/api/groups/${replacement.id}/state?deviceId=${second.id}`, {
+      token: second.token,
+    });
+    expect(replacementState.status).toBe(200);
+    expect(replacementState.json.devices).toEqual([expect.objectContaining({ deviceId: second.id })]);
   });
 
   it("relays v2 payloads only at the current generation and authenticates each device", async () => {

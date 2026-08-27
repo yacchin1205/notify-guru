@@ -367,9 +367,6 @@ export class DeviceGroup {
     actor: DeviceRow,
     targetDeviceId: string,
   ): Promise<Response> {
-    if (targetDeviceId === actor.id) {
-      throw new HttpError(409, "cannot_remove_self", "A device cannot remove itself");
-    }
     const target = this.device(targetDeviceId);
     if (target === null || target.removed_revision !== null) {
       throw new HttpError(404, "device_not_found", "Active device not found");
@@ -772,7 +769,7 @@ function transitionInput(body: Record<string, unknown>): TransitionInput {
     "groupSignature",
     "deviceSignature",
   ]);
-  if (!Array.isArray(body.packages) || body.packages.length === 0 || body.packages.length > 256) {
+  if (!Array.isArray(body.packages) || body.packages.length > 256) {
     throw new HttpError(400, "invalid_field", "Invalid field: packages");
   }
   return {

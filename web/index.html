@@ -20,36 +20,36 @@
       <section id="intro">
         <p class="eyebrow">EPHEMERAL AGENT NOTIFICATIONS</p>
         <h1>作業の続きを、手元で待つ。</h1>
-        <p>デバイスグループを準備した後、CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
+        <p>CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
       </section>
       <p id="message" role="status" aria-live="polite"></p>
-      <section id="device-group-setup" class="group-card" hidden>
-        <p class="card-label">DEVICE GROUP</p>
-        <h2>デバイスグループを準備</h2>
-        <p>セッションへ参加する前に、この端末用の新しいグループを作るか、既存グループから受け取った招待リンクを開いてください。</p>
-        <button id="create-device-group" type="button">新しいグループを作る</button>
-        <div class="group-join-controls">
-          <label for="device-invitation-url">既存グループへ参加</label>
-          <input id="device-invitation-url" type="url" inputmode="url" autocomplete="off" placeholder="https://notify.guru/device#…">
-          <button id="open-device-invitation" type="button">招待リンクを開く</button>
-        </div>
-      </section>
-      <section id="device-group" class="group-card" hidden>
+      <section id="device-summary" class="group-card" hidden>
         <div class="card-head">
           <div>
-            <p class="card-label">DEVICE GROUP</p>
-            <h2>この端末のグループ</h2>
+            <p class="card-label">DEVICES</p>
+            <h2 id="device-summary-title">この端末のみ</h2>
           </div>
-          <span id="group-generation"></span>
+          <button id="open-device-management" type="button">端末の管理</button>
+        </div>
+      </section>
+      <section id="device-management" class="group-card" hidden>
+        <div class="card-head">
+          <div>
+            <p class="card-label">DEVICES</p>
+            <h2>端末の管理</h2>
+          </div>
+          <button id="close-device-management" type="button">完了</button>
         </div>
         <p id="group-status"></p>
-        <button id="invite-device" type="button">端末を追加</button>
+        <button id="invite-device" type="button">別の端末でも受け取る</button>
         <div id="invitation" hidden>
-          <p>追加する端末で次のリンクを開いてください。有効期間は10分です。</p>
-          <a id="invitation-link"></a>
+          <p>別の端末でQRコードを読み取ってください。この招待は10分で失効します。</p>
+          <div id="invitation-qr"></div>
+          <button id="share-invitation" type="button">招待リンクを共有</button>
         </div>
         <div id="pending-devices"></div>
         <div id="group-devices"></div>
+        <button id="leave-device-group" class="destructive" type="button" hidden>この端末での共有をやめる</button>
       </section>
       <section id="join-device" class="group-card" hidden>
         <p class="card-label">DEVICE VERIFICATION</p>

@@ -37,39 +37,45 @@ import {
   verificationCode,
   verifySignature,
 } from "./crypto.js";
-import { deleteSession, getIdentity, getSession, listSessions, putIdentity, putSession } from "./db.js";
-import { expiredSessionIDs } from "./expiry.js";
+import { deleteSession, detachDeviceGroup, getIdentity, getSession, listSessions, putIdentity, putSession } from "./db.js";
+import { expiredInvitationIDs, expiredSessionIDs } from "./expiry.js";
+import { qrMatrix } from "./qr.js";
 
 const cardsElement = document.querySelector("#cards");
 const emptyElement = document.querySelector("#empty");
 const messageElement = document.querySelector("#message");
 const connectionElement = document.querySelector("#connection-state");
 const cardTemplate = document.querySelector("#card-template");
-const groupSetupElement = document.querySelector("#device-group-setup");
-const createGroupButton = document.querySelector("#create-device-group");
-const deviceInvitationURLElement = document.querySelector("#device-invitation-url");
-const openDeviceInvitationButton = document.querySelector("#open-device-invitation");
-const groupElement = document.querySelector("#device-group");
-const groupGenerationElement = document.querySelector("#group-generation");
+const deviceSummaryElement = document.querySelector("#device-summary");
+const deviceSummaryTitleElement = document.querySelector("#device-summary-title");
+const deviceManagementElement = document.querySelector("#device-management");
+const openDeviceManagementButton = document.querySelector("#open-device-management");
+const closeDeviceManagementButton = document.querySelector("#close-device-management");
 const groupStatusElement = document.querySelector("#group-status");
 const groupDevicesElement = document.querySelector("#group-devices");
 const pendingDevicesElement = document.querySelector("#pending-devices");
 const invitationElement = document.querySelector("#invitation");
-const invitationLinkElement = document.querySelector("#invitation-link");
+const invitationQRElement = document.querySelector("#invitation-qr");
+const shareInvitationButton = document.querySelector("#share-invitation");
 const joinDeviceElement = document.querySelector("#join-device");
 const joinDeviceStatusElement = document.querySelector("#join-device-status");
 const verificationCodeElement = document.querySelector("#verification-code");
 const inviteDeviceButton = document.querySelector("#invite-device");
+const leaveDeviceGroupButton = document.querySelector("#leave-device-group");
 
 let identity;
 let groupState;
 let rendered = false;
 let synchronizing = false;
+let managingDevices = false;
+let outboundInvitationURL;
 
 window.addEventListener("unhandledrejection", (event) => showError(event.reason));
-createGroupButton.addEventListener("click", () => createStandaloneGroup().catch(showError));
-openDeviceInvitationButton.addEventListener("click", () => openDeviceInvitation().catch(showError));
 inviteDeviceButton.addEventListener("click", () => createDeviceInvitation().catch(showError));
+leaveDeviceGroupButton.addEventListener("click", () => leaveCurrentGroup().catch(showError));
+openDeviceManagementButton.addEventListener("click", () => setDeviceManagement(true));
+closeDeviceManagementButton.addEventListener("click", () => setDeviceManagement(false));
+shareInvitationButton.addEventListener("click", () => shareDeviceInvitation().catch(showError));
 
 await initialize();
 
@@ -78,10 +84,19 @@ async function initialize() {
   identity = await identityOrCreate();
   await deleteExpiredLocalSessions();
 
-  const deviceInvitation = parseDeviceInvitation();
-  if (deviceInvitation !== null) {
-    await beginDeviceJoin(deviceInvitation);
-  } else {
+  let handledDeviceInvitation = false;
+  try {
+    const deviceInvitation = parseDeviceInvitation();
+    if (deviceInvitation !== null) {
+      handledDeviceInvitation = true;
+      await beginDeviceJoin(deviceInvitation);
+    }
+  } catch (error) {
+    showError(error);
+    history.replaceState(null, "", "/");
+  }
+  if (!handledDeviceInvitation) {
+    if (identity.group === null && identity.pendingInvitation === undefined) await createInitialGroup();
     if (location.hash.length > 1) await joinFromFragment();
   }
 
@@ -126,31 +141,12 @@ async function createInitialGroup() {
   await putIdentity(identity);
 }
 
-async function createStandaloneGroup() {
-  createGroupButton.disabled = true;
-  try {
-    await createInitialGroup();
-    messageElement.textContent = "新しいデバイスグループを作成しました。";
-    await syncAll();
-    if (location.pathname === "/join" && location.hash.length > 1) await joinFromFragment();
-  } finally {
-    createGroupButton.disabled = false;
-  }
-}
-
-async function openDeviceInvitation() {
-  const value = deviceInvitationURLElement.value.trim();
-  if (value.length === 0) throw new Error("デバイス招待リンクを入力してください");
-  const url = new URL(value);
-  if (url.origin !== location.origin || url.pathname !== "/device" || url.hash.length <= 1) {
-    throw new Error("notify.guru のデバイス招待リンクではありません");
-  }
-  location.assign(url.href);
-}
-
 async function beginDeviceJoin(invitation) {
   if (identity.group !== null && identity.group.groupId !== invitation.groupId) {
-    throw new Error("この端末はすでに別のデバイスグループに属しています");
+    if (!(await switchFromStandaloneGroup())) return;
+  }
+  if (identity.group?.groupId === invitation.groupId && identity.pendingInvitation === undefined) {
+    throw new Error("この端末はすでに同じ端末共有に参加しています");
   }
   if (identity.pendingInvitation === undefined) {
     await submitJoinRequest(invitation, identity);
@@ -175,14 +171,36 @@ async function beginDeviceJoin(invitation) {
   joinDeviceStatusElement.textContent = "既存端末に同じ確認コードが表示されていることを確認し、承認してください。";
 }
 
+async function switchFromStandaloneGroup() {
+  await syncGroup();
+  if (groupState.devices.length !== 1 || groupState.devices[0].deviceId !== identity.deviceId) {
+    throw new Error("別の端末との共有をやめてから、この招待を開いてください");
+  }
+  const sessions = (await listSessions()).filter(
+    (session) => session.protocolVersion === 2 && session.groupId === identity.group.groupId,
+  );
+  if (sessions.length > 0 && !window.confirm("現在この端末にあるセッションと鍵を消して、別の端末との共有を開始しますか？")) {
+    history.replaceState(null, "", "/");
+    return false;
+  }
+  const groupId = identity.group.groupId;
+  const transition = await buildTransition("remove", identity.deviceId);
+  await removeDevice(identity, identity.deviceId, transition.body);
+  identity.group = null;
+  identity.pendingInvitation = undefined;
+  identity.invitations = {};
+  await detachDeviceGroup(identity, groupId);
+  clearGroupPresentation();
+  return true;
+}
+
 async function joinFromFragment() {
   const parameters = new URLSearchParams(location.hash.slice(1));
   const required = ["v", "s", "p", "t", "a", "k"];
   requireFragmentFields(parameters, required);
   if (parameters.get("v") !== "2") throw new Error("Unsupported pairing protocol version");
   if (identity.group === null) {
-    messageElement.textContent = "先にデバイスグループを作成するか、既存グループへ参加してください。";
-    return;
+    await createInitialGroup();
   }
   await syncGroup();
 
@@ -219,6 +237,7 @@ async function syncAll() {
   synchronizing = true;
   try {
     connectionElement.textContent = "同期中";
+    if (identity.group === null && identity.pendingInvitation === undefined) await createInitialGroup();
     if (identity.pendingInvitation !== undefined) await pollDeviceJoin();
     if (identity.group !== null && identity.pendingInvitation === undefined) {
       await syncGroup();
@@ -234,9 +253,42 @@ async function syncAll() {
     }
     await renderGroup();
     connectionElement.textContent = "同期済み";
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403 && error.code === "device_removed" && identity.group !== null) {
+      await detachRemovedDevice();
+      await render();
+      rendered = true;
+      await renderGroup();
+      connectionElement.textContent = "同期済み";
+      return;
+    }
+    throw error;
   } finally {
     synchronizing = false;
   }
+}
+
+async function detachRemovedDevice() {
+  const groupId = identity.group.groupId;
+  identity.group = null;
+  identity.pendingInvitation = undefined;
+  identity.invitations = {};
+  await detachDeviceGroup(identity, groupId);
+  clearGroupPresentation();
+  await createInitialGroup();
+  messageElement.textContent = "この端末での共有が解除され、単独利用に戻りました。";
+  rendered = false;
+}
+
+function clearGroupPresentation() {
+  groupState = undefined;
+  outboundInvitationURL = undefined;
+  managingDevices = false;
+  document.body.classList.remove("managing-devices");
+  invitationElement.hidden = true;
+  invitationQRElement.replaceChildren();
+  joinDeviceElement.hidden = true;
+  verificationCodeElement.textContent = "";
 }
 
 async function pollDeviceJoin() {
@@ -244,9 +296,13 @@ async function pollDeviceJoin() {
   joinDeviceElement.hidden = false;
   if (status === "rejected" || status === "expired") {
     joinDeviceStatusElement.textContent = status === "rejected" ? "端末追加は拒否されました。" : "端末追加の有効期限が切れました。";
+    const groupId = identity.group.groupId;
     identity.pendingInvitation = undefined;
     identity.group = null;
-    await putIdentity(identity);
+    await detachDeviceGroup(identity, groupId);
+    clearGroupPresentation();
+    await createInitialGroup();
+    messageElement.textContent = status === "rejected" ? "端末共有は承認されませんでした。" : "端末招待の有効期限が切れました。";
     history.replaceState(null, "", "/");
     return;
   }
@@ -254,7 +310,9 @@ async function pollDeviceJoin() {
   await syncGroup();
   identity.pendingInvitation = undefined;
   await putIdentity(identity);
-  joinDeviceStatusElement.textContent = "デバイスグループに追加されました。";
+  verificationCodeElement.textContent = "";
+  joinDeviceElement.hidden = true;
+  messageElement.textContent = "この端末でも通知を受け取れるようになりました。";
   history.replaceState(null, "", "/");
 }
 
@@ -301,6 +359,13 @@ async function syncGroup() {
   group.generation = generation;
   group.publicKey = publicKey;
   groupState = state;
+  pruneExpiredInvitations();
+  const activeInvitation = latestInvitation();
+  if (state.pending.length === 0 && activeInvitation !== undefined) {
+    showInvitation(activeInvitation);
+  } else {
+    hideInvitation();
+  }
   await putIdentity(identity);
 
   for (const session of await listSessions()) {
@@ -341,10 +406,6 @@ async function syncSession(session) {
       await deleteSession(session.sessionId);
       return true;
     }
-    if (error instanceof ApiError && error.code === "device_removed") {
-      groupStatusElement.textContent = "この端末はデバイスグループから削除されました。";
-      return false;
-    }
     throw error;
   }
   for (const envelope of result.events) {
@@ -366,6 +427,15 @@ async function syncSession(session) {
 
 async function createDeviceInvitation() {
   await syncGroup();
+  if (groupState.pending.length > 0) throw new Error("端末の承認を完了してから、新しい招待を作成してください");
+  pruneExpiredInvitations();
+  const existing = latestInvitation();
+  if (existing !== undefined) {
+    showInvitation(existing);
+    await putIdentity(identity);
+    await renderGroup();
+    return;
+  }
   const invitationId = randomId();
   const invitationToken = randomToken();
   const expires = await createInvitation(identity, invitationId, await hashToken(invitationToken));
@@ -380,14 +450,69 @@ async function createDeviceInvitation() {
   };
   identity.invitations[invitationId] = invitation;
   await putIdentity(identity);
+  showInvitation(invitation);
+  await renderGroup();
+}
+
+function showInvitation(invitation) {
   const link = new URL("/device", location.origin);
   link.hash = new URLSearchParams({
     v: "1", g: invitation.groupId, i: invitation.invitationId, t: invitation.invitationToken,
     r: String(invitation.revision), n: String(invitation.generation), k: invitation.publicKey,
   }).toString();
-  invitationLinkElement.href = link.toString();
-  invitationLinkElement.textContent = link.toString();
+  outboundInvitationURL = link.toString();
+  renderInvitationQR(outboundInvitationURL);
   invitationElement.hidden = false;
+}
+
+function hideInvitation() {
+  outboundInvitationURL = undefined;
+  invitationElement.hidden = true;
+  invitationQRElement.replaceChildren();
+}
+
+function pruneExpiredInvitations() {
+  for (const invitationId of expiredInvitationIDs(identity.invitations, Date.now())) {
+    delete identity.invitations[invitationId];
+  }
+}
+
+function latestInvitation() {
+  return Object.values(identity.invitations).sort((left, right) => right.expiresAt - left.expiresAt)[0];
+}
+
+async function shareDeviceInvitation() {
+  if (outboundInvitationURL === undefined) throw new Error("有効な端末招待がありません");
+  if (navigator.share !== undefined) {
+    await navigator.share({ title: "notify.guru device invitation", url: outboundInvitationURL });
+    return;
+  }
+  await navigator.clipboard.writeText(outboundInvitationURL);
+  messageElement.textContent = "招待リンクをコピーしました。";
+}
+
+function renderInvitationQR(value) {
+  const quietZone = 4;
+  const { size, modules } = qrMatrix(value);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${size + quietZone * 2} ${size + quietZone * 2}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "デバイス招待QRコード");
+  const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  background.setAttribute("width", "100%");
+  background.setAttribute("height", "100%");
+  background.setAttribute("fill", "white");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const cells = [];
+  for (let row = 0; row < size; row += 1) {
+    for (let column = 0; column < size; column += 1) {
+      if (modules[row][column]) cells.push(`M${column + quietZone} ${row + quietZone}h1v1h-1z`);
+    }
+  }
+  path.setAttribute("d", cells.join(""));
+  path.setAttribute("fill", "black");
+  svg.append(background, path);
+  invitationQRElement.replaceChildren(svg);
 }
 
 async function approvePending(invitationId) {
@@ -401,18 +526,23 @@ async function approvePending(invitationId) {
   identity.group.generation = transition.next.generation;
   identity.group.publicKey = transition.next.publicKey;
   delete identity.invitations[invitationId];
+  hideInvitation();
   await putIdentity(identity);
+  messageElement.textContent = "別の端末でも通知を受け取れるようになりました。";
   await syncAll();
 }
 
 async function rejectPending(invitationId) {
   await rejectJoin(identity, invitationId);
   delete identity.invitations[invitationId];
+  hideInvitation();
   await putIdentity(identity);
+  messageElement.textContent = "端末の追加を拒否しました。";
   await syncAll();
 }
 
 async function removeGroupDevice(deviceId) {
+  if (!window.confirm("この端末との共有を解除しますか？解除後、その端末は新しい通知を受け取れません。")) return;
   const transition = await buildTransition("remove", deviceId);
   await removeDevice(identity, deviceId, transition.body);
   identity.group.generations[String(transition.next.generation)] = transition.next;
@@ -421,6 +551,32 @@ async function removeGroupDevice(deviceId) {
   identity.group.publicKey = transition.next.publicKey;
   await putIdentity(identity);
   await syncAll();
+}
+
+async function leaveCurrentGroup() {
+  await syncGroup();
+  if (identity.group === null || groupState === undefined) throw new Error("端末情報が同期されていません");
+  if (groupState.devices.length <= 1) throw new Error("この端末はすでに単独で利用されています");
+  if (!window.confirm("この端末での共有をやめますか？共有中のセッションと鍵はこの端末から削除されます。")) return;
+
+  leaveDeviceGroupButton.disabled = true;
+  try {
+    const groupId = identity.group.groupId;
+    const transition = await buildTransition("remove", identity.deviceId);
+    await removeDevice(identity, identity.deviceId, transition.body);
+    identity.group = null;
+    identity.pendingInvitation = undefined;
+    identity.invitations = {};
+    await detachDeviceGroup(identity, groupId);
+    clearGroupPresentation();
+    await createInitialGroup();
+    setDeviceManagement(false);
+    messageElement.textContent = "この端末は単独利用に戻りました。";
+    rendered = false;
+    await syncAll();
+  } finally {
+    leaveDeviceGroupButton.disabled = false;
+  }
 }
 
 async function buildTransition(action, targetDeviceId, pending) {
@@ -463,35 +619,48 @@ async function buildTransition(action, targetDeviceId, pending) {
 }
 
 async function renderGroup() {
-  groupSetupElement.hidden = identity.group !== null || identity.pendingInvitation !== undefined;
   if (identity.pendingInvitation !== undefined) {
-    groupElement.hidden = true;
+    managingDevices = false;
+    document.body.classList.remove("managing-devices");
+    deviceSummaryElement.hidden = true;
+    deviceManagementElement.hidden = true;
     return;
   }
-  groupElement.hidden = identity.group === null;
+  deviceSummaryElement.hidden = identity.group === null || managingDevices;
+  deviceManagementElement.hidden = identity.group === null || !managingDevices;
   if (identity.group === null || groupState === undefined) return;
-  groupGenerationElement.textContent = `鍵世代 ${identity.group.generation}`;
-  groupStatusElement.textContent = `${groupState.devices.length}台の端末が参加中`;
+  const sharing = groupState.devices.length > 1;
+  deviceSummaryTitleElement.textContent = sharing ? `${groupState.devices.length}台で通知を共有中` : "この端末のみ";
+  groupStatusElement.textContent = sharing ? `${groupState.devices.length}台で通知を共有しています。` : "現在はこの端末だけで通知を受け取ります。";
+  leaveDeviceGroupButton.hidden = !sharing;
+
   groupDevicesElement.replaceChildren();
   for (const device of groupState.devices) {
-    const row = document.createElement("p");
-    row.textContent = device.deviceId === identity.deviceId ? `この端末 · ${device.deviceId.slice(0, 8)}` : `端末 · ${device.deviceId.slice(0, 8)}`;
+    const row = document.createElement("div");
+    row.className = "device-row";
+    const label = document.createElement("span");
+    label.textContent = device.deviceId === identity.deviceId ? `この端末 · ${device.deviceId.slice(0, 8)}` : `端末 · ${device.deviceId.slice(0, 8)}`;
+    row.append(label);
     if (device.deviceId !== identity.deviceId) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = "削除";
+      button.textContent = "共有を解除";
       button.addEventListener("click", () => removeGroupDevice(device.deviceId).catch(showError));
-      row.append(" ", button);
+      row.append(button);
     }
     groupDevicesElement.append(row);
   }
+
   pendingDevicesElement.replaceChildren();
   for (const pending of groupState.pending) {
     const invitation = identity.invitations[pending.invitationId];
     if (invitation === undefined) throw new Error("Server returned an invitation this device did not create");
     const section = document.createElement("section");
     const code = await verificationCode(invitation, pending);
-    section.append(textParagraph(`追加待ち端末 · 確認コード ${code}`));
+    section.append(textParagraph("両方の端末に同じ確認コードが表示されていることを確認してください。"));
+    const codeElement = textParagraph(code);
+    codeElement.className = "verification-code";
+    section.append(codeElement);
     const approve = document.createElement("button");
     approve.type = "button";
     approve.textContent = "承認";
@@ -503,6 +672,15 @@ async function renderGroup() {
     section.append(approve, " ", reject);
     pendingDevicesElement.append(section);
   }
+  const approving = groupState.pending.length > 0;
+  inviteDeviceButton.hidden = approving || outboundInvitationURL !== undefined;
+  if (approving) hideInvitation();
+}
+
+function setDeviceManagement(enabled) {
+  managingDevices = enabled;
+  document.body.classList.toggle("managing-devices", enabled);
+  renderGroup().catch(showError);
 }
 
 async function render() {
