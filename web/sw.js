@@ -1,4 +1,4 @@
-const CACHE_NAME = "notify-guru-shell-v8";
+const CACHE_NAME = "notify-guru-shell-v13";
 const SHELL = ["/", "/styles.css", "/app.js", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {

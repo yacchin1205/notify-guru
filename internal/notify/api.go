@@ -42,17 +42,14 @@ func NewAPI(rawURL string) (*API, error) {
 		return nil, fmt.Errorf("base URL must contain only scheme and host")
 	}
 	baseURL.Path = ""
-	return &API{
-		baseURL: baseURL,
-		client:  &http.Client{Timeout: 20 * time.Second},
-	}, nil
+	return &API{baseURL: baseURL, client: &http.Client{Timeout: 20 * time.Second}}, nil
 }
 
 func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey string) string {
 	joinURL := *a.baseURL
 	joinURL.Path = "/join"
 	fragment := url.Values{}
-	fragment.Set("v", "2")
+	fragment.Set("v", "3")
 	fragment.Set("s", sessionID)
 	fragment.Set("p", pairing.ID)
 	fragment.Set("t", pairing.Token)
@@ -71,11 +68,7 @@ func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicK
 			ID        string `json:"id"`
 			TokenHash string `json:"tokenHash"`
 		} `json:"pairing"`
-	}{
-		SessionID:        sessionID,
-		ManagerTokenHash: managerHash,
-		CreatorPublicKey: publicKey,
-	}
+	}{SessionID: sessionID, ManagerTokenHash: managerHash, CreatorPublicKey: publicKey}
 	request.Pairing.ID = pairing.ID
 	request.Pairing.TokenHash = tokenHash(pairing.Token)
 	return a.do(ctx, http.MethodPost, "/api/sessions", "", request, &struct {
@@ -93,99 +86,54 @@ func (a *API) addPairing(ctx context.Context, sessionID, managerToken string, pa
 	}{})
 }
 
+type currentGroupKey struct {
+	Timestamp int64    `json:"timestamp"`
+	PublicKey string   `json:"publicKey"`
+	Members   []string `json:"members"`
+}
+
 type joinsResult struct {
 	Groups []struct {
-		Sequence  int64  `json:"sequence"`
-		GroupID   string `json:"groupId"`
-		PairingID string `json:"pairingId"`
-		PublicKey string `json:"publicKey"`
-		Proof     string `json:"proof"`
-		JoinedAt  int64  `json:"joinedAt"`
+		Sequence            int64            `json:"sequence"`
+		GroupID             string           `json:"groupId"`
+		PairingID           string           `json:"pairingId"`
+		InitialKeyTimestamp int64            `json:"initialKeyTimestamp"`
+		InitialPublicKey    string           `json:"initialPublicKey"`
+		Proof               string           `json:"proof"`
+		JoinedAt            int64            `json:"joinedAt"`
+		Key                 *currentGroupKey `json:"key"`
 	} `json:"groups"`
 	ExpiresAt int64 `json:"expiresAt"`
 }
 
-type joinsV2Result struct {
-	Groups []struct {
-		Sequence          int64                  `json:"sequence"`
-		GroupID           string                 `json:"groupId"`
-		PairingID         string                 `json:"pairingId"`
-		InitialRevision   int64                  `json:"initialRevision"`
-		InitialGeneration int64                  `json:"initialGeneration"`
-		InitialPublicKey  string                 `json:"initialPublicKey"`
-		Proof             string                 `json:"proof"`
-		JoinedAt          int64                  `json:"joinedAt"`
-		CurrentRevision   int64                  `json:"currentRevision"`
-		CurrentGeneration int64                  `json:"currentGeneration"`
-		CurrentPublicKey  string                 `json:"currentPublicKey"`
-		Transitions       []GenerationTransition `json:"transitions"`
-	} `json:"groups"`
-	ExpiresAt int64 `json:"expiresAt"`
-}
-
-func (a *API) joins(ctx context.Context, sessionID, managerToken string, after int64) (joinsResult, error) {
+func (a *API) joins(ctx context.Context, sessionID, managerToken string) (joinsResult, error) {
 	var result joinsResult
-	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/joins?after=%d", sessionID, after), managerToken, nil, &result)
+	err := a.do(ctx, http.MethodGet, "/api/sessions/"+sessionID+"/joins", managerToken, nil, &result)
 	return result, err
 }
 
-func (a *API) joinsV2(ctx context.Context, sessionID, managerToken string) (joinsV2Result, error) {
-	var result joinsV2Result
-	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/v2/joins", sessionID), managerToken, nil, &result)
-	return result, err
-}
-
-func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, groupID, nonce, ciphertext string) error {
+func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, groupID string, timestamp int64, nonce, ciphertext string) error {
 	request := struct {
-		EventID    string `json:"eventId"`
-		GroupID    string `json:"groupId"`
-		Nonce      string `json:"nonce"`
-		Ciphertext string `json:"ciphertext"`
-	}{eventID, groupID, nonce, ciphertext}
+		EventID      string `json:"eventId"`
+		GroupID      string `json:"groupId"`
+		KeyTimestamp int64  `json:"keyTimestamp"`
+		Nonce        string `json:"nonce"`
+		Ciphertext   string `json:"ciphertext"`
+	}{eventID, groupID, timestamp, nonce, ciphertext}
 	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", managerToken, request, &struct {
-		ExpiresAt int64 `json:"expiresAt"`
-	}{})
-}
-
-func (a *API) addEventV2(
-	ctx context.Context,
-	sessionID, managerToken, eventID, groupID string,
-	generation int64,
-	nonce, ciphertext string,
-) error {
-	request := struct {
-		EventID    string `json:"eventId"`
-		GroupID    string `json:"groupId"`
-		Generation int64  `json:"generation"`
-		Nonce      string `json:"nonce"`
-		Ciphertext string `json:"ciphertext"`
-	}{eventID, groupID, generation, nonce, ciphertext}
-	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/v2/events", managerToken, request, &struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}{})
 }
 
 type responsesResult struct {
 	Responses []struct {
-		Sequence   int64  `json:"sequence"`
-		ResponseID string `json:"responseId"`
-		GroupID    string `json:"groupId"`
-		Nonce      string `json:"nonce"`
-		Ciphertext string `json:"ciphertext"`
-		CreatedAt  int64  `json:"createdAt"`
-	} `json:"responses"`
-	ExpiresAt int64 `json:"expiresAt"`
-}
-
-type responsesV2Result struct {
-	Responses []struct {
-		Sequence   int64  `json:"sequence"`
-		ResponseID string `json:"responseId"`
-		GroupID    string `json:"groupId"`
-		Generation int64  `json:"generation"`
-		Nonce      string `json:"nonce"`
-		Ciphertext string `json:"ciphertext"`
-		CreatedAt  int64  `json:"createdAt"`
+		Sequence     int64  `json:"sequence"`
+		ResponseID   string `json:"responseId"`
+		GroupID      string `json:"groupId"`
+		KeyTimestamp int64  `json:"keyTimestamp"`
+		Nonce        string `json:"nonce"`
+		Ciphertext   string `json:"ciphertext"`
+		CreatedAt    int64  `json:"createdAt"`
 	} `json:"responses"`
 	ExpiresAt int64 `json:"expiresAt"`
 }
@@ -193,12 +141,6 @@ type responsesV2Result struct {
 func (a *API) responses(ctx context.Context, sessionID, managerToken string, after int64) (responsesResult, error) {
 	var result responsesResult
 	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/responses?after=%d", sessionID, after), managerToken, nil, &result)
-	return result, err
-}
-
-func (a *API) responsesV2(ctx context.Context, sessionID, managerToken string, after int64) (responsesV2Result, error) {
-	var result responsesV2Result
-	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/v2/responses?after=%d", sessionID, after), managerToken, nil, &result)
 	return result, err
 }
 
@@ -230,7 +172,6 @@ func (a *API) do(ctx context.Context, method, path, token string, input, output 
 		return err
 	}
 	defer response.Body.Close()
-
 	limited := io.LimitReader(response.Body, maxResponseBytes+1)
 	responseBody, err := io.ReadAll(limited)
 	if err != nil {

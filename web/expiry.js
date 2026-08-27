@@ -22,26 +22,3 @@ export function expiredSessionIDs(sessions, now) {
   }
   return expired;
 }
-
-export function expiredInvitationIDs(invitations, now) {
-  if (invitations === null || typeof invitations !== "object" || Array.isArray(invitations)) {
-    throw new Error("Stored invitations must be an object");
-  }
-  if (!Number.isSafeInteger(now) || now < 0) {
-    throw new Error("Current time must be a non-negative safe integer");
-  }
-  const expired = [];
-  for (const [invitationId, invitation] of Object.entries(invitations)) {
-    if (invitation === null || typeof invitation !== "object" || Array.isArray(invitation)) {
-      throw new Error("Stored invitation must be an object");
-    }
-    if (invitation.invitationId !== invitationId) {
-      throw new Error("Stored invitation has an inconsistent identifier");
-    }
-    if (!Number.isSafeInteger(invitation.expiresAt) || invitation.expiresAt < 0) {
-      throw new Error("Stored invitation has an invalid expiry time");
-    }
-    if (invitation.expiresAt <= now) expired.push(invitationId);
-  }
-  return expired;
-}

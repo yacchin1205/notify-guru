@@ -9,54 +9,45 @@ export async function createDeviceIdentity() {
     { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"],
   );
   return {
-    protocolVersion: 2,
-    deviceId: randomId(),
+    protocolVersion: 3,
+    deviceId: null,
     accessToken: randomToken(),
     encryptionKeyPair,
     encryptionPublicKey: encode(await crypto.subtle.exportKey("raw", encryptionKeyPair.publicKey)),
     signingKeyPair,
     signingPublicKey: encode(await crypto.subtle.exportKey("raw", signingKeyPair.publicKey)),
     group: null,
-    invitations: {},
+    deviceRequest: null,
   };
 }
 
-export async function createGeneration(generation) {
+export async function createGroupKey() {
   const pair = await crypto.subtle.generateKey(
     { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"],
   );
   const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
-  if (typeof jwk.d !== "string") {
-    throw new Error("Generated P-256 key did not contain private material");
-  }
+  if (typeof jwk.d !== "string") throw new Error("Generated P-256 key did not contain private material");
   return {
-    generation,
     publicKey: encode(await crypto.subtle.exportKey("raw", pair.publicKey)),
     privateKey: jwk.d,
   };
 }
 
-export async function createKeyPackage(groupId, generation, device) {
+export async function createKeyPackage(groupId, groupKey, device) {
   const ephemeral = await crypto.subtle.generateKey(
     { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"],
   );
   const recipient = await importPublic(device.encryptionPublicKey, "ECDH");
   const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: recipient }, ephemeral.privateKey, 256);
-  const context = packageContext(groupId, generation.generation, device.deviceId);
+  const context = packageContext(groupId, groupKey.publicKey, device.deviceId);
   const key = await hkdfKey(shared, context);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(context) },
     key,
-    encoder.encode([
-      "notify.guru/group-generation-key/v1",
-      String(generation.generation),
-      generation.publicKey,
-      generation.privateKey,
-    ].join("\n")),
+    encoder.encode(["notify.guru/group-key/v2", groupKey.publicKey, groupKey.privateKey].join("\n")),
   );
   return {
-    generation: generation.generation,
     deviceId: device.deviceId,
     ephemeralPublicKey: encode(await crypto.subtle.exportKey("raw", ephemeral.publicKey)),
     nonce: encode(nonce),
@@ -64,15 +55,14 @@ export async function createKeyPackage(groupId, generation, device) {
   };
 }
 
-export async function openKeyPackage(identity, groupId, expectedPublicKey, keyPackage) {
-  if (keyPackage.deviceId !== identity.deviceId) {
-    throw new Error("Key package targets another device");
-  }
+export async function openKeyPackage(identity, groupId, keyRecord, keyPackage) {
+  if (keyPackage.deviceId !== identity.deviceId) throw new Error("Key package targets another device");
+  if (keyPackage.timestamp !== keyRecord.timestamp) throw new Error("Key package timestamp does not match its key");
   const ephemeral = await importPublic(keyPackage.ephemeralPublicKey, "ECDH");
   const shared = await crypto.subtle.deriveBits(
     { name: "ECDH", public: ephemeral }, identity.encryptionKeyPair.privateKey, 256,
   );
-  const context = packageContext(groupId, keyPackage.generation, identity.deviceId);
+  const context = packageContext(groupId, keyRecord.publicKey, identity.deviceId);
   const key = await hkdfKey(shared, context);
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: decode(keyPackage.nonce), additionalData: encoder.encode(context) },
@@ -80,90 +70,87 @@ export async function openKeyPackage(identity, groupId, expectedPublicKey, keyPa
     decode(keyPackage.ciphertext),
   );
   const fields = decoder.decode(plaintext).split("\n");
-  const generation = fields.length === 4 ? {
-    generation: Number(fields[1]),
-    publicKey: fields[2],
-    privateKey: fields[3],
-  } : null;
-  if (
-    generation === null || fields[0] !== "notify.guru/group-generation-key/v1"
-    || generation.generation !== keyPackage.generation
-    || typeof generation.publicKey !== "string" || typeof generation.privateKey !== "string"
-    || (expectedPublicKey !== undefined && generation.publicKey !== expectedPublicKey)
-  ) {
-    throw new Error("Key package contains an invalid generation key");
+  if (fields.length !== 3 || fields[0] !== "notify.guru/group-key/v2" || fields[1] !== keyRecord.publicKey) {
+    throw new Error("Key package contains an invalid group key");
   }
-  await generationPrivateKey(generation, "ECDH", ["deriveBits"]);
-  return generation;
+  const groupKey = { timestamp: keyRecord.timestamp, publicKey: fields[1], privateKey: fields[2] };
+  await groupPrivateKey(groupKey, "ECDH", ["deriveBits"]);
+  return groupKey;
 }
 
-export async function deriveSessionKey(generation, creatorPublicKey, sessionId, groupId) {
-  const privateKey = await generationPrivateKey(generation, "ECDH", ["deriveBits"]);
+export async function deriveSessionKey(groupKey, creatorPublicKey, sessionId, groupId) {
+  const privateKey = await groupPrivateKey(groupKey, "ECDH", ["deriveBits"]);
   const publicKey = await importPublic(creatorPublicKey, "ECDH");
-  const sharedSecret = await crypto.subtle.deriveBits({ name: "ECDH", public: publicKey }, privateKey, 256);
-  return hkdfKey(sharedSecret, `notify.guru/session/v2\n${sessionId}\n${groupId}\n${generation.generation}`);
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: publicKey }, privateKey, 256);
+  return hkdfKey(shared, `notify.guru/session/v3\n${sessionId}\n${groupId}\n${groupKey.timestamp}`);
 }
 
-export async function pairingProof(authSecret, sessionId, pairingId, groupId, revision, generation, groupPublicKey) {
+export async function pairingProof(authSecret, sessionId, pairingId, groupId, timestamp, groupPublicKey) {
   const key = await crypto.subtle.importKey(
     "raw", decode(authSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
   );
-  const transcript = `v2\n${sessionId}\n${pairingId}\n${groupId}\n${revision}\n${generation}\n${groupPublicKey}`;
+  const transcript = `v3\n${sessionId}\n${pairingId}\n${groupId}\n${timestamp}\n${groupPublicKey}`;
   return encode(await crypto.subtle.sign("HMAC", key, encoder.encode(transcript)));
 }
 
-export function groupCreateTranscript(groupId, identity, generation, packagesHash) {
+export function deviceCreateTranscript(signingPublicKey, nonce) {
+  return ["notify.guru/device-create/v1", signingPublicKey, nonce].join("\n");
+}
+
+export function groupCreateTranscript(groupId, identity, accessHash) {
   return [
-    "notify.guru/group-create/v1", groupId, identity.deviceId, identity.encryptionPublicKey,
-    identity.signingPublicKey, generation.publicKey, packagesHash,
+    "notify.guru/group-create/v2", groupId, identity.deviceId, accessHash, identity.encryptionPublicKey,
   ].join("\n");
 }
 
-export function transitionTranscript(groupId, transition) {
+export function deviceRequestTranscript(requestId, identity, accessHash) {
   return [
-    "notify.guru/group-transition/v1", groupId, String(transition.revision),
-    String(transition.previousGeneration), String(transition.generation), transition.generationPublicKey,
-    transition.action, transition.actorDeviceId, transition.targetDeviceId, transition.packagesHash,
+    "notify.guru/device-request/v1", requestId, identity.deviceId, accessHash, identity.encryptionPublicKey,
   ].join("\n");
+}
+
+export function deviceRequestReadTranscript(requestId, deviceId) {
+  return ["notify.guru/device-request-read/v1", requestId, deviceId].join("\n");
+}
+
+export function groupKeyRegisterTranscript(groupId, actorDeviceId, body) {
+  const members = [...body.members].sort();
+  const packagesByDevice = new Map(body.packages.map((item) => [item.deviceId, item]));
+  const packages = members.map((deviceId) => {
+    const item = packagesByDevice.get(deviceId);
+    if (item === undefined) throw new Error("Group key package set is incomplete");
+    return item;
+  });
+  const lines = [
+    "notify.guru/group-key-register/v1",
+    groupId,
+    actorDeviceId,
+    body.publicKey,
+    body.recreated ? "1" : "0",
+    String(members.length),
+    ...members,
+    String(packages.length),
+  ];
+  for (const item of packages) lines.push(item.deviceId, item.ephemeralPublicKey, item.nonce, item.ciphertext);
+  return lines.join("\n");
+}
+
+export function groupDeviceApproveTranscript(groupId, actorDeviceId, requestId) {
+  return ["notify.guru/group-device-approve/v1", groupId, actorDeviceId, requestId].join("\n");
+}
+
+export function groupDeviceRemoveTranscript(groupId, actorDeviceId, deviceId) {
+  return ["notify.guru/group-device-remove/v1", groupId, actorDeviceId, deviceId].join("\n");
 }
 
 export async function signDevice(identity, transcript) {
   return sign(identity.signingKeyPair.privateKey, transcript);
 }
 
-export async function signGeneration(generation, transcript) {
-  return sign(await generationPrivateKey(generation, "ECDSA", ["sign"]), transcript);
-}
-
-export async function verifySignature(publicKey, signature, transcript) {
-  return crypto.subtle.verify(
-    { name: "ECDSA", hash: "SHA-256" }, await importPublic(publicKey, "ECDSA"),
-    decode(signature), encoder.encode(transcript),
-  );
-}
-
-export async function hashPackages(packages) {
-  const canonical = [...packages]
-    .sort((left, right) => left.generation - right.generation || left.deviceId.localeCompare(right.deviceId))
-    .map((item) => [String(item.generation), item.deviceId, item.ephemeralPublicKey, item.nonce, item.ciphertext].join("\n"))
-    .join("\n--\n");
-  return hashToken(canonical);
-}
-
-export async function verificationCode(invitation, pending) {
-  const transcript = [
-    "notify.guru/device-verification/v1", invitation.groupId, invitation.invitationId,
-    invitation.invitationToken, pending.deviceId, pending.encryptionPublicKey, pending.signingPublicKey,
-  ].join("\n");
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(transcript)));
-  const number = ((digest[0] << 16) | (digest[1] << 8) | digest[2]) % 1_000_000;
-  return String(number).padStart(6, "0");
-}
-
-export async function encryptResponse(key, sessionId, groupId, generation, responseId, response) {
+export async function encryptResponse(key, sessionId, groupId, timestamp, responseId, response) {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(responseAad(sessionId, groupId, generation, responseId)) },
+    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(responseAad(sessionId, groupId, timestamp, responseId)) },
     key,
     encoder.encode(JSON.stringify(response)),
   );
@@ -172,26 +159,10 @@ export async function encryptResponse(key, sessionId, groupId, generation, respo
 
 export async function decryptEvent(key, sessionId, envelope) {
   const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: decode(envelope.nonce), additionalData: encoder.encode(eventAad(sessionId, envelope.groupId, envelope.generation, envelope.eventId)) },
-    key,
-    decode(envelope.ciphertext),
-  );
-  return JSON.parse(decoder.decode(plaintext));
-}
-
-export async function encryptLegacyResponse(key, sessionId, groupId, responseId, response) {
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(`notify.guru/v1/response/${sessionId}/${groupId}/${responseId}`) },
-    key,
-    encoder.encode(JSON.stringify(response)),
-  );
-  return { nonce: encode(nonce), ciphertext: encode(ciphertext) };
-}
-
-export async function decryptLegacyEvent(key, sessionId, envelope) {
-  const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: decode(envelope.nonce), additionalData: encoder.encode(`notify.guru/v1/event/${sessionId}/${envelope.groupId}/${envelope.eventId}`) },
+    {
+      name: "AES-GCM", iv: decode(envelope.nonce),
+      additionalData: encoder.encode(eventAad(sessionId, envelope.groupId, envelope.keyTimestamp, envelope.eventId)),
+    },
     key,
     decode(envelope.ciphertext),
   );
@@ -211,14 +182,12 @@ export function randomId() {
   return encode(crypto.getRandomValues(new Uint8Array(18)));
 }
 
-async function generationPrivateKey(generation, algorithm, usages) {
-  const raw = decode(generation.publicKey);
-  if (raw.length !== 65 || raw[0] !== 4) {
-    throw new Error("Invalid generation public key");
-  }
+async function groupPrivateKey(groupKey, algorithm, usages) {
+  const raw = decode(groupKey.publicKey);
+  if (raw.length !== 65 || raw[0] !== 4) throw new Error("Invalid group public key");
   const jwk = {
     kty: "EC", crv: "P-256", x: encode(raw.slice(1, 33)), y: encode(raw.slice(33, 65)),
-    d: generation.privateKey, ext: false,
+    d: groupKey.privateKey, ext: false,
   };
   return crypto.subtle.importKey("jwk", jwk, { name: algorithm, namedCurve: "P-256" }, false, usages);
 }
@@ -235,9 +204,7 @@ async function hkdfKey(sharedSecret, context) {
   return crypto.subtle.deriveKey(
     { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(), info: encoder.encode(context) },
     material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
+    { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"],
   );
 }
 
@@ -247,16 +214,16 @@ async function sign(privateKey, transcript) {
   ));
 }
 
-function packageContext(groupId, generation, deviceId) {
-  return `notify.guru/group-package/v1\n${groupId}\n${generation}\n${deviceId}`;
+function packageContext(groupId, publicKey, deviceId) {
+  return `notify.guru/group-package/v2\n${groupId}\n${publicKey}\n${deviceId}`;
 }
 
-function eventAad(sessionId, groupId, generation, eventId) {
-  return `notify.guru/v2/event/${sessionId}/${groupId}/${generation}/${eventId}`;
+function eventAad(sessionId, groupId, timestamp, eventId) {
+  return `notify.guru/v3/event/${sessionId}/${groupId}/${timestamp}/${eventId}`;
 }
 
-function responseAad(sessionId, groupId, generation, responseId) {
-  return `notify.guru/v2/response/${sessionId}/${groupId}/${generation}/${responseId}`;
+function responseAad(sessionId, groupId, timestamp, responseId) {
+  return `notify.guru/v3/response/${sessionId}/${groupId}/${timestamp}/${responseId}`;
 }
 
 function encode(value) {

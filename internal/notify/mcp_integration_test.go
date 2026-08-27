@@ -140,7 +140,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if !closed.Closed {
 		t.Fatal("session_close did not report closure")
 	}
-	err = api.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/v2/events?groupId=%s&deviceId=%s&after=0", created.SessionID, joined.GroupID, joined.DeviceID), joined.AccessToken, nil, &struct{}{})
+	err = api.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/events?groupId=%s&deviceId=%s&after=0", created.SessionID, joined.GroupID, joined.DeviceID), joined.AccessToken, nil, &struct{}{})
 	var apiError *APIError
 	if !errors.As(err, &apiError) || apiError.Status != http.StatusNotFound {
 		t.Fatalf("fetch after close error = %v, want 404 API error", err)
@@ -190,7 +190,7 @@ func postEncryptedResponse(
 	}
 	nonce, ciphertext, err := encryptJSON(
 		group.Key,
-		responseAAD(sessionID, group.GroupID, responseID, group.Generation),
+		responseAAD(sessionID, group.GroupID, responseID, group.Timestamp),
 		responseBody,
 	)
 	if err != nil {
@@ -199,13 +199,13 @@ func postEncryptedResponse(
 	var posted struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}
-	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/v2/responses", group.AccessToken, map[string]any{
-		"responseId": responseID,
-		"groupId":    group.GroupID,
-		"deviceId":   group.DeviceID,
-		"generation": group.Generation,
-		"nonce":      nonce,
-		"ciphertext": ciphertext,
+	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/responses", group.AccessToken, map[string]any{
+		"responseId":   responseID,
+		"groupId":      group.GroupID,
+		"deviceId":     group.DeviceID,
+		"keyTimestamp": group.Timestamp,
+		"nonce":        nonce,
+		"ciphertext":   ciphertext,
 	}, &posted); err != nil {
 		t.Fatalf("post encrypted response: %v", err)
 	}
@@ -247,7 +247,7 @@ type joinedDeviceGroup struct {
 	GroupID     string
 	DeviceID    string
 	AccessToken string
-	Generation  int64
+	Timestamp   int64
 	Key         []byte
 }
 
@@ -285,7 +285,7 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if err != nil {
 		t.Fatalf("parse pairing fragment: %v", err)
 	}
-	if len(parameters) != 6 || parameters.Get("v") != "2" {
+	if len(parameters) != 6 || parameters.Get("v") != "3" {
 		t.Fatalf("unexpected pairing fragment: %q", pairingURL.Fragment)
 	}
 	sessionID := parameters.Get("s")
@@ -302,11 +302,7 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		}
 	}
 
-	groupSigningKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	groupPrivateKey, err := ecdh.P256().NewPrivateKey(groupSigningKey.D.FillBytes(make([]byte, 32)))
+	groupPrivateKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,13 +322,25 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	deviceID, err := randomValue(18)
+	registrationNonce, err := randomValue(32)
 	if err != nil {
 		t.Fatal(err)
 	}
 	publicKey := encode(groupPrivateKey.PublicKey().Bytes())
 	deviceEncryptionPublicKey := encode(deviceEncryptionKey.PublicKey().Bytes())
 	deviceSigningPublicKey := encode(elliptic.Marshal(elliptic.P256(), deviceSigningKey.X, deviceSigningKey.Y))
+	var registered struct {
+		DeviceID string `json:"deviceId"`
+	}
+	deviceCreateTranscript := fmt.Sprintf("notify.guru/device-create/v1\n%s\n%s", deviceSigningPublicKey, registrationNonce)
+	if err := api.do(ctx, http.MethodPost, "/api/devices", "", map[string]any{
+		"signingPublicKey": deviceSigningPublicKey,
+		"nonce":            registrationNonce,
+		"signature":        signRawP256(t, deviceSigningKey, deviceCreateTranscript),
+	}, &registered); err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+	deviceID := registered.DeviceID
 	packageNonce, err := randomValue(12)
 	if err != nil {
 		t.Fatal(err)
@@ -342,18 +350,14 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		t.Fatal(err)
 	}
 	keyPackage := map[string]any{
-		"generation":         1,
 		"deviceId":           deviceID,
 		"ephemeralPublicKey": deviceEncryptionPublicKey,
 		"nonce":              packageNonce,
 		"ciphertext":         packageCiphertext,
 	}
-	canonicalPackage := fmt.Sprintf("1\n%s\n%s\n%s\n%s", deviceID, deviceEncryptionPublicKey, packageNonce, packageCiphertext)
-	packageDigest := sha256.Sum256([]byte(canonicalPackage))
-	packagesHash := fmt.Sprintf("%x", packageDigest)
 	createTranscript := fmt.Sprintf(
-		"notify.guru/group-create/v1\n%s\n%s\n%s\n%s\n%s\n%s",
-		groupID, deviceID, deviceEncryptionPublicKey, deviceSigningPublicKey, publicKey, packagesHash,
+		"notify.guru/group-create/v2\n%s\n%s\n%s\n%s",
+		groupID, deviceID, tokenHash(accessToken), deviceEncryptionPublicKey,
 	)
 	deviceSignature := signRawP256(t, deviceSigningKey, createTranscript)
 	if err := api.do(ctx, http.MethodPost, "/api/groups", "", map[string]any{
@@ -361,37 +365,50 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		"deviceId":                  deviceID,
 		"deviceAccessTokenHash":     tokenHash(accessToken),
 		"deviceEncryptionPublicKey": deviceEncryptionPublicKey,
-		"deviceSigningPublicKey":    deviceSigningPublicKey,
-		"generationPublicKey":       publicKey,
-		"package":                   keyPackage,
 		"deviceSignature":           deviceSignature,
 	}, &struct {
-		Created    bool  `json:"created"`
-		Revision   int64 `json:"revision"`
-		Generation int64 `json:"generation"`
+		Created bool   `json:"created"`
+		GroupID string `json:"groupId"`
 	}{}); err != nil {
 		t.Fatalf("create device group: %v", err)
+	}
+	var acceptedKey struct {
+		Timestamp int64 `json:"timestamp"`
+	}
+	keyPath := fmt.Sprintf("/api/groups/%s/keys?deviceId=%s", groupID, deviceID)
+	keyTranscript := fmt.Sprintf(
+		"notify.guru/group-key-register/v1\n%s\n%s\n%s\n1\n1\n%s\n1\n%s\n%s\n%s\n%s",
+		groupID, deviceID, publicKey, deviceID,
+		deviceID, deviceEncryptionPublicKey, packageNonce, packageCiphertext,
+	)
+	if err := api.do(ctx, http.MethodPost, keyPath, accessToken, map[string]any{
+		"publicKey":      publicKey,
+		"recreated":      true,
+		"members":        []string{deviceID},
+		"packages":       []any{keyPackage},
+		"actorSignature": signRawP256(t, deviceSigningKey, keyTranscript),
+	}, &acceptedKey); err != nil {
+		t.Fatalf("register group key: %v", err)
 	}
 	secret, err := decode(authSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mac := hmac.New(sha256.New, secret)
-	fmt.Fprintf(mac, "v2\n%s\n%s\n%s\n1\n1\n%s", sessionID, pairingID, groupID, publicKey)
+	fmt.Fprintf(mac, "v3\n%s\n%s\n%s\n%d\n%s", sessionID, pairingID, groupID, acceptedKey.Timestamp, publicKey)
 	proof := encode(mac.Sum(nil))
 
 	var result struct {
 		Joined    bool  `json:"joined"`
 		ExpiresAt int64 `json:"expiresAt"`
 	}
-	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/v2/join", "", map[string]any{
+	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/join", "", map[string]any{
 		"pairingId":         pairingID,
 		"pairingToken":      pairingToken,
 		"groupId":           groupID,
 		"deviceId":          deviceID,
 		"deviceAccessToken": accessToken,
-		"revision":          1,
-		"generation":        1,
+		"keyTimestamp":      acceptedKey.Timestamp,
 		"groupPublicKey":    publicKey,
 		"proof":             proof,
 	}, &result); err != nil {
@@ -400,11 +417,11 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if !result.Joined || result.ExpiresAt <= time.Now().UnixMilli() {
 		t.Fatalf("unexpected join result: %+v", result)
 	}
-	key, err := deriveGenerationKey(groupPrivateKey, creatorPublicKey, sessionID, groupID, 1)
+	key, err := deriveGroupKey(groupPrivateKey, creatorPublicKey, sessionID, groupID, acceptedKey.Timestamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return joinedDeviceGroup{GroupID: groupID, DeviceID: deviceID, AccessToken: accessToken, Generation: 1, Key: key}
+	return joinedDeviceGroup{GroupID: groupID, DeviceID: deviceID, AccessToken: accessToken, Timestamp: acceptedKey.Timestamp, Key: key}
 }
 
 func signRawP256(t *testing.T, key *ecdsa.PrivateKey, transcript string) string {
@@ -424,17 +441,17 @@ func fetchAndDecryptEvents(t *testing.T, ctx context.Context, api *API, sessionI
 	t.Helper()
 	var result struct {
 		Events []struct {
-			Sequence   int64  `json:"sequence"`
-			EventID    string `json:"eventId"`
-			GroupID    string `json:"groupId"`
-			Generation int64  `json:"generation"`
-			Nonce      string `json:"nonce"`
-			Ciphertext string `json:"ciphertext"`
-			CreatedAt  int64  `json:"createdAt"`
+			Sequence     int64  `json:"sequence"`
+			EventID      string `json:"eventId"`
+			GroupID      string `json:"groupId"`
+			KeyTimestamp int64  `json:"keyTimestamp"`
+			Nonce        string `json:"nonce"`
+			Ciphertext   string `json:"ciphertext"`
+			CreatedAt    int64  `json:"createdAt"`
 		} `json:"events"`
 		ExpiresAt int64 `json:"expiresAt"`
 	}
-	path := fmt.Sprintf("/api/sessions/%s/v2/events?groupId=%s&deviceId=%s&after=0", sessionID, group.GroupID, group.DeviceID)
+	path := fmt.Sprintf("/api/sessions/%s/events?groupId=%s&deviceId=%s&after=0", sessionID, group.GroupID, group.DeviceID)
 	if err := api.do(ctx, http.MethodGet, path, group.AccessToken, nil, &result); err != nil {
 		t.Fatalf("fetch encrypted events: %v", err)
 	}
@@ -443,10 +460,10 @@ func fetchAndDecryptEvents(t *testing.T, ctx context.Context, api *API, sessionI
 		if envelope.GroupID != group.GroupID {
 			t.Fatalf("event group = %q, want %q", envelope.GroupID, group.GroupID)
 		}
-		if envelope.Generation != group.Generation {
-			t.Fatalf("event generation = %d, want %d", envelope.Generation, group.Generation)
+		if envelope.KeyTimestamp != group.Timestamp {
+			t.Fatalf("event key timestamp = %d, want %d", envelope.KeyTimestamp, group.Timestamp)
 		}
-		if err := decryptJSON(group.Key, eventAAD(sessionID, group.GroupID, envelope.EventID, envelope.Generation), envelope.Nonce, envelope.Ciphertext, &events[index]); err != nil {
+		if err := decryptJSON(group.Key, eventAAD(sessionID, group.GroupID, envelope.EventID, envelope.KeyTimestamp), envelope.Nonce, envelope.Ciphertext, &events[index]); err != nil {
 			t.Fatalf("decrypt event %q: %v", envelope.EventID, err)
 		}
 	}

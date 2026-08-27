@@ -28,6 +28,10 @@
       {
         "name": "GROUPS",
         "class_name": "DeviceGroup"
+      },
+      {
+        "name": "DEVICES",
+        "class_name": "DeviceRegistry"
       }
     ]
   },
@@ -37,6 +41,10 @@
       "storage": "sqlite"
     },
     "DeviceGroup": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "DeviceRegistry": {
       "type": "durable-object",
       "storage": "sqlite"
     }

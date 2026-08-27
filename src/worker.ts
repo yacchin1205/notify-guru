@@ -1,20 +1,28 @@
 import { HttpError, IDENTIFIER, expectKeys, json, readObject, stringField } from "./http";
+import { DeviceRegistry } from "./device";
 import { DeviceGroup } from "./group";
 import { Session } from "./session";
 
 interface Env {
-  SESSIONS: DurableObjectNamespace;
-  GROUPS: DurableObjectNamespace;
+  SESSIONS: DurableObjectNamespace<Session>;
+  GROUPS: DurableObjectNamespace<DeviceGroup>;
+  DEVICES: DurableObjectNamespace<DeviceRegistry>;
   ASSETS: Fetcher;
 }
 
-export { DeviceGroup, Session };
+export { DeviceGroup, DeviceRegistry, Session };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);
-      if (url.protocol === "http:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      const requestHost = request.headers.get("host")?.split(":", 1)[0];
+      const miniflareLoopback = url.hostname === "notify.guru"
+        && request.headers.get("mf-original-hostname") === "notify.guru"
+        && request.headers.get("cf-connecting-ip") === "127.0.0.1";
+      const localRequest = miniflareLoopback
+        || [url.hostname, requestHost].some((host) => host === "localhost" || host === "127.0.0.1");
+      if (url.protocol === "http:" && !localRequest) {
         url.protocol = "https:";
         return Response.redirect(url.toString(), 301);
       }
@@ -24,12 +32,36 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/health") {
         return json({ ok: true });
       }
+      if (request.method === "POST" && url.pathname === "/api/devices") {
+        return deviceRegistry(env).fetch(publicRequest(new URL("https://devices.internal/devices"), request));
+      }
+      const devicePushMatch = /^\/api\/devices\/([^/]+)\/push$/.exec(url.pathname);
+      if (request.method === "PUT" && devicePushMatch !== null) {
+        const deviceId = stringField({ deviceId: devicePushMatch[1] }, "deviceId", IDENTIFIER, 64);
+        return deviceRegistry(env).fetch(publicRequest(
+          new URL(`https://devices.internal/devices/${deviceId}/push`),
+          request,
+        ));
+      }
+      if (request.method === "POST" && url.pathname === "/api/device-requests") {
+        return deviceRegistry(env).fetch(publicRequest(
+          new URL("https://devices.internal/device-requests"),
+          request,
+        ));
+      }
+      const deviceRequestMatch = /^\/api\/device-requests\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "GET" && deviceRequestMatch !== null) {
+        const requestId = stringField({ requestId: deviceRequestMatch[1] }, "requestId", IDENTIFIER, 64);
+        const internalUrl = new URL(`https://devices.internal/device-requests/${requestId}`);
+        internalUrl.search = url.search;
+        return deviceRegistry(env).fetch(publicRequest(internalUrl, request));
+      }
       if (request.method === "POST" && url.pathname === "/api/sessions") {
         const body = await readObject(request);
         expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"]);
         const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
         return sessionStub(env, sessionId).fetch(
-          internalRequest("/create", request, JSON.stringify(body)),
+          forwardedRequest("/create", request, JSON.stringify(body)),
         );
       }
 
@@ -37,7 +69,7 @@ export default {
         const body = await readObject(request);
         const groupId = stringField(body, "groupId", IDENTIFIER, 64);
         return groupStub(env, groupId).fetch(
-          internalRequest("/create", request, JSON.stringify(body)),
+          forwardedRequest("/create", request, JSON.stringify(body)),
         );
       }
 
@@ -66,17 +98,20 @@ export default {
   },
 };
 
-function sessionStub(env: Env, sessionId: string): DurableObjectStub {
+function sessionStub(env: Env, sessionId: string): DurableObjectStub<Session> {
   return env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
 }
 
-function groupStub(env: Env, groupId: string): DurableObjectStub {
+function groupStub(env: Env, groupId: string): DurableObjectStub<DeviceGroup> {
   return env.GROUPS.get(env.GROUPS.idFromName(groupId));
 }
 
-function internalRequest(path: string, original: Request, body: string): Request {
+function deviceRegistry(env: Env): DurableObjectStub<DeviceRegistry> {
+  return env.DEVICES.get(env.DEVICES.idFromName("registry"));
+}
+
+function forwardedRequest(path: string, original: Request, body: string): Request {
   const headers = new Headers(original.headers);
-  headers.delete("x-notify-guru-internal");
   return new Request(`https://session.internal${path}`, {
     method: original.method,
     headers,
@@ -86,6 +121,5 @@ function internalRequest(path: string, original: Request, body: string): Request
 
 function publicRequest(url: URL, original: Request): Request {
   const headers = new Headers(original.headers);
-  headers.delete("x-notify-guru-internal");
   return new Request(url, { method: original.method, headers, body: original.body });
 }

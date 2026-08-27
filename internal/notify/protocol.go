@@ -12,29 +12,13 @@ type Pairing struct {
 }
 
 type Group struct {
-	ID                string
-	PairingID         string
-	InitialRevision   int64
-	InitialGeneration int64
-	InitialPublicKey  string
-	Revision          int64
-	Generation        int64
-	PublicKey         string
-	Keys              map[int64][]byte
-}
-
-type GenerationTransition struct {
-	Revision            int64  `json:"revision"`
-	PreviousGeneration  int64  `json:"previousGeneration"`
-	Generation          int64  `json:"generation"`
-	GenerationPublicKey string `json:"generationPublicKey"`
-	Action              string `json:"action"`
-	ActorDeviceID       string `json:"actorDeviceId"`
-	TargetDeviceID      string `json:"targetDeviceId"`
-	PackagesHash        string `json:"packagesHash"`
-	GroupSignature      string `json:"groupSignature"`
-	DeviceSignature     string `json:"deviceSignature"`
-	CreatedAt           int64  `json:"createdAt"`
+	ID               string
+	PairingID        string
+	InitialTimestamp int64
+	InitialPublicKey string
+	Timestamp        int64
+	PublicKey        string
+	Keys             map[int64][]byte
 }
 
 type Choice struct {
@@ -69,10 +53,10 @@ type event struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
-func eventAAD(sessionID, groupID, eventID string, generation int64) string {
-	return fmt.Sprintf("notify.guru/v2/event/%s/%s/%d/%s", sessionID, groupID, generation, eventID)
+func eventAAD(sessionID, groupID, eventID string, timestamp int64) string {
+	return fmt.Sprintf("notify.guru/v3/event/%s/%s/%d/%s", sessionID, groupID, timestamp, eventID)
 }
 
-func responseAAD(sessionID, groupID, responseID string, generation int64) string {
-	return fmt.Sprintf("notify.guru/v2/response/%s/%s/%d/%s", sessionID, groupID, generation, responseID)
+func responseAAD(sessionID, groupID, responseID string, timestamp int64) string {
+	return fmt.Sprintf("notify.guru/v3/response/%s/%s/%d/%s", sessionID, groupID, timestamp, responseID)
 }

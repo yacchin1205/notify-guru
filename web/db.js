@@ -1,5 +1,6 @@
 const DB_NAME = "notify.guru";
 const DB_VERSION = 1;
+let databasePromise;
 
 export async function getIdentity() {
   return read("identity", "device-group");
@@ -33,7 +34,7 @@ export async function detachDeviceGroup(identity, groupId) {
   cursorRequest.onsuccess = () => {
     const cursor = cursorRequest.result;
     if (cursor === null) return;
-    if (cursor.value.protocolVersion === 2 && cursor.value.groupId === groupId) cursor.delete();
+    if (cursor.value.protocolVersion === 3 && cursor.value.groupId === groupId) cursor.delete();
     cursor.continue();
   };
   await complete(transaction);
@@ -45,6 +46,21 @@ export async function listSessions() {
   const result = await request(transaction.objectStore("sessions").getAll());
   await complete(transaction);
   return result;
+}
+
+export async function resetLocalData() {
+  const opening = databasePromise;
+  databasePromise = undefined;
+  if (opening !== undefined) {
+    const database = await opening;
+    database.close();
+  }
+  await new Promise((resolve, reject) => {
+    const deletion = indexedDB.deleteDatabase(DB_NAME);
+    deletion.onsuccess = () => resolve();
+    deletion.onerror = () => reject(deletion.error ?? new Error("ブラウザ内データを削除できませんでした"));
+    deletion.onblocked = () => reject(new Error("別のタブでnotify.guruが開かれています。ほかのタブを閉じて再試行してください。"));
+  });
 }
 
 async function read(storeName, key) {
@@ -67,16 +83,29 @@ async function write(storeName, value, key) {
 }
 
 function openDatabase() {
-  return new Promise((resolve, reject) => {
+  if (databasePromise !== undefined) return databasePromise;
+  const opening = new Promise((resolve, reject) => {
     const open = indexedDB.open(DB_NAME, DB_VERSION);
     open.onupgradeneeded = () => {
       const database = open.result;
       database.createObjectStore("identity");
       database.createObjectStore("sessions", { keyPath: "sessionId" });
     };
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const database = open.result;
+      database.onversionchange = () => {
+        database.close();
+        if (databasePromise === opening) databasePromise = undefined;
+      };
+      resolve(database);
+    };
+    open.onerror = () => {
+      if (databasePromise === opening) databasePromise = undefined;
+      reject(open.error ?? new Error("ブラウザ内データを開けませんでした"));
+    };
   });
+  databasePromise = opening;
+  return opening;
 }
 
 function request(operation) {

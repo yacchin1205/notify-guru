@@ -3,86 +3,114 @@ import XCTest
 @testable import NotifyGuru
 
 final class ProtocolTests: XCTestCase {
-    func testPairingLinkRequiresExactV2Fragment() throws {
+    func testPairingLinkRequiresExactV3Fragment() throws {
         let token = Base64URL.encode(Data(repeating: 1, count: 32))
         let secret = Base64URL.encode(Data(repeating: 2, count: 32))
         let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
         let publicKey = Base64URL.encode(privateKey.publicKey.x963Representation)
-        let link = try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)")
-
+        let link = try PairingLink("https://notify.guru/join#v=3&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)")
         XCTAssertEqual(link.sessionID, "session_identifier")
-        XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&extra=true"))
+        XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)"))
     }
 
-    func testGenerationSessionKeyMatchesECDHPeer() throws {
+    func testDeviceRequestLinkContainsOnlyOpaqueRequestID() throws {
+        let link = try DeviceRequestLink("https://notify.guru/device#v=2&r=request_identifier")
+        XCTAssertEqual(link.requestID, "request_identifier")
+        XCTAssertThrowsError(try DeviceRequestLink("https://notify.guru/device#v=2&r=request_identifier&g=group"))
+    }
+
+    func testTimestampSessionKeyMatchesECDHPeer() throws {
         let creator = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
         let groupPrivate = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 4, count: 32))
-        let generation = GenerationKey(
-            generation: 7,
-            publicKey: Base64URL.encode(groupPrivate.publicKey.x963Representation),
-            privateKey: groupPrivate.rawRepresentation
-        )
+        let key = GroupKey(timestamp: 1_789_999_000_001, publicKey: Base64URL.encode(groupPrivate.publicKey.x963Representation), privateKey: groupPrivate.rawRepresentation)
         let derived = try CryptoEngine.deriveSessionKey(
-            generation: generation,
-            creatorPublicKey: Base64URL.encode(creator.publicKey.x963Representation),
-            sessionID: "session-id",
-            groupID: "group-id"
+            key: key, creatorPublicKey: Base64URL.encode(creator.publicKey.x963Representation),
+            sessionID: "session-id", groupID: "group-id"
         )
         let peerSecret = try creator.sharedSecretFromKeyAgreement(with: groupPrivate.publicKey)
         let peer = peerSecret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: Data(),
-            sharedInfo: Data("notify.guru/session/v2\nsession-id\ngroup-id\n7".utf8),
-            outputByteCount: 32
+            using: SHA256.self, salt: Data(),
+            sharedInfo: Data("notify.guru/session/v3\nsession-id\ngroup-id\n1789999000001".utf8), outputByteCount: 32
         )
         XCTAssertEqual(derived, peer.withUnsafeBytes { Data($0) })
-        XCTAssertEqual(Base64URL.encode(derived), "gXfVAK1yzHMsFX5qQc5sXTEFOXSfDSEVcmNWknyoHgQ")
     }
 
-    func testGenerationPackageRoundTripAndSignatures() throws {
+    func testGroupKeyPackageRoundTrip() throws {
         let identity = try fixedIdentity()
-        let generation = CryptoEngine.createGeneration(1)
+        let draft = CryptoEngine.createGroupKey()
         let package = try CryptoEngine.createKeyPackage(
-            groupID: "group-identifier",
-            generation: generation,
-            deviceID: identity.deviceID,
+            groupID: "group-identifier", key: draft, deviceID: identity.deviceID,
             encryptionPublicKey: CryptoEngine.encryptionPublicKey(for: identity)
         )
+        let timestamp: Int64 = 1_789_999_000_001
+        let record = GroupKeyRecord(timestamp: timestamp, publicKey: draft.publicKey, recreated: false, members: [identity.deviceID])
+        let received = KeyPackage(
+            timestamp: timestamp, deviceID: package.deviceID, ephemeralPublicKey: package.ephemeralPublicKey,
+            nonce: package.nonce, ciphertext: package.ciphertext
+        )
         XCTAssertEqual(
-            try CryptoEngine.openKeyPackage(
-                identity: identity,
-                groupID: "group-identifier",
-                expectedPublicKey: generation.publicKey,
-                package: package
-            ),
-            generation
+            try CryptoEngine.openKeyPackage(identity: identity, groupID: "group-identifier", record: record, package: received),
+            GroupKey(timestamp: timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey)
         )
-        let hash = CryptoEngine.hashPackages([package])
-        let transcript = try CryptoEngine.groupCreateTranscript(
-            groupID: "group-identifier", identity: identity, generation: generation, packagesHash: hash
-        )
-        let signature = try CryptoEngine.signDevice(identity: identity, transcript: transcript)
-        XCTAssertTrue(try CryptoEngine.verify(
-            publicKey: CryptoEngine.signingPublicKey(for: identity), signature: signature, transcript: transcript
-        ))
     }
 
-    func testDecryptsLegacyGoEventVector() throws {
-        let session = legacySession(id: "session-id", expiresAt: 1)
-        let envelope = EventEnvelope(
-            sequence: 1,
-            eventID: "event-id",
-            groupID: "first",
-            generation: nil,
-            nonce: "BQUFBQUFBQUFBQUF",
-            ciphertext: "OzZ_nSEMbRHBMJSlsDuAdnPzTFnot1-_kPLLyMolGCimmFQOP7y_PuDnxwK9X8DJj7pXPloDhoOVERbJEDqzoHkfmTMz6bX-_iXgBlJunarXseLIdfEUXc-DxfapQgI_Io4_SYhuu7RqGovKQ8uPpFn6XtONGgxPCQ",
-            createdAt: 0
+    func testGroupKeyManagementTranscriptIsCanonical() throws {
+        let packages = [
+            KeyPackage(timestamp: nil, deviceID: "device_b", ephemeralPublicKey: "ephemeral-b", nonce: "nonce-b", ciphertext: "cipher-b"),
+            KeyPackage(timestamp: nil, deviceID: "device_a", ephemeralPublicKey: "ephemeral-a", nonce: "nonce-a", ciphertext: "cipher-a"),
+        ]
+        XCTAssertEqual(
+            try CryptoEngine.groupKeyRegisterTranscript(
+                groupID: "group", actorDeviceID: "actor", publicKey: "group-key",
+                recreated: true, members: ["device_b", "device_a"], packages: packages
+            ),
+            [
+                "notify.guru/group-key-register/v1", "group", "actor", "group-key", "1", "2",
+                "device_a", "device_b", "2",
+                "device_a", "ephemeral-a", "nonce-a", "cipher-a",
+                "device_b", "ephemeral-b", "nonce-b", "cipher-b",
+            ].joined(separator: "\n")
         )
-        guard case .notification(let title, let message) = try CryptoEngine.decryptEvent(session: session, envelope: envelope) else {
-            return XCTFail("Go event vector did not decode as notify")
-        }
-        XCTAssertEqual(title, "Build")
-        XCTAssertEqual(message, "Done")
+    }
+
+    func testGroupKeySelectionDoesNotReviveKeyBeforeRecreatedBoundary() {
+        let state = groupState(
+            members: ["a", "b"],
+            keys: [
+                GroupKeyRecord(timestamp: 10, publicKey: "old", recreated: true, members: ["a", "b"]),
+                GroupKeyRecord(timestamp: 20, publicKey: "current", recreated: true, members: ["a"]),
+            ]
+        )
+        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 20)
+        XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
+        XCTAssertFalse(GroupKeyPolicy.nextKeyIsRecreated(state))
+    }
+
+    func testGroupKeySelectionUsesLatestSafeKey() {
+        let state = groupState(
+            members: ["a", "b"],
+            keys: [
+                GroupKeyRecord(timestamp: 10, publicKey: "a", recreated: true, members: ["a"]),
+                GroupKeyRecord(timestamp: 20, publicKey: "ab", recreated: false, members: ["a", "b"]),
+                GroupKeyRecord(timestamp: 30, publicKey: "abc", recreated: false, members: ["a", "b", "c"]),
+            ]
+        )
+        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 20)
+        XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
+        XCTAssertTrue(GroupKeyPolicy.nextKeyIsRecreated(state))
+    }
+
+    func testGroupKeySelectionRecreatesAfterRemovalEvenWhenOlderKeyIsUsable() {
+        let state = groupState(
+            members: ["a"],
+            keys: [
+                GroupKeyRecord(timestamp: 10, publicKey: "a", recreated: true, members: ["a"]),
+                GroupKeyRecord(timestamp: 20, publicKey: "ab", recreated: false, members: ["a", "b"]),
+            ]
+        )
+        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 10)
+        XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
+        XCTAssertTrue(GroupKeyPolicy.nextKeyIsRecreated(state))
     }
 
     func testEventDecoderRejectsUnknownFields() throws {
@@ -90,128 +118,50 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try EventDecoder.decode(data))
     }
 
-    func testVaultRoundTrip() throws {
-        let vault = Vault(version: 2, identity: try fixedIdentity(), sessions: [])
+    func testVaultRoundTripAndExpiry() throws {
+        let vault = Vault(version: 3, identity: try fixedIdentity(), sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)])
         XCTAssertEqual(try JSONDecoder().decode(Vault.self, from: JSONEncoder().encode(vault)), vault)
+        XCTAssertEqual(AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000).sessions.map(\.sessionID), ["current"])
     }
 
-    func testPrunesExpiredSessionsWithoutServerAccess() throws {
-        let vault = Vault(
-            version: 2,
-            identity: try fixedIdentity(),
-            sessions: [legacySession(id: "expired", expiresAt: 1_000), legacySession(id: "current", expiresAt: 1_001)]
-        )
-        let pruned = AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000)
-        XCTAssertEqual(pruned.sessions.map(\.sessionID), ["current"])
-    }
-
-    func testDetachingGroupRemovesOnlyItsV2State() throws {
+    func testDetachingGroupRemovesOnlyItsV3Sessions() throws {
         var identity = try fixedIdentity()
-        identity.group = DeviceGroup(
-            groupID: "current-group",
-            revision: 1,
-            generation: 1,
-            publicKey: "public-key",
-            generations: [:]
-        )
-        identity.pendingInvitation = DeviceInvitationRecord(
-            groupID: "current-group",
-            invitationID: "invitation-id",
-            invitationToken: "invitation-token",
-            revision: 1,
-            generation: 1,
-            publicKey: "public-key",
-            expiresAt: 1_000
-        )
-        identity.invitations["invitation-id"] = identity.pendingInvitation
-        let vault = Vault(
-            version: 2,
-            identity: identity,
-            sessions: [legacySession(id: "legacy", expiresAt: 1_000), v2Session(id: "v2", groupID: "current-group")]
-        )
-
+        identity.group = DeviceGroup(groupID: "current-group", keys: [:])
+        let vault = Vault(version: 3, identity: identity, sessions: [session(id: "current", groupID: "current-group"), session(id: "other", groupID: "other-group")])
         let detached = AppModel.detachingFromDeviceGroup(vault, groupID: "current-group")
-
         XCTAssertNil(detached.identity.group)
-        XCTAssertNil(detached.identity.pendingInvitation)
-        XCTAssertTrue(detached.identity.invitations.isEmpty)
-        XCTAssertEqual(detached.sessions.map(\.sessionID), ["legacy"])
+        XCTAssertEqual(detached.sessions.map(\.sessionID), ["other"])
     }
 
-    func testInvitationQRCodeGeneration() {
-        XCTAssertNotNil(InvitationQRCode.image(for: "https://notify.guru/join#v=2&g=group&d=device"))
+    func testDeviceRequestQRCodeGeneration() {
+        XCTAssertNotNil(InvitationQRCode.image(for: "https://notify.guru/device#v=2&r=request"))
         XCTAssertNil(InvitationQRCode.image(for: ""))
-    }
-
-    func testPrunesExpiredDeviceInvitationSecrets() {
-        let active = DeviceInvitationRecord(
-            groupID: "group", invitationID: "active", invitationToken: "secret",
-            revision: 1, generation: 1, publicKey: "key", expiresAt: 1_001
-        )
-        let expired = DeviceInvitationRecord(
-            groupID: "group", invitationID: "expired", invitationToken: "secret",
-            revision: 1, generation: 1, publicKey: "key", expiresAt: 1_000
-        )
-        let unknown = DeviceInvitationRecord(
-            groupID: "group", invitationID: "unknown", invitationToken: "secret",
-            revision: 1, generation: 1, publicKey: "key", expiresAt: nil
-        )
-
-        let retained = AppModel.retainingActiveInvitations(
-            ["active": active, "expired": expired, "unknown": unknown],
-            nowMilliseconds: 1_000
-        )
-
-        XCTAssertEqual(retained, ["active": active])
     }
 
     private func fixedIdentity() throws -> DeviceIdentity {
         DeviceIdentity(
-            deviceID: "device-identifier",
-            accessToken: Base64URL.encode(Data(repeating: 8, count: 32)),
+            deviceID: "device-identifier", accessToken: Base64URL.encode(Data(repeating: 8, count: 32)),
             encryptionPrivateKey: try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 6, count: 32)).rawRepresentation,
             signingPrivateKey: try P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32)).rawRepresentation,
-            group: nil,
-            pendingInvitation: nil,
-            invitations: [:]
+            group: nil, deviceRequest: nil
         )
     }
 
-    private func legacySession(id: String, expiresAt: Int64) -> SessionRecord {
-        SessionRecord(
-            protocolVersion: 1,
-            sessionID: id,
-            groupID: "first",
-            groupAccessToken: "sensitive-token",
-            sharedKey: try! Base64URL.decode("uaEVrcIWs4cNzciEiU3iqSyYpjF_bNrUm3lu4YXRUZA"),
-            creatorPublicKey: nil,
-            generationKeys: [:],
-            cursor: 0,
-            title: "Decrypted title",
-            status: "Decrypted status",
-            notification: "Decrypted notification",
-            request: nil,
-            requestGeneration: nil,
-            expiresAt: expiresAt
+    private func groupState(members: [String], keys: [GroupKeyRecord]) -> DeviceGroupStateResult {
+        DeviceGroupStateResult(
+            groupID: "group",
+            members: members.map { GroupDevice(deviceID: $0, encryptionPublicKey: "key-\($0)", addedAt: 1) },
+            keys: keys,
+            packages: [],
+            sessions: []
         )
     }
 
-    private func v2Session(id: String, groupID: String) -> SessionRecord {
+    private func session(id: String, groupID: String = "group", expiresAt: Int64 = 2_000) -> SessionRecord {
         SessionRecord(
-            protocolVersion: 2,
-            sessionID: id,
-            groupID: groupID,
-            groupAccessToken: "",
-            sharedKey: Data(),
-            creatorPublicKey: "creator-public-key",
-            generationKeys: ["1": Data(repeating: 1, count: 32)],
-            cursor: 0,
-            title: "Session",
-            status: "Connected",
-            notification: "",
-            request: nil,
-            requestGeneration: nil,
-            expiresAt: 1_000
+            protocolVersion: 3, sessionID: id, groupID: groupID, creatorPublicKey: "creator-public-key",
+            keys: [:], cursor: 0, title: "Session", status: "Connected", notification: "",
+            request: nil, requestKeyTimestamp: nil, expiresAt: expiresAt
         )
     }
 }

@@ -13,6 +13,13 @@ export type APNsResult =
   | { outcome: "permanent-failure"; reason: string }
   | { outcome: "retry"; reason: string; minimumDelayMs: number };
 
+export class APNsTransportError extends Error {
+  constructor(cause: unknown) {
+    super("APNs transport failed", { cause });
+    this.name = "APNsTransportError";
+  }
+}
+
 const IDENTIFIER = /^[A-Z0-9]{10}$/;
 const DEVICE_TOKEN = /^[a-f0-9]+$/;
 const PROVIDER_TOKEN_REFRESH_SECONDS = 50 * 60;
@@ -67,7 +74,12 @@ export class APNsClient {
       body: JSON.stringify({ aps: { alert: "A new notification is available." } }),
     };
     const transport = this.transport;
-    const response = transport === undefined ? await fetch(url, init) : await transport(url, init);
+    let response: Response;
+    try {
+      response = transport === undefined ? await fetch(url, init) : await transport(url, init);
+    } catch (error) {
+      throw new APNsTransportError(error);
+    }
     if (response.status === 200) {
       if ((await response.text()).length !== 0) {
         throw new Error("APNs success response contained an unexpected body");

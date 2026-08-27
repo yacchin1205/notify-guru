@@ -4,15 +4,14 @@ import Foundation
 final class AppModel: ObservableObject {
     @Published private(set) var sessions: [SessionRecord] = []
     @Published private(set) var groupDevices: [GroupDevice] = []
-    @Published private(set) var pendingDevices: [PendingDevice] = []
-    @Published private(set) var groupGeneration: Int64?
+    @Published private(set) var currentKeyTimestamp: Int64?
     @Published private(set) var hasDeviceGroup = false
     @Published private(set) var deviceID: String?
-    @Published private(set) var invitationLink: String?
-    @Published private(set) var verificationCode: String?
-    @Published private(set) var deviceJoinStatus: String?
+    @Published private(set) var deviceRequestLink: String?
     @Published private(set) var connectionState: ConnectionState = .preparing
     @Published private(set) var isReady = false
+    @Published private(set) var startupErrorMessage: String?
+    @Published private(set) var canResetLocalData = false
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
@@ -22,9 +21,10 @@ final class AppModel: ObservableObject {
     private var groupState: DeviceGroupStateResult?
     private var isSyncing = false
 
-    var isAwaitingDeviceApproval: Bool { vault?.identity.pendingInvitation != nil }
+    var isAwaitingDeviceApproval: Bool { vault?.identity.deviceRequest != nil }
     var deviceCount: Int { max(1, groupDevices.count) }
     var isSharingAcrossDevices: Bool { groupDevices.count > 1 }
+    var deviceRequestWouldDiscardCurrentState: Bool { isSharingAcrossDevices || !sessions.isEmpty }
 
     func start() async {
         guard !isReady else { return }
@@ -35,21 +35,26 @@ final class AppModel: ObservableObject {
             }
             PushCoordinator.shared.onFailure = { [weak self] error in self?.show(error) }
             let loaded = try keychain.load()
-            let initial: Vault
+            var current: Vault
             if let loaded {
-                initial = loaded
+                current = Self.pruningExpiredSessions(from: loaded, nowMilliseconds: Self.currentTimeMilliseconds())
             } else {
-                initial = Vault(version: 2, identity: try CryptoEngine.createIdentity(), sessions: [])
+                var identity = try CryptoEngine.createIdentity()
+                identity.deviceID = try await api.registerDevice(identity: identity)
+                current = Vault(version: 3, identity: identity, sessions: [])
             }
-            let current = Self.pruningExpiredSessions(from: initial, nowMilliseconds: Self.currentTimeMilliseconds())
-            if loaded == nil || current != initial { try keychain.save(current) }
-            vault = current
-            publish(current)
+            if current.identity.group == nil && current.identity.deviceRequest == nil { try await createSoloGroup(&current) }
+            try persist(current)
             isReady = true
             await sync()
-            await resumeNotifications()
+            await PushCoordinator.shared.resumeIfAuthorized()
+        } catch KeychainError.unsupportedVersion {
+            failStartup(
+                "Stored data uses an older protocol and cannot be opened by this version.",
+                canReset: true
+            )
         } catch {
-            show(error)
+            failStartup(error.localizedDescription, canReset: false)
         }
     }
 
@@ -62,494 +67,289 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func join(link: String, replacingStandaloneSessions: Bool = false) async -> Bool {
-        let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
+    func join(link: String) async -> Bool {
         do {
-            if let components = URLComponents(string: value), components.path == "/device" {
-                try await joinDevice(
-                    DeviceInvitationLink(value),
-                    replacingStandaloneSessions: replacingStandaloneSessions
-                )
+            let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
+            if URLComponents(string: value)?.path == "/device" {
+                try await approveDeviceRequest(DeviceRequestLink(value))
             } else {
                 try await joinSession(PairingLink(value))
             }
             errorMessage = nil
             await sync()
             return true
-        } catch {
-            show(error)
-            return false
-        }
+        } catch { show(error); return false }
     }
 
-    func deviceInvitationWouldReplaceSessions(_ value: String) -> Bool {
-        guard let link = try? DeviceInvitationLink(value),
-              let group = vault?.identity.group,
-              group.groupID != link.groupID,
-              groupDevices.count == 1 else { return false }
-        return sessions.contains { $0.protocolVersion == 2 && $0.groupID == group.groupID }
-    }
-
-    func createDeviceInvitation() async {
+    func createDeviceRequest(discardingCurrentState: Bool = false) async {
         do {
-            var current = requiredVault()
-            try await synchronizeGroup(&current)
-            guard let group = current.identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
-            guard pendingDevices.isEmpty else {
-                throw ProtocolError.invalidResponse("finish the pending device approval before creating another invitation")
-            }
-            pruneExpiredInvitations(&current)
-            if let existing = current.identity.invitations.values.max(by: { ($0.expiresAt ?? 0) < ($1.expiresAt ?? 0) }) {
-                invitationLink = try deviceInvitationURL(existing)
-                try persist(current)
-                errorMessage = nil
+            var current = try requiredVault()
+            if current.identity.deviceRequest != nil {
+                deviceRequestLink = try deviceRequestURL(current.identity.deviceRequest!)
                 return
             }
-            let invitationID = try CryptoEngine.randomID()
-            let token = try CryptoEngine.randomToken()
-            let expiresAt = try await api.createInvitation(
-                identity: current.identity,
-                invitationID: invitationID,
-                tokenHash: CryptoEngine.hashToken(token)
-            )
-            let invitation = DeviceInvitationRecord(
-                groupID: group.groupID,
-                invitationID: invitationID,
-                invitationToken: token,
-                revision: group.revision,
-                generation: group.generation,
-                publicKey: group.publicKey,
-                expiresAt: expiresAt
-            )
-            current.identity.invitations[invitationID] = invitation
-            try persist(current)
-            invitationLink = try deviceInvitationURL(invitation)
-        } catch { show(error) }
-    }
-
-    func createDeviceGroup() async {
-        do {
-            var current = requiredVault()
-            guard current.identity.group == nil, current.identity.pendingInvitation == nil else {
-                throw ProtocolError.invalidResponse("this device already belongs to a device group")
+            try await synchronizeGroup(&current)
+            if deviceRequestWouldDiscardCurrentState && !discardingCurrentState {
+                throw ProtocolError.invalidResponse("confirm discarding the current device sharing and sessions")
             }
-            try await createInitialGroup(&current)
-            deviceJoinStatus = nil
-            verificationCode = nil
-            invitationLink = nil
+            if let groupID = current.identity.group?.groupID {
+                try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
+                current = Self.detachingFromDeviceGroup(current, groupID: groupID)
+                clearPublishedGroupState()
+            }
+            let requestID = try CryptoEngine.randomID()
+            current.identity.deviceRequest = try await api.createDeviceRequest(identity: current.identity, requestID: requestID)
+            try persist(current)
+            deviceRequestLink = try deviceRequestURL(current.identity.deviceRequest!)
             errorMessage = nil
-            await sync()
         } catch { show(error) }
     }
 
-    func verificationCode(for pending: PendingDevice) -> String? {
-        guard let invitation = vault?.identity.invitations[pending.invitationID] else { return nil }
-        return CryptoEngine.verificationCode(invitation: invitation, pending: pending)
-    }
-
-    func approve(invitationID: String) async {
+    func removeDevice(_ deviceID: String) async {
         do {
-            var current = requiredVault()
-            guard let pending = groupState?.pending.first(where: { $0.invitationID == invitationID }),
-                  current.identity.invitations[invitationID] != nil else {
-                throw ProtocolError.invalidResponse("pending invitation details are unavailable")
-            }
-            let transition = try buildTransition(action: "add", targetDeviceID: pending.deviceID, pending: pending, vault: current)
-            try await api.approveJoin(identity: current.identity, invitationID: invitationID, body: transition.body)
-            applyLocalTransition(next: transition.next, to: &current)
-            current.identity.invitations.removeValue(forKey: invitationID)
+            var current = try requiredVault()
+            try await api.removeDevice(identity: current.identity, deviceID: deviceID)
+            try await synchronizeGroup(&current)
+            try await ensureExactGroupKey(&current)
             try persist(current)
-            await sync()
-        } catch { show(error) }
-    }
-
-    func reject(invitationID: String) async {
-        do {
-            var current = requiredVault()
-            try await api.rejectJoin(identity: current.identity, invitationID: invitationID)
-            current.identity.invitations.removeValue(forKey: invitationID)
-            try persist(current)
-            await sync()
-        } catch { show(error) }
-    }
-
-    func remove(deviceID: String) async {
-        do {
-            var current = requiredVault()
-            let transition = try buildTransition(action: "remove", targetDeviceID: deviceID, pending: nil, vault: current)
-            try await api.removeDevice(identity: current.identity, deviceID: deviceID, body: transition.body)
-            applyLocalTransition(next: transition.next, to: &current)
-            try persist(current)
-            await sync()
         } catch { show(error) }
     }
 
     func leaveDeviceGroup() async {
         do {
-            var current = requiredVault()
-            try await synchronizeGroup(&current)
-            guard let group = current.identity.group else {
-                throw ProtocolError.invalidResponse("device group is not ready")
+            var current = try requiredVault()
+            guard groupDevices.count > 1, let groupID = current.identity.group?.groupID else {
+                throw ProtocolError.invalidResponse("a device used alone cannot leave")
             }
-            guard let state = groupState, state.devices.count > 1 else {
-                throw ProtocolError.invalidResponse("this device is already being used on its own")
-            }
-            let transition = try buildTransition(
-                action: "remove",
-                targetDeviceID: current.identity.deviceID,
-                pending: nil,
-                vault: current
-            )
-            try await api.removeDevice(
-                identity: current.identity,
-                deviceID: current.identity.deviceID,
-                body: transition.body
-            )
-            current = Self.detachingFromDeviceGroup(current, groupID: group.groupID)
-            groupState = nil
-            groupDevices = []
-            pendingDevices = []
-            invitationLink = nil
-            verificationCode = nil
-            deviceJoinStatus = nil
+            try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
+            current = Self.detachingFromDeviceGroup(current, groupID: groupID)
+            clearPublishedGroupState()
+            try await createSoloGroup(&current)
             try persist(current)
-            try await createInitialGroup(&current)
-            errorMessage = nil
-            await sync()
+            noticeMessage = "This device is now used on its own."
         } catch { show(error) }
     }
 
     func respond(sessionID: String, optionID: String) async {
         do {
-            try pruneExpiredSessions()
-            var current = requiredVault()
+            var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
                   let request = current.sessions[index].request,
-                  request.options.contains(where: { $0.id == optionID }) else {
-                throw ProtocolError.invalidEvent("request or selected option disappeared")
+                  let timestamp = current.sessions[index].requestKeyTimestamp else {
+                throw ProtocolError.invalidResponse("request is no longer available")
             }
             let responseID = try CryptoEngine.randomID()
-            let generation = current.sessions[index].requestGeneration
             let payload = try CryptoEngine.encryptResponse(
-                session: current.sessions[index],
-                generation: generation,
-                responseID: responseID,
-                requestID: request.id,
-                optionID: optionID,
-                createdAt: RFC3339.string(from: Date())
+                session: current.sessions[index], timestamp: timestamp, responseID: responseID,
+                requestID: request.id, optionID: optionID, createdAt: ISO8601DateFormatter().string(from: Date())
             )
-            let expiresAt = try await api.postResponse(
-                session: current.sessions[index],
-                identity: current.identity,
-                generation: generation,
-                responseID: responseID,
-                payload: payload
+            current.sessions[index].expiresAt = try await api.postResponse(
+                session: current.sessions[index], identity: current.identity, timestamp: timestamp,
+                responseID: responseID, payload: payload
             )
             current.sessions[index].request = nil
-            current.sessions[index].requestGeneration = nil
             current.sessions[index].status = "Response sent"
-            current.sessions[index].expiresAt = expiresAt
             try persist(current)
-            errorMessage = nil
         } catch { show(error) }
+    }
+
+    func enableNotifications() async {
+        do { _ = try await PushCoordinator.shared.enable() } catch { show(error) }
+    }
+
+    func resumeNotifications() async { await PushCoordinator.shared.resumeIfAuthorized() }
+    func dismissError() { errorMessage = nil }
+    func dismissNotice() { noticeMessage = nil }
+
+    func resetLocalData() async {
+        guard canResetLocalData else { return }
+        do {
+            try keychain.remove()
+            vault = nil
+            sessions = []
+            clearPublishedGroupState()
+            hasDeviceGroup = false
+            deviceID = nil
+            startupErrorMessage = nil
+            canResetLocalData = false
+            connectionState = .preparing
+            await start()
+        } catch {
+            failStartup(error.localizedDescription, canReset: true)
+        }
     }
 
     func sync() async {
         guard isReady, !isSyncing else { return }
-        isSyncing = true
-        connectionState = .syncing
+        isSyncing = true; connectionState = .syncing
         defer { isSyncing = false }
         do {
-            try pruneExpiredSessions()
-            var current = requiredVault()
-            if current.identity.group == nil, current.identity.pendingInvitation == nil {
-                try await createInitialGroup(&current)
+            var current = try requiredVault()
+            let pruned = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
+            if pruned != current {
+                current = pruned
+                try persist(current)
             }
-            if current.identity.pendingInvitation != nil {
-                try await pollDeviceJoin(&current)
-            }
-            if current.identity.group != nil, current.identity.pendingInvitation == nil {
+            try await pollDeviceRequest(&current)
+            if current.identity.group != nil {
                 try await synchronizeGroup(&current)
-                try await inheritSessions(&current)
-            }
-            var index = 0
-            while index < current.sessions.count {
-                do {
-                    let result = try await api.events(for: current.sessions[index], identity: current.identity)
-                    for envelope in result.events {
-                        guard envelope.sequence > current.sessions[index].cursor else {
-                            throw ProtocolError.invalidResponse("event sequence did not advance")
-                        }
-                        let event = try CryptoEngine.decryptEvent(session: current.sessions[index], envelope: envelope)
-                        apply(event, generation: envelope.generation, to: &current.sessions[index])
-                        current.sessions[index].cursor = envelope.sequence
+                try await ensureExactGroupKey(&current)
+                try inheritSessions(&current)
+                let sessionIDs = current.sessions.filter { $0.groupID == current.identity.group?.groupID }.map(\.sessionID)
+                for sessionID in sessionIDs {
+                    guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }) else {
+                        throw ProtocolError.invalidResponse("session disappeared during synchronization")
                     }
-                    current.sessions[index].expiresAt = result.expiresAt
-                    index += 1
-                } catch let error as APIError where error.code == "session_not_found" || error.code == "session_expired" {
-                    current.sessions.remove(at: index)
+                    do {
+                        try populateSessionKeys(&current.sessions[index], group: current.identity.group!)
+                        let result = try await api.events(for: current.sessions[index], identity: current.identity)
+                        for envelope in result.events {
+                            let event = try CryptoEngine.decryptEvent(session: current.sessions[index], envelope: envelope)
+                            apply(event, timestamp: envelope.keyTimestamp, to: &current.sessions[index])
+                            current.sessions[index].cursor = envelope.sequence
+                        }
+                        current.sessions[index].expiresAt = result.expiresAt
+                    } catch let error as APIError
+                        where (error.status == 404 && error.code == "session_not_found")
+                           || (error.status == 410 && error.code == "session_expired") {
+                        current.sessions.remove(at: index)
+                        try persist(current)
+                    }
                 }
             }
-            if current != requiredVault() { try persist(current) }
-            connectionState = .current
-        } catch {
-            if isExpectedCancellation(error) { connectionState = .current; return }
-            if let apiError = error as? APIError,
-               apiError.status == 403,
-               apiError.code == "device_removed" {
-                do {
-                    try await detachRemovedDevice()
-                    connectionState = .current
-                    return
-                } catch {
-                    connectionState = .failed
-                    show(error)
-                    return
-                }
-            }
-            connectionState = .failed
-            show(error)
-        }
+            current = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
+            try persist(current)
+            connectionState = .current; errorMessage = nil
+        } catch let error as APIError where error.status == 403 && error.code == "device_removed" {
+            do { try await recoverRemovedDevice() } catch { show(error) }
+        } catch { show(error) }
     }
 
-    func dismissError() { errorMessage = nil }
-    func dismissNotice() { noticeMessage = nil }
-
-    func resumeNotifications() async {
-        guard isReady, !sessions.isEmpty else { return }
-        await PushCoordinator.shared.resumeIfAuthorized()
+    private func approveDeviceRequest(_ link: DeviceRequestLink) async throws {
+        var current = try requiredVault()
+        guard current.identity.group != nil, current.identity.deviceRequest == nil else {
+            throw ProtocolError.invalidPairingLink("this device has no group that can approve the request")
+        }
+        try await synchronizeGroup(&current)
+        try await ensureExactGroupKey(&current)
+        try await api.approveDeviceRequest(identity: current.identity, requestID: link.requestID)
+        try await synchronizeGroup(&current)
+        try await ensureExactGroupKey(&current)
+        try persist(current)
+        noticeMessage = "The device was added to this sharing group."
     }
 
     private func joinSession(_ pairing: PairingLink) async throws {
-        try pruneExpiredSessions()
-        var current = requiredVault()
-        guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }) else {
-            throw ProtocolError.invalidPairingLink("this device group already joined the session")
-        }
-        if current.identity.group == nil { try await createInitialGroup(&current) }
+        var current = try requiredVault()
+        if current.identity.group == nil { try await createSoloGroup(&current) }
         try await synchronizeGroup(&current)
-        guard let group = current.identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
-        let expiresAt = try await api.join(pairing, identity: current.identity)
+        try await ensureExactGroupKey(&current)
+        guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }),
+              let group = current.identity.group,
+              let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
+            throw ProtocolError.invalidPairingLink("session is already joined or the current group key is unavailable")
+        }
+        let expiresAt = try await api.join(pairing, identity: current.identity, key: key)
         var record = SessionRecord(
-            protocolVersion: 2,
-            sessionID: pairing.sessionID,
-            groupID: group.groupID,
-            groupAccessToken: "",
-            sharedKey: Data(),
-            creatorPublicKey: pairing.creatorPublicKey,
-            generationKeys: [:],
-            cursor: 0,
-            title: "Session \(pairing.sessionID.prefix(8))",
-            status: "Connected",
-            notification: "",
-            request: nil,
-            requestGeneration: nil,
-            expiresAt: expiresAt
+            protocolVersion: 3, sessionID: pairing.sessionID, groupID: group.groupID,
+            creatorPublicKey: pairing.creatorPublicKey, keys: [:], cursor: 0,
+            title: "Session \(pairing.sessionID.prefix(8))", status: "Connected", notification: "",
+            request: nil, requestKeyTimestamp: nil, expiresAt: expiresAt
         )
         try populateSessionKeys(&record, group: group)
         current.sessions.append(record)
         try persist(current)
+        noticeMessage = "Session connected."
         await enableNotifications()
     }
 
-    private func joinDevice(_ link: DeviceInvitationLink, replacingStandaloneSessions: Bool) async throws {
-        var current = requiredVault()
-        if let existing = current.identity.group, existing.groupID != link.groupID {
-            try await synchronizeGroup(&current)
-            guard let state = groupState,
-                  state.devices.count == 1,
-                  state.devices[0].deviceID == current.identity.deviceID else {
-                throw ProtocolError.invalidPairingLink("stop sharing on this device before joining another set of devices")
-            }
-            let hasSessions = current.sessions.contains { $0.protocolVersion == 2 && $0.groupID == existing.groupID }
-            guard !hasSessions || replacingStandaloneSessions else {
-                throw ProtocolError.invalidPairingLink("joining will remove this device's current sessions")
-            }
-            let transition = try buildTransition(
-                action: "remove",
-                targetDeviceID: current.identity.deviceID,
-                pending: nil,
-                vault: current
-            )
-            try await api.removeDevice(
-                identity: current.identity,
-                deviceID: current.identity.deviceID,
-                body: transition.body
-            )
-            current = Self.detachingFromDeviceGroup(current, groupID: existing.groupID)
-            clearPublishedGroupState()
-            try persist(current)
-        }
-        if current.identity.pendingInvitation?.invitationID == link.invitationID { return }
-        guard current.identity.group == nil else {
-            throw ProtocolError.invalidPairingLink("this device already receives notifications with these devices")
-        }
-        let expiresAt = try await api.submitJoinRequest(link, identity: current.identity)
-        let invitation = DeviceInvitationRecord(
-            groupID: link.groupID,
-            invitationID: link.invitationID,
-            invitationToken: link.invitationToken,
-            revision: link.revision,
-            generation: link.generation,
-            publicKey: link.publicKey,
-            expiresAt: expiresAt
-        )
-        current.identity.group = DeviceGroup(
-            groupID: link.groupID,
-            revision: link.revision,
-            generation: link.generation,
-            publicKey: link.publicKey,
-            generations: [:]
-        )
-        current.identity.pendingInvitation = invitation
-        let own = PendingDevice(
-            invitationID: link.invitationID,
-            deviceID: current.identity.deviceID,
-            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: current.identity),
-            signingPublicKey: try CryptoEngine.signingPublicKey(for: current.identity),
-            createdAt: 0,
-            expiresAt: expiresAt
-        )
-        verificationCode = CryptoEngine.verificationCode(invitation: invitation, pending: own)
-        deviceJoinStatus = "Confirm this code on the inviting device."
-        try persist(current)
-    }
-
-    private func createInitialGroup(_ current: inout Vault) async throws {
+    private func createSoloGroup(_ current: inout Vault) async throws {
         let groupID = try CryptoEngine.randomID()
-        let generation = CryptoEngine.createGeneration(1)
-        let package = try CryptoEngine.createKeyPackage(
-            groupID: groupID,
-            generation: generation,
-            deviceID: current.identity.deviceID,
-            encryptionPublicKey: CryptoEngine.encryptionPublicKey(for: current.identity)
-        )
-        let packagesHash = CryptoEngine.hashPackages([package])
-        let transcript = try CryptoEngine.groupCreateTranscript(
-            groupID: groupID, identity: current.identity, generation: generation, packagesHash: packagesHash
-        )
-        try await api.createGroup(
-            groupID: groupID,
-            identity: current.identity,
-            generation: generation,
-            package: package,
-            deviceSignature: CryptoEngine.signDevice(identity: current.identity, transcript: transcript)
-        )
-        current.identity.group = DeviceGroup(
-            groupID: groupID,
-            revision: 1,
-            generation: 1,
-            publicKey: generation.publicKey,
-            generations: ["1": generation]
-        )
-        try persist(current)
+        try await api.createGroup(groupID: groupID, identity: current.identity)
+        current.identity.group = DeviceGroup(groupID: groupID, keys: [:])
+        try await synchronizeGroup(&current)
+        try await ensureExactGroupKey(&current)
     }
 
-    private func pollDeviceJoin(_ current: inout Vault) async throws {
-        guard let invitation = current.identity.pendingInvitation else { return }
-        let status = try await api.joinRequestStatus(invitation)
-        switch status {
-        case "approved":
+    private func pollDeviceRequest(_ current: inout Vault) async throws {
+        guard let pending = current.identity.deviceRequest else { return }
+        switch try await api.deviceRequestStatus(identity: current.identity, requestID: pending.requestID) {
+        case .waiting:
+            deviceRequestLink = try deviceRequestURL(pending)
+        case .expired:
+            current.identity.deviceRequest = nil; deviceRequestLink = nil
+            try await createSoloGroup(&current)
+            noticeMessage = "The device request expired. This device is now used on its own."
+        case .approved(let groupID, _):
+            current.identity.deviceRequest = nil
+            current.identity.group = DeviceGroup(groupID: groupID, keys: [:])
+            deviceRequestLink = nil
             try await synchronizeGroup(&current)
-            current.identity.pendingInvitation = nil
-            verificationCode = nil
-            deviceJoinStatus = nil
-            try persist(current)
-        case "rejected", "expired":
-            noticeMessage = status == "rejected"
-                ? "Device sharing was not approved."
-                : "The device invitation expired."
-            deviceJoinStatus = nil
-            let groupID = invitation.groupID
-            current = Self.detachingFromDeviceGroup(current, groupID: groupID)
-            clearPublishedGroupState()
-            verificationCode = nil
-            try persist(current)
-            try await createInitialGroup(&current)
-        case "waiting", "pending": break
-        default: throw ProtocolError.invalidResponse("unknown join request status")
+            try await ensureExactGroupKey(&current)
+            noticeMessage = "This device was added to device sharing."
+            await enableNotifications()
         }
     }
 
     private func synchronizeGroup(_ current: inout Vault) async throws {
         guard var group = current.identity.group else { return }
-        let after: Int64 = current.identity.pendingInvitation == nil ? group.generation : 0
-        let state = try await api.groupState(identity: current.identity, afterGeneration: after)
-        var revision = group.revision
-        var generation = group.generation
-        var publicKey = group.publicKey
-        var publicKeys = [String(generation): publicKey]
-        for transition in state.transitions where transition.generation > generation {
-            guard transition.revision == revision + 1,
-                  transition.previousGeneration == generation,
-                  transition.generation == generation + 1 else {
-                throw ProtocolError.crypto("device group transition chain is discontinuous")
+        let state = try await api.groupState(identity: current.identity)
+        for package in state.packages {
+            guard let timestamp = package.timestamp,
+                  let record = state.keys.first(where: { $0.timestamp == timestamp }) else {
+                throw ProtocolError.crypto("key package refers to an unknown key")
             }
-            let transcript = CryptoEngine.transitionTranscript(groupID: group.groupID, transition: transition)
-            guard try CryptoEngine.verify(
-                publicKey: publicKey,
-                signature: transition.groupSignature,
-                transcript: transcript
-            ) else {
-                throw ProtocolError.crypto("device group transition signature is invalid")
+            if let local = group.keys[String(timestamp)] {
+                guard local.publicKey == record.publicKey else { throw ProtocolError.crypto("stored key conflicts with server metadata") }
+            } else {
+                group.keys[String(timestamp)] = try CryptoEngine.openKeyPackage(
+                    identity: current.identity, groupID: group.groupID, record: record, package: package
+                )
             }
-            revision = transition.revision
-            generation = transition.generation
-            publicKey = transition.generationPublicKey
-            publicKeys[String(generation)] = publicKey
         }
-        guard revision == state.revision, generation == state.generation, publicKey == state.generationPublicKey else {
-            throw ProtocolError.crypto("device group current state does not match its signed chain")
-        }
-        for package in state.packages where group.generations[String(package.generation)] == nil {
-            let expected = package.generation > group.generation ? publicKeys[String(package.generation)] : nil
-            group.generations[String(package.generation)] = try CryptoEngine.openKeyPackage(
-                identity: current.identity, groupID: group.groupID, expectedPublicKey: expected, package: package
-            )
-        }
-        guard group.generations[String(generation)] != nil else {
-            throw ProtocolError.crypto("current generation key package is missing")
-        }
-        group.revision = revision
-        group.generation = generation
-        group.publicKey = publicKey
         current.identity.group = group
-        for index in current.sessions.indices where current.sessions[index].protocolVersion == 2 {
-            try populateSessionKeys(&current.sessions[index], group: group)
-        }
         groupState = state
-        groupDevices = state.devices
-        pendingDevices = state.pending
-        groupGeneration = generation
-        pruneExpiredInvitations(&current)
-        if state.pending.isEmpty,
-           let active = current.identity.invitations.values.max(by: { ($0.expiresAt ?? 0) < ($1.expiresAt ?? 0) }) {
-            invitationLink = try deviceInvitationURL(active)
-        } else {
-            invitationLink = nil
-        }
+        groupDevices = state.members
+        currentKeyTimestamp = GroupKeyPolicy.selectUsableKey(state)?.timestamp
         try persist(current)
     }
 
-    private func inheritSessions(_ current: inout Vault) async throws {
-        guard let group = current.identity.group else { return }
-        for remote in try await api.groupSessions(identity: current.identity)
-            where !current.sessions.contains(where: { $0.sessionID == remote.sessionID }) {
+    private func ensureExactGroupKey(_ current: inout Vault) async throws {
+        guard let state = groupState, var group = current.identity.group else { throw ProtocolError.crypto("group state is unavailable") }
+        if GroupKeyPolicy.latestKeyMatchesMembers(state) { return }
+        let draft = CryptoEngine.createGroupKey()
+        let timestamp: Int64
+        do {
+            timestamp = try await api.registerGroupKey(
+                identity: current.identity, key: draft,
+                recreated: GroupKeyPolicy.nextKeyIsRecreated(state), members: state.members
+            )
+        } catch let error as APIError where error.code == "member_set_changed" || error.code == "key_timestamp_conflict" {
+            try await synchronizeGroup(&current)
+            return
+        }
+        group.keys[String(timestamp)] = GroupKey(timestamp: timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey)
+        current.identity.group = group
+        try persist(current)
+        try await synchronizeGroup(&current)
+    }
+
+    private func currentGroupKey(state: DeviceGroupStateResult, group: DeviceGroup) throws -> GroupKey? {
+        guard let record = GroupKeyPolicy.selectUsableKey(state) else { return nil }
+        guard let key = group.keys[String(record.timestamp)], key.publicKey == record.publicKey else {
+            throw ProtocolError.crypto("current group private key is unavailable")
+        }
+        return key
+    }
+
+    private func inheritSessions(_ current: inout Vault) throws {
+        guard let group = current.identity.group, let state = groupState else { return }
+        for remote in state.sessions where !current.sessions.contains(where: { $0.sessionID == remote.sessionID }) {
             var record = SessionRecord(
-                protocolVersion: 2,
-                sessionID: remote.sessionID,
-                groupID: group.groupID,
-                groupAccessToken: "",
-                sharedKey: Data(),
-                creatorPublicKey: remote.creatorPublicKey,
-                generationKeys: [:],
-                cursor: 0,
-                title: "Session \(remote.sessionID.prefix(8))",
-                status: "Connected",
-                notification: "",
-                request: nil,
-                requestGeneration: nil,
-                expiresAt: remote.expiresAt
+                protocolVersion: 3, sessionID: remote.sessionID, groupID: group.groupID,
+                creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
+                title: "Session \(remote.sessionID.prefix(8))", status: "Connected", notification: "",
+                request: nil, requestKeyTimestamp: nil, expiresAt: remote.expiresAt
             )
             try populateSessionKeys(&record, group: group)
             current.sessions.append(record)
@@ -557,215 +357,94 @@ final class AppModel: ObservableObject {
     }
 
     private func populateSessionKeys(_ session: inout SessionRecord, group: DeviceGroup) throws {
-        guard let creatorPublicKey = session.creatorPublicKey else {
-            throw ProtocolError.crypto("v2 session is missing its creator public key")
-        }
-        for generation in group.generations.values where session.generationKeys[String(generation.generation)] == nil {
-            session.generationKeys[String(generation.generation)] = try CryptoEngine.deriveSessionKey(
-                generation: generation,
-                creatorPublicKey: creatorPublicKey,
-                sessionID: session.sessionID,
-                groupID: group.groupID
+        for key in group.keys.values where session.keys[String(key.timestamp)] == nil {
+            session.keys[String(key.timestamp)] = try CryptoEngine.deriveSessionKey(
+                key: key, creatorPublicKey: session.creatorPublicKey, sessionID: session.sessionID, groupID: group.groupID
             )
         }
     }
 
-    private func buildTransition(
-        action: String,
-        targetDeviceID: String,
-        pending: PendingDevice?,
-        vault: Vault
-    ) throws -> (next: GenerationKey, body: GroupTransitionBody) {
-        guard let state = groupState,
-              let group = vault.identity.group,
-              let currentKey = group.generations[String(group.generation)] else {
-            throw ProtocolError.crypto("current group state or generation key is unavailable")
-        }
-        let next = CryptoEngine.createGeneration(group.generation + 1)
-        var recipients = state.devices.map { ($0.deviceID, $0.encryptionPublicKey) }
-        if let pending { recipients.append((pending.deviceID, pending.encryptionPublicKey)) }
-        if action == "remove" { recipients.removeAll { $0.0 == targetDeviceID } }
-        var packages = try recipients.map {
-            try CryptoEngine.createKeyPackage(groupID: group.groupID, generation: next, deviceID: $0.0, encryptionPublicKey: $0.1)
-        }
-        if let pending {
-            for previous in group.generations.values {
-                packages.append(try CryptoEngine.createKeyPackage(
-                    groupID: group.groupID,
-                    generation: previous,
-                    deviceID: pending.deviceID,
-                    encryptionPublicKey: pending.encryptionPublicKey
-                ))
-            }
-        }
-        let packagesHash = CryptoEngine.hashPackages(packages)
-        let signed = GenerationTransition(
-            revision: group.revision + 1,
-            previousGeneration: group.generation,
-            generation: next.generation,
-            generationPublicKey: next.publicKey,
-            action: action,
-            actorDeviceID: vault.identity.deviceID,
-            targetDeviceID: targetDeviceID,
-            packagesHash: packagesHash,
-            groupSignature: "",
-            deviceSignature: "",
-            createdAt: 0
-        )
-        let transcript = CryptoEngine.transitionTranscript(groupID: group.groupID, transition: signed)
-        return (next, GroupTransitionBody(
-            expectedRevision: group.revision,
-            nextGenerationPublicKey: next.publicKey,
-            packages: packages,
-            groupSignature: try CryptoEngine.signGeneration(currentKey, transcript: transcript),
-            deviceSignature: try CryptoEngine.signDevice(identity: vault.identity, transcript: transcript)
-        ))
-    }
-
-    private func applyLocalTransition(next: GenerationKey, to current: inout Vault) {
-        current.identity.group?.revision += 1
-        current.identity.group?.generation = next.generation
-        current.identity.group?.publicKey = next.publicKey
-        current.identity.group?.generations[String(next.generation)] = next
-    }
-
-    private func apply(_ event: SessionEvent, generation: Int64?, to session: inout SessionRecord) {
+    private func apply(_ event: SessionEvent, timestamp: Int64, to session: inout SessionRecord) {
         switch event {
         case .notification(let title, let message): session.title = title; session.notification = message
         case .status(let title, let value): session.title = title; session.status = value
         case .request(let title, let value):
-            session.title = title
-            session.request = value
-            session.requestGeneration = generation
+            session.title = title; session.request = value; session.requestKeyTimestamp = timestamp
         }
     }
 
-    private func deviceInvitationURL(_ invitation: DeviceInvitationRecord) throws -> String {
-        var fragment = URLComponents()
-        fragment.queryItems = [
-            URLQueryItem(name: "v", value: "1"),
-            URLQueryItem(name: "g", value: invitation.groupID),
-            URLQueryItem(name: "i", value: invitation.invitationID),
-            URLQueryItem(name: "t", value: invitation.invitationToken),
-            URLQueryItem(name: "r", value: String(invitation.revision)),
-            URLQueryItem(name: "n", value: String(invitation.generation)),
-            URLQueryItem(name: "k", value: invitation.publicKey),
+    private func recoverRemovedDevice() async throws {
+        var current = try requiredVault()
+        guard let groupID = current.identity.group?.groupID else { return }
+        current = Self.detachingFromDeviceGroup(current, groupID: groupID)
+        clearPublishedGroupState()
+        try await createSoloGroup(&current)
+        try persist(current)
+        noticeMessage = "Sharing ended for this device. It is now used on its own."
+        connectionState = .current
+    }
+
+    private func registerPushToken(_ token: String, environment: PushEnvironment) async {
+        do { try await api.registerPushToken(token, environment: environment, identity: try requiredVault().identity) }
+        catch { show(error) }
+    }
+
+    private func deviceRequestURL(_ request: DeviceRequestRecord) throws -> String {
+        var fragment = URLComponents(); fragment.queryItems = [
+            URLQueryItem(name: "v", value: "2"), URLQueryItem(name: "r", value: request.requestID),
         ]
         var result = URLComponents(string: "https://notify.guru/device")!
         result.percentEncodedFragment = fragment.percentEncodedQuery
-        guard let value = result.url?.absoluteString else { throw ProtocolError.invalidResponse("could not construct device invitation URL") }
+        guard let value = result.url?.absoluteString else { throw ProtocolError.invalidResponse("could not construct device request URL") }
         return value
     }
 
+    private func requiredGroupState() throws -> DeviceGroupStateResult {
+        guard let groupState else { throw ProtocolError.crypto("group state is unavailable") }
+        return groupState
+    }
+
     private func persist(_ value: Vault) throws {
-        try keychain.save(value)
-        vault = value
-        publish(value)
-    }
-
-    private func detachRemovedDevice() async throws {
-        var current = requiredVault()
-        guard let group = current.identity.group else { return }
-        current = Self.detachingFromDeviceGroup(current, groupID: group.groupID)
-        clearPublishedGroupState()
-        deviceJoinStatus = nil
-        noticeMessage = "Sharing ended on this device. It is now being used on its own."
-        try persist(current)
-        try await createInitialGroup(&current)
-        errorMessage = nil
-    }
-
-    private func clearPublishedGroupState() {
-        groupState = nil
-        groupDevices = []
-        pendingDevices = []
-        invitationLink = nil
-        verificationCode = nil
-    }
-
-    private func pruneExpiredInvitations(_ current: inout Vault) {
-        current.identity.invitations = Self.retainingActiveInvitations(
-            current.identity.invitations,
-            nowMilliseconds: Self.currentTimeMilliseconds()
-        )
+        try keychain.save(value); vault = value; publish(value)
     }
 
     private func publish(_ value: Vault) {
         sessions = value.sessions.sorted { $0.expiresAt > $1.expiresAt }
         hasDeviceGroup = value.identity.group != nil
-        groupGeneration = value.identity.group?.generation
         deviceID = value.identity.deviceID
     }
 
-    private func enableNotifications() async {
-        do { _ = try await PushCoordinator.shared.enable() } catch { show(error) }
+    private func clearPublishedGroupState() {
+        groupState = nil; groupDevices = []; currentKeyTimestamp = nil; deviceRequestLink = nil
     }
 
-    private func registerPushToken(_ token: String, environment: PushEnvironment) async {
-        do {
-            try pruneExpiredSessions()
-            var current = requiredVault()
-            var index = 0
-            while index < current.sessions.count {
-                do {
-                    current.sessions[index].expiresAt = try await api.registerPushToken(
-                        token, environment: environment, session: current.sessions[index], identity: current.identity
-                    )
-                    index += 1
-                } catch let error as APIError where error.code == "session_not_found" || error.code == "session_expired" {
-                    current.sessions.remove(at: index)
-                }
-            }
-            if current != requiredVault() { try persist(current) }
-        } catch { show(error) }
-    }
-
-    private func requiredVault() -> Vault {
-        guard let vault else { preconditionFailure("AppModel must be started before use") }
+    private func requiredVault() throws -> Vault {
+        guard let vault else { throw ProtocolError.invalidResponse("secure storage is not ready") }
         return vault
     }
 
-    private func show(_ error: Error) {
-        guard !isExpectedCancellation(error) else { return }
-        errorMessage = error.localizedDescription
+    private func failStartup(_ message: String, canReset: Bool) {
+        startupErrorMessage = message
+        canResetLocalData = canReset
+        connectionState = .failed
     }
 
-    private func pruneExpiredSessions() throws {
-        let current = requiredVault()
-        let pruned = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
-        if pruned != current { try persist(pruned) }
+    private func show(_ error: Error) {
+        guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return }
+        errorMessage = error.localizedDescription; connectionState = .failed
     }
 
     nonisolated static func pruningExpiredSessions(from vault: Vault, nowMilliseconds: Int64) -> Vault {
-        var result = vault
-        result.sessions.removeAll { $0.expiresAt <= nowMilliseconds }
-        return result
+        var result = vault; result.sessions.removeAll { $0.expiresAt <= nowMilliseconds }; return result
     }
 
     nonisolated static func detachingFromDeviceGroup(_ vault: Vault, groupID: String) -> Vault {
         var result = vault
         result.identity.group = nil
-        result.identity.pendingInvitation = nil
-        result.identity.invitations.removeAll()
-        result.sessions.removeAll { $0.protocolVersion == 2 && $0.groupID == groupID }
+        result.identity.deviceRequest = nil
+        result.sessions.removeAll { $0.protocolVersion == 3 && $0.groupID == groupID }
         return result
     }
 
-    nonisolated static func retainingActiveInvitations(
-        _ invitations: [String: DeviceInvitationRecord],
-        nowMilliseconds: Int64
-    ) -> [String: DeviceInvitationRecord] {
-        invitations.filter { _, invitation in
-            guard let expiresAt = invitation.expiresAt else { return false }
-            return expiresAt > nowMilliseconds
-        }
-    }
-
-    nonisolated private static func currentTimeMilliseconds() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1_000)
-    }
-
-    private func isExpectedCancellation(_ error: Error) -> Bool {
-        error is CancellationError || (error as? URLError)?.code == .cancelled
-    }
+    nonisolated private static func currentTimeMilliseconds() -> Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
 }

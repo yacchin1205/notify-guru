@@ -4,62 +4,6 @@ import { afterEach, describe, expect, it } from "vitest";
 afterEach(reset);
 
 describe("session relay", () => {
-  it("relays opaque events and responses between a creator and a device group", async () => {
-    const fixture = await createJoinedSession();
-
-    const eventId = randomId();
-    const event = await api(`/api/sessions/${fixture.sessionId}/events`, {
-      method: "POST",
-      token: fixture.managerToken,
-      body: {
-        eventId,
-        groupId: fixture.groupId,
-        nonce: "AAAAAAAAAAAAAAAA",
-        ciphertext: "opaque_event_payload",
-      },
-    });
-    expect(event.status).toBe(201);
-
-    const events = await api(`/api/sessions/${fixture.sessionId}/events?groupId=${fixture.groupId}&after=0`, {
-      token: fixture.groupToken,
-    });
-    expect(events.status).toBe(200);
-    expect(events.json.events).toEqual([
-      expect.objectContaining({
-        eventId,
-        groupId: fixture.groupId,
-        nonce: "AAAAAAAAAAAAAAAA",
-        ciphertext: "opaque_event_payload",
-      }),
-    ]);
-
-    const responseId = randomId();
-    const response = await api(`/api/sessions/${fixture.sessionId}/responses`, {
-      method: "POST",
-      token: fixture.groupToken,
-      body: {
-        responseId,
-        groupId: fixture.groupId,
-        nonce: "BBBBBBBBBBBBBBBB",
-        ciphertext: "opaque_response_payload",
-      },
-    });
-    expect(response.status).toBe(201);
-
-    const responses = await api(`/api/sessions/${fixture.sessionId}/responses?after=0`, {
-      token: fixture.managerToken,
-    });
-    expect(responses.status).toBe(200);
-    expect(responses.json.responses).toEqual([
-      expect.objectContaining({
-        responseId,
-        groupId: fixture.groupId,
-        nonce: "BBBBBBBBBBBBBBBB",
-        ciphertext: "opaque_response_payload",
-      }),
-    ]);
-  });
-
   it("rejects unknown protocol fields", async () => {
     const response = await api("/api/sessions", {
       method: "POST",
@@ -84,144 +28,46 @@ describe("session relay", () => {
     expect(malformed.status).toBe(400);
     expect((await malformed.json<{ error: string }>()).error).toBe("invalid_json");
 
-    const fixture = await createJoinedSession();
-    const unsafeCursor = await api(`/api/sessions/${fixture.sessionId}/events?groupId=${fixture.groupId}&after=9007199254740992`, {
-      token: fixture.groupToken,
+    const session = await createSession();
+    const unsafeCursor = await api(`/api/sessions/${session.id}/responses?after=9007199254740992`, {
+      token: session.managerToken,
     });
     expect(unsafeCursor.status).toBe(400);
     expect(unsafeCursor.json.error).toBe("invalid_query");
   });
 
-  it("requires the exact manager and group capabilities", async () => {
-    const fixture = await createJoinedSession();
-
-    const managerResponse = await api(`/api/sessions/${fixture.sessionId}/responses?after=0`, {
-      token: "wrong-token",
-    });
-    expect(managerResponse.status).toBe(401);
-    expect(managerResponse.json.error).toBe("invalid_manager_token");
-
-    const groupResponse = await api(`/api/sessions/${fixture.sessionId}/events?groupId=${fixture.groupId}&after=0`, {
-      token: "wrong-token",
-    });
-    expect(groupResponse.status).toBe(401);
-    expect(groupResponse.json.error).toBe("invalid_group_token");
-  });
-
-  it("registers an APNs token only for its exact device-group capability", async () => {
-    const fixture = await createJoinedSession();
-    const registered = await api(`/api/sessions/${fixture.sessionId}/push`, {
-      method: "PUT",
-      token: fixture.groupToken,
-      body: {
-        groupId: fixture.groupId,
-        deviceToken: "aabbccdd",
-        environment: "sandbox",
-      },
-    });
-    expect(registered.status).toBe(200);
-    expect(registered.json).toEqual({ registered: true, expiresAt: expect.any(Number) });
-
-    const rejected = await api(`/api/sessions/${fixture.sessionId}/push`, {
-      method: "PUT",
-      token: "wrong-token",
-      body: {
-        groupId: fixture.groupId,
-        deviceToken: "aabbccdd",
-        environment: "sandbox",
-      },
-    });
-    expect(rejected.status).toBe(401);
-    expect(rejected.json.error).toBe("invalid_group_token");
-  });
-
-  it("retries one failed push job without blocking later jobs", async () => {
-    const fixture = await createJoinedSession();
-    const registered = await api(`/api/sessions/${fixture.sessionId}/push`, {
-      method: "PUT",
-      token: fixture.groupToken,
-      body: {
-        groupId: fixture.groupId,
-        deviceToken: "aabbccdd",
-        environment: "sandbox",
-      },
-    });
-    expect(registered.status).toBe(200);
-    for (let index = 0; index < 2; index += 1) {
-      const event = await api(`/api/sessions/${fixture.sessionId}/events`, {
-        method: "POST",
-        token: fixture.managerToken,
-        body: {
-          eventId: randomId(),
-          groupId: fixture.groupId,
-          nonce: "AAAAAAAAAAAAAAAA",
-          ciphertext: `opaque_event_${index}`,
-        },
-      });
-      expect(event.status).toBe(201);
-    }
-
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(fixture.sessionId));
-    await runInDurableObject(stub, async (instance, state) => {
-      state.storage.sql.exec("UPDATE push_jobs SET attempt_count = 0, next_attempt_at = 0");
-      let calls = 0;
-      Object.defineProperty(instance, "apns", {
-        value: {
-          send: async () => {
-            calls += 1;
-            return calls === 1
-              ? { outcome: "retry" as const, reason: "ServiceUnavailable", minimumDelayMs: 0 }
-              : { outcome: "delivered" as const };
-          },
-        },
-      });
-
-      await instance.alarm();
-
-      expect(calls).toBe(2);
-      const jobs = Array.from(
-        state.storage.sql.exec<{ attempt_count: number; next_attempt_at: number }>(
-          "SELECT attempt_count, next_attempt_at FROM push_jobs",
-        ),
-      );
-      expect(jobs).toHaveLength(1);
-      expect(jobs[0].attempt_count).toBe(1);
-      expect(jobs[0].next_attempt_at).toBeGreaterThan(Date.now());
-    });
-  });
-
-  it("consumes each pairing exactly once", async () => {
-    const fixture = await createJoinedSession();
-    const response = await join(fixture);
-    expect(response.status).toBe(409);
-    expect(response.json.error).toBe("pairing_consumed");
+  it("requires the exact manager capability", async () => {
+    const session = await createSession();
+    const response = await api(`/api/sessions/${session.id}/responses?after=0`, { token: "wrong-token" });
+    expect(response.status).toBe(401);
+    expect(response.json.error).toBe("invalid_manager_token");
   });
 
   it("deallocates all session storage when its alarm fires", async () => {
-    const fixture = await createJoinedSession();
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(fixture.sessionId));
+    const session = await createSession();
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session.id));
     await runInDurableObject(stub, (_instance, state) => {
       state.storage.sql.exec("UPDATE meta SET expires_at = 0 WHERE singleton = 1");
     });
     expect(await runDurableObjectAlarm(stub)).toBe(true);
 
-    const response = await api(`/api/sessions/${fixture.sessionId}/responses?after=0`, {
-      token: fixture.managerToken,
+    const response = await api(`/api/sessions/${session.id}/responses?after=0`, {
+      token: session.managerToken,
     });
     expect(response.status).toBe(404);
     expect(response.json.error).toBe("session_not_found");
   });
 
   it("deallocates all session storage on explicit close", async () => {
-    const fixture = await createJoinedSession();
-    const closed = await api(`/api/sessions/${fixture.sessionId}`, {
+    const session = await createSession();
+    const closed = await api(`/api/sessions/${session.id}`, {
       method: "DELETE",
-      token: fixture.managerToken,
+      token: session.managerToken,
     });
     expect(closed.status).toBe(204);
 
-    const response = await api(`/api/sessions/${fixture.sessionId}/responses?after=0`, {
-      token: fixture.managerToken,
+    const response = await api(`/api/sessions/${session.id}/responses?after=0`, {
+      token: session.managerToken,
     });
     expect(response.status).toBe(404);
   });
@@ -238,63 +84,30 @@ describe("session relay", () => {
   });
 });
 
-async function createJoinedSession() {
-  const fixture = {
-    sessionId: randomId(),
-    managerToken: "manager-token",
-    pairingId: randomId(),
-    pairingToken: "pairing-token",
-    groupId: randomId(),
-    groupToken: "group-token",
-  };
+async function createSession(): Promise<{ id: string; managerToken: string }> {
+  const id = randomId();
+  const managerToken = "manager-token";
   const created = await api("/api/sessions", {
     method: "POST",
     body: {
-      sessionId: fixture.sessionId,
-      managerTokenHash: await hash(fixture.managerToken),
+      sessionId: id,
+      managerTokenHash: await hash(managerToken),
       creatorPublicKey: "A".repeat(87),
-      pairing: { id: fixture.pairingId, tokenHash: await hash(fixture.pairingToken) },
+      pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
     },
   });
   expect(created.status).toBe(201);
-
-  const joined = await join(fixture);
-  expect(joined.status).toBe(201);
-  return fixture;
-}
-
-async function join(fixture: {
-  sessionId: string;
-  pairingId: string;
-  pairingToken: string;
-  groupId: string;
-  groupToken: string;
-}) {
-  return api(`/api/sessions/${fixture.sessionId}/join`, {
-    method: "POST",
-    body: {
-      pairingId: fixture.pairingId,
-      pairingToken: fixture.pairingToken,
-      groupId: fixture.groupId,
-      groupAccessTokenHash: await hash(fixture.groupToken),
-      groupPublicKey: "B".repeat(87),
-      proof: "C".repeat(43),
-    },
-  });
+  return { id, managerToken };
 }
 
 async function api(path: string, options: { method?: string; token?: string; body?: unknown } = {}) {
   const headers = new Headers();
-  if (options.token !== undefined) {
-    headers.set("authorization", `Bearer ${options.token}`);
-  }
-  if (options.body !== undefined) {
-    headers.set("content-type", "application/json");
-  }
+  if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
+  if (options.body !== undefined) headers.set("content-type", "application/json");
   const response = await SELF.fetch(`https://notify.guru${path}`, {
     method: options.method ?? "GET",
     headers,
-    body: options.body === undefined ? undefined : JSON.stringify(await options.body),
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   const json = response.status === 204 ? undefined : await response.json<Record<string, any>>();
   return { status: response.status, json };

@@ -8,7 +8,6 @@ struct JoinSessionView: View {
     @State private var pairingLink = ""
     @State private var joining = false
     @State private var scanGeneration = 0
-    @State private var replacementLink: String?
 
     var body: some View {
         NavigationStack {
@@ -41,27 +40,6 @@ struct JoinSessionView: View {
                 }
             }
         }
-        .confirmationDialog(
-            "Replace this device's current sessions?",
-            isPresented: Binding(
-                get: { replacementLink != nil },
-                set: { if !$0 { replacementLink = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            if let value = replacementLink {
-                Button("Replace and continue", role: .destructive) {
-                    replacementLink = nil
-                    Task { await join(value, replacingStandaloneSessions: true) }
-                }
-            }
-            Button("Cancel", role: .cancel) {
-                replacementLink = nil
-                scanGeneration += 1
-            }
-        } message: {
-            Text("The sessions and keys currently stored on this device will be removed before it starts sharing with the other devices.")
-        }
     }
 
     @ViewBuilder
@@ -77,7 +55,7 @@ struct JoinSessionView: View {
             ContentUnavailableView {
                 Label("Camera access", systemImage: "camera")
             } description: {
-                Text("Camera access is used only to scan a session or device invitation QR code.")
+                Text("Camera access is used only to scan a session or device request QR code.")
             } actions: {
                 Button("Allow camera") { requestCameraAccess() }
                     .buttonStyle(.borderedProminent)
@@ -102,18 +80,14 @@ struct JoinSessionView: View {
     }
 
     private func beginJoin(_ value: String) {
-        guard !joining, replacementLink == nil else { return }
-        if model.deviceInvitationWouldReplaceSessions(value) {
-            replacementLink = value
-            return
-        }
-        Task { await join(value, replacingStandaloneSessions: false) }
+        guard !joining else { return }
+        Task { await join(value) }
     }
 
-    private func join(_ value: String, replacingStandaloneSessions: Bool) async {
+    private func join(_ value: String) async {
         guard !joining else { return }
         joining = true
-        let joined = await model.join(link: value, replacingStandaloneSessions: replacingStandaloneSessions)
+        let joined = await model.join(link: value)
         joining = false
         if joined {
             isPresented = false

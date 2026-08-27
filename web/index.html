@@ -23,6 +23,15 @@
         <p>CLIに表示されたQRコードを端末のカメラで読み取ると、この画面にセッションが追加されます。</p>
       </section>
       <p id="message" role="status" aria-live="polite"></p>
+      <section id="startup-error" class="group-card error-card" hidden>
+        <p class="card-label">ERROR</p>
+        <h2>起動できません</h2>
+        <p id="startup-error-message" role="alert"></p>
+        <div id="reset-local-data-actions" hidden>
+          <p>このブラウザに保存された端末鍵とセッションを削除すると、現在のバージョンで再登録できます。</p>
+          <button id="reset-local-data" class="destructive" type="button">この端末のデータをリセット</button>
+        </div>
+      </section>
       <section id="device-summary" class="group-card" hidden>
         <div class="card-head">
           <div>
@@ -41,21 +50,17 @@
           <button id="close-device-management" type="button">完了</button>
         </div>
         <p id="group-status"></p>
-        <button id="invite-device" type="button">別の端末でも受け取る</button>
-        <div id="invitation" hidden>
-          <p>別の端末でQRコードを読み取ってください。この招待は10分で失効します。</p>
-          <div id="invitation-qr"></div>
-          <button id="share-invitation" type="button">招待リンクを共有</button>
-        </div>
-        <div id="pending-devices"></div>
+        <p id="group-key-time"></p>
+        <button id="request-device-sharing" type="button">この端末を共有へ追加する</button>
         <div id="group-devices"></div>
         <button id="leave-device-group" class="destructive" type="button" hidden>この端末での共有をやめる</button>
       </section>
       <section id="join-device" class="group-card" hidden>
-        <p class="card-label">DEVICE VERIFICATION</p>
-        <h2>端末追加の確認</h2>
+        <p class="card-label">DEVICE REQUEST</p>
+        <h2>共有への追加待ち</h2>
         <p id="join-device-status"></p>
-        <p id="verification-code" class="verification-code"></p>
+        <div id="invitation-qr"></div>
+        <button id="share-invitation" type="button">追加依頼リンクを共有</button>
       </section>
       <section id="cards" aria-label="セッション"></section>
       <section id="empty" hidden>

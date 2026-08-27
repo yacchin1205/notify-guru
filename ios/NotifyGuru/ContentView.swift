@@ -11,7 +11,9 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !model.isReady {
+                if let startupErrorMessage = model.startupErrorMessage {
+                    StartupErrorView(message: startupErrorMessage)
+                } else if !model.isReady {
                     ProgressView("Preparing secure storage…")
                 } else {
                     ScrollView {
@@ -109,6 +111,26 @@ struct ContentView: View {
     }
 }
 
+private struct StartupErrorView: View {
+    @EnvironmentObject private var model: AppModel
+    let message: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Unable to start", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            if model.canResetLocalData {
+                Button("Reset this device", role: .destructive) {
+                    Task { await model.resetLocalData() }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
 private struct DeviceSummaryCard: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingManagement: Bool
@@ -138,17 +160,18 @@ private struct DeviceApprovalWaitingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("DEVICE VERIFICATION")
+            Text("DEVICE REQUEST")
                 .font(.caption2.weight(.bold))
                 .tracking(1.5)
                 .foregroundStyle(Color.brandAccent)
-            Text("Waiting for approval")
+            Text("Waiting to join device sharing")
                 .font(.headline)
-            Text("Confirm that the same code is shown on the inviting device, then approve there.")
+            Text("Scan this QR code with a device that already receives the notifications. Scanning approves this request.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            if let code = model.verificationCode {
-                Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
+            if let link = model.deviceRequestLink {
+                InvitationQRCodeView(value: link)
+                ShareLink(item: link) { Label("Share device request", systemImage: "square.and.arrow.up") }
             }
         }
         .padding(18)
@@ -161,13 +184,14 @@ private struct DeviceManagementView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var isPresented: Bool
     @State private var showingLeaveConfirmation = false
+    @State private var showingRequestConfirmation = false
     @State private var removalTarget: GroupDevice?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    invitationSection
+                    requestSection
                     Divider()
                     deviceSection
                     if model.isSharingAcrossDevices {
@@ -188,6 +212,18 @@ private struct DeviceManagementView: View {
                     Button("Done") { isPresented = false }
                 }
             }
+        }
+        .confirmationDialog(
+            "Move this device to another sharing group?",
+            isPresented: $showingRequestConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Discard and continue", role: .destructive) {
+                Task { await model.createDeviceRequest(discardingCurrentState: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current device sharing and sessions on this device will be discarded.")
         }
         .confirmationDialog(
             "Stop sharing on this device?",
@@ -215,7 +251,7 @@ private struct DeviceManagementView: View {
             if let target = removalTarget {
                 Button("Remove device", role: .destructive) {
                     Task {
-                        await model.remove(deviceID: target.deviceID)
+                        await model.removeDevice(target.deviceID)
                         removalTarget = nil
                     }
                 }
@@ -227,38 +263,27 @@ private struct DeviceManagementView: View {
     }
 
     @ViewBuilder
-    private var invitationSection: some View {
+    private var requestSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("USE ON ANOTHER DEVICE")
+            Text("JOIN DEVICE SHARING")
                 .font(.caption2.weight(.bold))
                 .tracking(1.5)
                 .foregroundStyle(Color.brandAccent)
-            if let pending = model.pendingDevices.first {
-                Text("Approve the new device")
-                    .font(.headline)
-                Text("Confirm that the same code is shown on both devices.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let code = model.verificationCode(for: pending) {
-                    Text(code).font(.title.monospacedDigit().weight(.bold)).tracking(4)
-                }
-                HStack {
-                    Button("Approve") { Task { await model.approve(invitationID: pending.invitationID) } }
-                        .buttonStyle(.borderedProminent)
-                    Button("Reject", role: .destructive) { Task { await model.reject(invitationID: pending.invitationID) } }
-                        .buttonStyle(.bordered)
-                }
-            } else if let link = model.invitationLink {
-                Text("Scan this code with the other device. This invitation expires after 10 minutes.")
+            if let link = model.deviceRequestLink {
+                Text("Scan this QR code with a device that already receives the notifications.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 InvitationQRCodeView(value: link)
-                    .frame(maxWidth: 320)
-                    .frame(maxWidth: .infinity)
-                ShareLink(item: link) { Label("Share invitation", systemImage: "square.and.arrow.up") }
+                ShareLink(item: link) { Label("Share device request", systemImage: "square.and.arrow.up") }
             } else {
-                Button("Use on another device") { Task { await model.createDeviceInvitation() } }
-                    .buttonStyle(.borderedProminent)
+                Text("To add this device to another device's sharing group, create a request here and scan it with that existing device.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Button("Create request for this device") {
+                    if model.deviceRequestWouldDiscardCurrentState { showingRequestConfirmation = true }
+                    else { Task { await model.createDeviceRequest() } }
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,6 +309,11 @@ private struct DeviceManagementView: View {
                             .buttonStyle(.bordered)
                     }
                 }
+            }
+            if let timestamp = model.currentKeyTimestamp {
+                Text("Key \(Date(timeIntervalSince1970: Double(timestamp) / 1_000).formatted())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -100,7 +100,7 @@ func (s *Store) RefreshGroups(ctx context.Context, sessionID string) (int, error
 }
 
 func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession) (int, error) {
-	result, err := s.api.joinsV2(ctx, session.id, session.managerToken)
+	result, err := s.api.joins(ctx, session.id, session.managerToken)
 	if err != nil {
 		return 0, err
 	}
@@ -111,82 +111,63 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 			if !known {
 				return 0, fmt.Errorf("join references unknown pairing %q", joined.PairingID)
 			}
-			if err := verifyPairingProofV2(
+			if err := verifyPairingProofV3(
 				pairing.AuthSecret,
 				session.id,
 				joined.PairingID,
 				joined.GroupID,
-				joined.InitialRevision,
-				joined.InitialGeneration,
+				joined.InitialKeyTimestamp,
 				joined.InitialPublicKey,
 				joined.Proof,
 			); err != nil {
 				return 0, fmt.Errorf("authenticate device group %q: %w", joined.GroupID, err)
 			}
-			key, err := deriveGenerationKey(
+			key, err := deriveGroupKey(
 				session.privateKey,
 				joined.InitialPublicKey,
 				session.id,
 				joined.GroupID,
-				joined.InitialGeneration,
+				joined.InitialKeyTimestamp,
 			)
 			if err != nil {
 				return 0, err
 			}
 			group = &Group{
-				ID:                joined.GroupID,
-				PairingID:         joined.PairingID,
-				InitialRevision:   joined.InitialRevision,
-				InitialGeneration: joined.InitialGeneration,
-				InitialPublicKey:  joined.InitialPublicKey,
-				Revision:          joined.InitialRevision,
-				Generation:        joined.InitialGeneration,
-				PublicKey:         joined.InitialPublicKey,
-				Keys:              map[int64][]byte{joined.InitialGeneration: key},
+				ID:               joined.GroupID,
+				PairingID:        joined.PairingID,
+				InitialTimestamp: joined.InitialKeyTimestamp,
+				InitialPublicKey: joined.InitialPublicKey,
+				Timestamp:        joined.InitialKeyTimestamp,
+				PublicKey:        joined.InitialPublicKey,
+				Keys:             map[int64][]byte{joined.InitialKeyTimestamp: key},
 			}
 			session.groups[joined.GroupID] = group
 		} else if group.PairingID != joined.PairingID ||
-			group.InitialRevision != joined.InitialRevision ||
-			group.InitialGeneration != joined.InitialGeneration ||
+			group.InitialTimestamp != joined.InitialKeyTimestamp ||
 			group.InitialPublicKey != joined.InitialPublicKey {
 			return 0, fmt.Errorf("server changed authenticated initial state for device group %q", joined.GroupID)
 		}
-
-		if joined.CurrentGeneration < group.Generation || joined.CurrentRevision < group.Revision {
-			return 0, fmt.Errorf("server rolled back device group %q", joined.GroupID)
+		if joined.Key == nil {
+			group.Timestamp = 0
+			group.PublicKey = ""
+			continue
 		}
-		for _, transition := range joined.Transitions {
-			if transition.Generation <= group.Generation {
-				continue
+		if existing, known := group.Keys[joined.Key.Timestamp]; known {
+			if group.Timestamp == joined.Key.Timestamp && group.PublicKey != joined.Key.PublicKey {
+				return 0, fmt.Errorf("server changed public key at timestamp %d for device group %q", joined.Key.Timestamp, joined.GroupID)
 			}
-			if transition.PreviousGeneration != group.Generation ||
-				transition.Generation != group.Generation+1 ||
-				transition.Revision != group.Revision+1 {
-				return 0, fmt.Errorf("device group %q has a discontinuous generation transition", joined.GroupID)
-			}
-			if err := verifyGenerationTransition(group.ID, transition, group.PublicKey); err != nil {
-				return 0, fmt.Errorf("device group %q: %w", joined.GroupID, err)
-			}
-			key, err := deriveGenerationKey(
-				session.privateKey,
-				transition.GenerationPublicKey,
-				session.id,
-				group.ID,
-				transition.Generation,
-			)
-			if err != nil {
-				return 0, err
-			}
-			group.Revision = transition.Revision
-			group.Generation = transition.Generation
-			group.PublicKey = transition.GenerationPublicKey
-			group.Keys[transition.Generation] = key
+			group.Timestamp = joined.Key.Timestamp
+			group.PublicKey = joined.Key.PublicKey
+			_ = existing
+			continue
 		}
-		if group.Revision != joined.CurrentRevision ||
-			group.Generation != joined.CurrentGeneration ||
-			group.PublicKey != joined.CurrentPublicKey {
-			return 0, fmt.Errorf("device group %q current state does not match its signed transition chain", joined.GroupID)
+		key, err := deriveGroupKey(session.privateKey, joined.Key.PublicKey, session.id, joined.GroupID, joined.Key.Timestamp)
+		if err != nil {
+			return 0, err
 		}
+		group.Keys[joined.Key.Timestamp] = key
+		group.Timestamp = joined.Key.Timestamp
+		group.PublicKey = joined.Key.PublicKey
 	}
 	return len(session.groups), nil
 }
@@ -243,7 +224,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	result, err := s.api.responsesV2(ctx, session.id, session.managerToken, session.responseCursor)
+	result, err := s.api.responses(ctx, session.id, session.managerToken, session.responseCursor)
 	if err != nil {
 		return nil, err
 	}
@@ -253,14 +234,14 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		if !exists {
 			return nil, fmt.Errorf("response references unknown device group %q", envelope.GroupID)
 		}
-		key, exists := group.Keys[envelope.Generation]
+		key, exists := group.Keys[envelope.KeyTimestamp]
 		if !exists {
-			return nil, fmt.Errorf("response references unknown generation %d for device group %q", envelope.Generation, envelope.GroupID)
+			return nil, fmt.Errorf("response references unknown key timestamp %d for device group %q", envelope.KeyTimestamp, envelope.GroupID)
 		}
 		var decrypted decryptedResponse
 		if err := decryptJSON(
 			key,
-			responseAAD(session.id, group.ID, envelope.ResponseID, envelope.Generation),
+			responseAAD(session.id, group.ID, envelope.ResponseID, envelope.KeyTimestamp),
 			envelope.Nonce,
 			envelope.Ciphertext,
 			&decrypted,
@@ -377,14 +358,14 @@ func (s *Store) send(ctx context.Context, sessionID string, value event) error {
 	for _, group := range session.groups {
 		if err := s.sendToGroup(ctx, session, group, value); err != nil {
 			var apiError *APIError
-			if !errors.As(err, &apiError) || apiError.Code != "stale_group_generation" {
+			if !errors.As(err, &apiError) || apiError.Code != "group_key_unavailable" {
 				return err
 			}
 			if _, refreshErr := s.refreshGroupsLocked(ctx, session); refreshErr != nil {
-				return fmt.Errorf("refresh stale device group: %w", refreshErr)
+				return fmt.Errorf("refresh unavailable device group key: %w", refreshErr)
 			}
 			if retryErr := s.sendToGroup(ctx, session, group, value); retryErr != nil {
-				return fmt.Errorf("send after one generation refresh: %w", retryErr)
+				return fmt.Errorf("send after refreshing device group key: %w", retryErr)
 			}
 		}
 	}
@@ -392,29 +373,32 @@ func (s *Store) send(ctx context.Context, sessionID string, value event) error {
 }
 
 func (s *Store) sendToGroup(ctx context.Context, session *managedSession, group *Group, value event) error {
+	if group.Timestamp == 0 {
+		return fmt.Errorf("device group %q has no key available for new events", group.ID)
+	}
 	envelopeID, err := randomValue(18)
 	if err != nil {
 		return err
 	}
-	key, exists := group.Keys[group.Generation]
+	key, exists := group.Keys[group.Timestamp]
 	if !exists {
-		return fmt.Errorf("missing current key for device group %q generation %d", group.ID, group.Generation)
+		return fmt.Errorf("missing current key for device group %q timestamp %d", group.ID, group.Timestamp)
 	}
 	nonce, ciphertext, err := encryptJSON(
 		key,
-		eventAAD(session.id, group.ID, envelopeID, group.Generation),
+		eventAAD(session.id, group.ID, envelopeID, group.Timestamp),
 		value,
 	)
 	if err != nil {
 		return err
 	}
-	return s.api.addEventV2(
+	return s.api.addEvent(
 		ctx,
 		session.id,
 		session.managerToken,
 		envelopeID,
 		group.ID,
-		group.Generation,
+		group.Timestamp,
 		nonce,
 		ciphertext,
 	)

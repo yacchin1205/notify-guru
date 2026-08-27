@@ -1,73 +1,73 @@
 import { describe, expect, it } from "vitest";
 import {
   createDeviceIdentity,
-  createGeneration,
+  createGroupKey,
   createKeyPackage,
+  deviceCreateTranscript,
+  groupKeyRegisterTranscript,
   groupCreateTranscript,
-  hashPackages,
   openKeyPackage,
   signDevice,
-  signGeneration,
-  transitionTranscript,
-  verificationCode,
-  verifySignature,
 } from "../web/crypto.js";
+import { verifyP256Signature } from "../src/protocol";
 
 describe("web device-group cryptography", () => {
-  it("wraps a generation private key for exactly one device", async () => {
-    const device = await createDeviceIdentity();
-    const other = await createDeviceIdentity();
-    const generation = await createGeneration(7);
-    const descriptor = {
-      deviceId: device.deviceId,
-      encryptionPublicKey: device.encryptionPublicKey,
-      signingPublicKey: device.signingPublicKey,
-    };
-    const keyPackage = await createKeyPackage("group_identifier_1234", generation, descriptor);
-    const opened = await openKeyPackage(device, "group_identifier_1234", generation.publicKey, keyPackage);
-    expect(opened).toEqual(generation);
-    await expect(openKeyPackage(other, "group_identifier_1234", generation.publicKey, keyPackage)).rejects.toThrow();
-  });
-
-  it("creates signatures accepted by both device and generation public keys", async () => {
-    const device = await createDeviceIdentity();
-    const generation = await createGeneration(1);
-    const keyPackage = await createKeyPackage("group_identifier_1234", generation, {
-      deviceId: device.deviceId,
-      encryptionPublicKey: device.encryptionPublicKey,
-      signingPublicKey: device.signingPublicKey,
+  it("wraps a group private key for exactly one registered device", async () => {
+    const device = await registeredIdentity("device_identifier_1234");
+    const other = await registeredIdentity("other_device_identifier");
+    const groupKey = await createGroupKey();
+    const keyPackage = await createKeyPackage("group_identifier_1234", groupKey, device);
+    const keyRecord = { timestamp: 1_789_999_000_001, publicKey: groupKey.publicKey };
+    const envelope = { timestamp: keyRecord.timestamp, ...keyPackage };
+    await expect(openKeyPackage(device, "group_identifier_1234", keyRecord, envelope)).resolves.toEqual({
+      ...groupKey,
+      timestamp: keyRecord.timestamp,
     });
-    const packagesHash = await hashPackages([keyPackage]);
-    const create = groupCreateTranscript("group_identifier_1234", device, generation, packagesHash);
-    expect(await verifySignature(device.signingPublicKey, await signDevice(device, create), create)).toBe(true);
-
-    const transition = {
-      revision: 2,
-      previousGeneration: 1,
-      generation: 2,
-      generationPublicKey: (await createGeneration(2)).publicKey,
-      action: "remove",
-      actorDeviceId: device.deviceId,
-      targetDeviceId: "target_device_identifier",
-      packagesHash,
-    };
-    const transcript = transitionTranscript("group_identifier_1234", transition);
-    expect(await verifySignature(generation.publicKey, await signGeneration(generation, transcript), transcript)).toBe(true);
+    await expect(openKeyPackage(other, "group_identifier_1234", keyRecord, envelope)).rejects.toThrow();
   });
 
-  it("shows the same verification code for the invitation and pending device", async () => {
-    const device = await createDeviceIdentity();
-    const invitation = {
-      groupId: "group_identifier_1234",
-      invitationId: "invitation_identifier",
-      invitationToken: "invitation_token_value",
+  it("binds a key package to its group public key and recipient", async () => {
+    const device = await registeredIdentity("device_identifier_1234");
+    const groupKey = await createGroupKey();
+    const keyPackage = await createKeyPackage("group_identifier_1234", groupKey, device);
+    const otherKey = await createGroupKey();
+    await expect(openKeyPackage(device, "group_identifier_1234", {
+      timestamp: 1_789_999_000_001,
+      publicKey: otherKey.publicKey,
+    }, { timestamp: 1_789_999_000_001, ...keyPackage })).rejects.toThrow();
+  });
+
+  it("creates signatures accepted for device registration and group creation", async () => {
+    const device = await registeredIdentity("device_identifier_1234");
+    const nonce = "nonce_identifier_1234";
+    const createDevice = deviceCreateTranscript(device.signingPublicKey, nonce);
+    expect(await verifyP256Signature(device.signingPublicKey, await signDevice(device, createDevice), createDevice)).toBe(true);
+
+    const createGroup = groupCreateTranscript("group_identifier_1234", device, "a".repeat(64));
+    expect(await verifyP256Signature(device.signingPublicKey, await signDevice(device, createGroup), createGroup)).toBe(true);
+  });
+
+  it("canonicalizes every group key package into the management signature", () => {
+    const body = {
+      publicKey: "group-key",
+      recreated: true,
+      members: ["device_b", "device_a"],
+      packages: [
+        { deviceId: "device_b", ephemeralPublicKey: "ephemeral-b", nonce: "nonce-b", ciphertext: "cipher-b" },
+        { deviceId: "device_a", ephemeralPublicKey: "ephemeral-a", nonce: "nonce-a", ciphertext: "cipher-a" },
+      ],
     };
-    const pending = {
-      deviceId: device.deviceId,
-      encryptionPublicKey: device.encryptionPublicKey,
-      signingPublicKey: device.signingPublicKey,
-    };
-    expect(await verificationCode(invitation, pending)).toMatch(/^\d{6}$/);
-    expect(await verificationCode(invitation, pending)).toBe(await verificationCode(invitation, pending));
+    expect(groupKeyRegisterTranscript("group", "actor", body)).toBe([
+      "notify.guru/group-key-register/v1", "group", "actor", "group-key", "1", "2",
+      "device_a", "device_b", "2",
+      "device_a", "ephemeral-a", "nonce-a", "cipher-a",
+      "device_b", "ephemeral-b", "nonce-b", "cipher-b",
+    ].join("\n"));
   });
 });
+
+async function registeredIdentity(deviceId: string) {
+  const identity = await createDeviceIdentity();
+  identity.deviceId = deviceId;
+  return identity;
+}

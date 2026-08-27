@@ -90,6 +90,15 @@ h1 {
   background: rgba(8, 47, 73, 0.28);
 }
 
+.error-card {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.2);
+}
+
+.error-card h2 {
+  margin: 0.25rem 0 0.75rem;
+}
+
 .group-card h2 {
   margin: 0;
   font-size: 1.15rem;

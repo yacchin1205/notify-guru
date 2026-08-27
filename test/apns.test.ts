@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { APNsClient } from "../src/apns";
+import { APNsClient, APNsTransportError } from "../src/apns";
 
 describe("APNs client", () => {
   it("sends only a generic alert with token authentication", async () => {
@@ -115,6 +115,22 @@ describe("APNs client", () => {
       reason: "ServiceUnavailable",
       minimumDelayMs: 15 * 60 * 1000,
     });
+  });
+
+  it("distinguishes retryable transport failures from configuration errors", async () => {
+    const privateKey = await signingKey();
+    const transportFailure = new APNsClient(
+      { keyId: "NETWORK001", teamId: "NETWORK002", privateKey, topic: "guru.notify.app" },
+      (async () => { throw new TypeError("network unavailable"); }) as typeof fetch,
+    );
+    await expect(transportFailure.send("aabb", "production")).rejects.toBeInstanceOf(APNsTransportError);
+
+    const invalidConfiguration = new APNsClient(
+      { keyId: "invalid", teamId: "NETWORK002", privateKey, topic: "guru.notify.app" },
+    );
+    await expect(invalidConfiguration.send("aabb", "production")).rejects.toThrow(
+      "APNS_KEY_ID must be a 10-character uppercase identifier",
+    );
   });
 });
 
