@@ -23,7 +23,10 @@
 	<key>NSCameraUsageDescription</key>
 	<string>notify.guru uses the camera only to scan a one-shot session pairing QR code.</string>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>

@@ -35,6 +35,22 @@ final class AppModel: ObservableObject {
 #endif
     }
 
+    private var isStartupScreenUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-startup-screen")
+#else
+        false
+#endif
+    }
+
+    private var isStartupFailureUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-startup-error")
+#else
+        false
+#endif
+    }
+
     private var isDeviceAdditionApprovalUITest: Bool {
 #if DEBUG
         ProcessInfo.processInfo.arguments.contains("-ui-test-device-addition-approval")
@@ -67,6 +83,9 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !isReady else { return }
 #if DEBUG
+        if isStartupScreenUITest {
+            return
+        }
         if isSessionHistoryUITest || isDeviceAdditionApprovalUITest || isSessionLinkUITest {
             startSessionHistoryUITest()
             if isDeviceAdditionApprovalUITest {
@@ -384,6 +403,17 @@ final class AppModel: ObservableObject {
     func resumeNotifications() async { await PushCoordinator.shared.resumeIfAuthorized() }
     func dismissError() { errorMessage = nil }
     func dismissNotice() { noticeMessage = nil }
+
+#if DEBUG
+    func completeStartupUITest() {
+        guard isStartupScreenUITest else { return }
+        if isStartupFailureUITest {
+            failStartup("Startup failed for UI testing", canReset: false)
+        } else {
+            startSessionHistoryUITest()
+        }
+    }
+#endif
 
     private func openPendingUniversalLink() async {
         guard let url = pendingUniversalLink else { return }

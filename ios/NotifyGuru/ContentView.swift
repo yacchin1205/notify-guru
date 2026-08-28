@@ -14,7 +14,7 @@ struct ContentView: View {
                 if let startupErrorMessage = model.startupErrorMessage {
                     StartupErrorView(message: startupErrorMessage)
                 } else if !model.isReady {
-                    ProgressView("Preparing secure storage…")
+                    StartupView()
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
@@ -50,7 +50,8 @@ struct ContentView: View {
                 }
             }
             .background(Color.brandBackground.ignoresSafeArea())
-            .navigationTitle("notify.guru")
+            .navigationTitle(model.isReady ? "notify.guru" : "")
+            .toolbar(model.isReady ? .visible : .hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Label(model.connectionState.label, systemImage: connectionSymbol)
@@ -132,6 +133,31 @@ struct ContentView: View {
         case .current: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
         }
+    }
+}
+
+private struct StartupView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("notify.guru")
+                .font(.largeTitle.weight(.semibold))
+                .accessibilityIdentifier("startup-title")
+            ProgressView()
+                .tint(.brandAccent)
+                .accessibilityLabel("Preparing secure storage")
+                .accessibilityIdentifier("startup-progress")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("startup-screen")
+#if DEBUG
+        .onTapGesture { model.completeStartupUITest() }
+        .accessibilityValue(colorScheme == .dark ? "dark" : "light")
+#endif
     }
 }
 
@@ -558,7 +584,7 @@ private struct FeedbackView: View {
 }
 
 private extension Color {
-    static let brandBackground = Color(uiColor: .secondarySystemBackground)
+    static let brandBackground = Color("LaunchBackground")
     static let brandAccent = Color(red: 0.22, green: 0.70, blue: 0.92)
 
     init?(hex: String) {

@@ -6,6 +6,57 @@ final class DeviceGroupFlowUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testStartupScreenTransitionsToAppInLightMode() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-startup-screen", "-ui-test-session-history", "-ui-test-light-mode"]
+        app.launch()
+
+        let startupScreen = app.otherElements["startup-screen"]
+        XCTAssertTrue(startupScreen.waitForExistence(timeout: 2))
+        XCTAssertEqual(startupScreen.value as? String, "light")
+        XCTAssertTrue(app.staticTexts["startup-title"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["startup-progress"].exists)
+        attachScreenshot(named: "30-startup-light", app: app)
+
+        startupScreen.tap()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["startup-screen"].exists)
+        attachScreenshot(named: "31-startup-light-complete", app: app)
+    }
+
+    func testStartupScreenTransitionsToAppInDarkMode() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-startup-screen", "-ui-test-session-history", "-ui-test-dark-mode"]
+        app.launch()
+
+        let startupScreen = app.otherElements["startup-screen"]
+        XCTAssertTrue(startupScreen.waitForExistence(timeout: 2))
+        XCTAssertEqual(startupScreen.value as? String, "dark")
+        XCTAssertTrue(app.staticTexts["startup-title"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["startup-progress"].exists)
+        attachScreenshot(named: "32-startup-dark", app: app)
+
+        startupScreen.tap()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["startup-screen"].exists)
+        attachScreenshot(named: "33-startup-dark-complete", app: app)
+    }
+
+    func testStartupFailureReplacesStartupScreenWithError() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-startup-screen", "-ui-test-startup-error"]
+        app.launch()
+
+        XCTAssertTrue(app.otherElements["startup-screen"].waitForExistence(timeout: 2))
+        attachScreenshot(named: "34-startup-before-error", app: app)
+
+        app.otherElements["startup-screen"].tap()
+        XCTAssertTrue(app.staticTexts["Unable to start"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Startup failed for UI testing"].exists)
+        XCTAssertFalse(app.otherElements["startup-screen"].exists)
+        attachScreenshot(named: "35-startup-error", app: app)
+    }
+
     func testAddToGroupRequestIsVisibleAndDiscardedAfterRelaunch() {
         let app = XCUIApplication()
         app.launch()
