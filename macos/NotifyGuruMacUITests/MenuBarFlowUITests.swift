@@ -1,0 +1,154 @@
+import XCTest
+
+final class MenuBarFlowUITests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+    }
+
+    func testNotificationHistoryAndRequestDismissalFromMenuBar() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["First accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
+        attachScreenshot(named: "01-menu-bar-session", app: app)
+
+        app.buttons.matching(identifier: "Dismiss Notification").element(boundBy: 0).click()
+        XCTAssertFalse(app.staticTexts["First accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        attachScreenshot(named: "02-notification-dismissed", app: app)
+
+        app.buttons["Dismiss Request"].click()
+        XCTAssertFalse(app.staticTexts["Continue the meeting?"].exists)
+        XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        attachScreenshot(named: "03-request-dismissed", app: app)
+    }
+
+    func testDismissErrorKeepsRequestVisible() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-dismiss-error"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].waitForExistence(timeout: 5))
+        app.buttons["Dismiss Request"].click()
+
+        XCTAssertTrue(app.staticTexts["Continue the meeting?"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["error-message"].exists)
+        attachScreenshot(named: "04-dismiss-error-keeps-request", app: app)
+    }
+
+    func testManagementWindowsOpenFromMenuBar() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+
+        app.buttons["Add Session"].click()
+        XCTAssertTrue(app.staticTexts["Add Session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Paste the one-shot link shown by notifyg."].exists)
+        XCTAssertTrue(app.textFields.firstMatch.exists)
+        attachScreenshot(named: "05-add-session-window", app: app)
+
+        app.typeKey("w", modifierFlags: .command)
+        let deviceGroupButton = app.buttons["Device Group"]
+        if !deviceGroupButton.exists {
+            statusItem.click()
+        }
+        XCTAssertTrue(deviceGroupButton.waitForExistence(timeout: 5))
+        deviceGroupButton.click()
+        XCTAssertTrue(app.staticTexts["Device Group"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ADD THIS MAC TO ANOTHER GROUP"].exists)
+        XCTAssertTrue(app.staticTexts["GROUP DEVICES"].exists)
+        XCTAssertTrue(app.staticTexts["This Mac"].exists)
+        attachScreenshot(named: "06-device-group-window", app: app)
+    }
+
+    func testDeviceAdditionRequiresConfirmationAndCanBeCancelled() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Add a Device?"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The new device will receive notifications and can respond as a member of this device group."].exists)
+        XCTAssertTrue(app.buttons["Add Device"].exists)
+        attachScreenshot(named: "20-device-addition-confirmation", app: app)
+
+        app.buttons["Cancel"].click()
+        XCTAssertFalse(app.staticTexts["Add a Device?"].exists)
+        attachScreenshot(named: "21-device-addition-cancelled", app: app)
+    }
+
+    func testDeviceAdditionFailureStaysVisible() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval", "-ui-test-device-addition-error"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Add Device"].waitForExistence(timeout: 5))
+        app.buttons["Add Device"].click()
+
+        XCTAssertTrue(app.staticTexts["device-addition-error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Add a Device?"].exists)
+        attachScreenshot(named: "22-device-addition-error", app: app)
+    }
+
+    func testDeviceAdditionConfirmationCanProceed() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Add Device"].waitForExistence(timeout: 5))
+        app.buttons["Add Device"].click()
+
+        XCTAssertFalse(app.staticTexts["Add a Device?"].waitForExistence(timeout: 2))
+        attachScreenshot(named: "23-device-addition-approved", app: app)
+    }
+
+    func testSessionLinkDoesNotRequestDeviceAdditionApproval() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-link"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        app.buttons["Add Session"].click()
+
+        let linkField = app.textFields.firstMatch
+        XCTAssertTrue(linkField.waitForExistence(timeout: 5))
+        linkField.click()
+        linkField.typeText(sessionLinkFixture)
+        app.buttons["Continue"].click()
+
+        XCTAssertFalse(app.staticTexts["Add Session"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Add a Device?"].exists)
+        attachScreenshot(named: "24-session-link-joined-without-device-approval", app: app)
+    }
+
+    private var sessionLinkFixture: String {
+        let secret = String(repeating: "A", count: 43)
+        let publicKey = String(repeating: "A", count: 87)
+        return "https://notify.guru/join#v=3&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
+    }
+
+    private func attachScreenshot(named name: String, app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}

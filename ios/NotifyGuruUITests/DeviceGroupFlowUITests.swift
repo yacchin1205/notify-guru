@@ -91,6 +91,78 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "13-dismiss-error-keeps-request", app: app)
     }
 
+    func testDeviceAdditionRequiresConfirmationAndCanBeCancelled() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Add a device to this group?"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The new device will receive notifications and can respond as a member of this device group."].exists)
+        XCTAssertTrue(app.buttons["Add device"].exists)
+        attachScreenshot(named: "20-device-addition-confirmation", app: app)
+
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(app.staticTexts["Add a device to this group?"].exists)
+        attachScreenshot(named: "21-device-addition-cancelled", app: app)
+    }
+
+    func testDeviceAdditionFailureIsNotTreatedAsSuccess() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval", "-ui-test-device-addition-error"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Add device"].waitForExistence(timeout: 5))
+        app.buttons["Add device"].tap()
+
+        let errorAlert = app.alerts["notify.guru error"]
+        XCTAssertTrue(errorAlert.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            errorAlert.staticTexts
+                .matching(NSPredicate(format: "label CONTAINS %@", "Device addition failed for UI testing"))
+                .firstMatch.exists
+        )
+        attachScreenshot(named: "22-device-addition-error", app: app)
+    }
+
+    func testDeviceAdditionConfirmationCanProceed() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Add device"].waitForExistence(timeout: 5))
+        app.buttons["Add device"].tap()
+
+        XCTAssertFalse(app.staticTexts["Add a device to this group?"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        attachScreenshot(named: "23-device-addition-approved", app: app)
+    }
+
+    func testSessionLinkDoesNotRequestDeviceAdditionApproval() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-link"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Scan QR code"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Scan QR code"].firstMatch.tap()
+
+        let linkField = app.textFields.firstMatch
+        XCTAssertTrue(linkField.waitForExistence(timeout: 5))
+        linkField.tap()
+        linkField.typeText(sessionLinkFixture)
+        app.buttons["Continue"].tap()
+
+        XCTAssertFalse(app.navigationBars["Scan QR code"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Add a device to this group?"].exists)
+        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        attachScreenshot(named: "24-session-link-joined-without-device-approval", app: app)
+    }
+
+    private var sessionLinkFixture: String {
+        let secret = String(repeating: "A", count: 43)
+        let publicKey = String(repeating: "A", count: 87)
+        return "https://notify.guru/join#v=3&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
+    }
+
     private func attachScreenshot(named name: String, app: XCUIApplication) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name

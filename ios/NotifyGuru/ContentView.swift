@@ -61,6 +61,16 @@ struct ContentView: View {
             .sheet(isPresented: $showingDeviceManagement) {
                 DeviceManagementView(isPresented: $showingDeviceManagement)
             }
+            .confirmationDialog(
+                "Add a device to this group?",
+                isPresented: deviceAdditionApprovalPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Add device") { model.confirmDeviceAddition() }
+                Button("Cancel", role: .cancel) { model.cancelDeviceAddition() }
+            } message: {
+                Text("The new device will receive notifications and can respond as a member of this device group.")
+            }
             .alert("notify.guru error", isPresented: errorPresented) {
                 Button("OK") { model.dismissError() }
             } message: {
@@ -91,6 +101,13 @@ struct ContentView: View {
         Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.dismissError() } }
+        )
+    }
+
+    private var deviceAdditionApprovalPresented: Binding<Bool> {
+        Binding(
+            get: { model.isDeviceAdditionApprovalPending },
+            set: { if !$0 { model.cancelDeviceAddition() } }
         )
     }
 

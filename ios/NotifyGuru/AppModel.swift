@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasDeviceGroup = false
     @Published private(set) var deviceID: String?
     @Published private(set) var deviceRequestLink: String?
+    @Published private(set) var isDeviceAdditionApprovalPending = false
     @Published private(set) var connectionState: ConnectionState = .preparing
     @Published private(set) var isReady = false
     @Published private(set) var startupErrorMessage: String?
@@ -20,6 +21,7 @@ final class AppModel: ObservableObject {
     private var vault: Vault?
     private var groupState: DeviceGroupStateResult?
     private var pendingDeviceRequest: DeviceRequestRecord?
+    private var pendingDeviceAddition: DeviceRequestLink?
     private var pendingUniversalLink: URL?
     private var hasFinishedStarting = false
     private var isSyncing = false
@@ -27,6 +29,22 @@ final class AppModel: ObservableObject {
     private var isSessionHistoryUITest: Bool {
 #if DEBUG
         ProcessInfo.processInfo.arguments.contains("-ui-test-session-history")
+#else
+        false
+#endif
+    }
+
+    private var isDeviceAdditionApprovalUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-device-addition-approval")
+#else
+        false
+#endif
+    }
+
+    private var isSessionLinkUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-session-link")
 #else
         false
 #endif
@@ -40,8 +58,17 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !isReady else { return }
 #if DEBUG
-        if isSessionHistoryUITest {
+        if isSessionHistoryUITest || isDeviceAdditionApprovalUITest || isSessionLinkUITest {
             startSessionHistoryUITest()
+            if isDeviceAdditionApprovalUITest {
+                do {
+                    try stageDeviceAddition(
+                        DeviceRequestLink("https://notify.guru/device#v=2&r=ui-test-device-request")
+                    )
+                } catch {
+                    failStartup(error.localizedDescription, canReset: false)
+                }
+            }
             return
         }
 #endif
@@ -78,7 +105,7 @@ final class AppModel: ObservableObject {
     }
 
     func runSyncLoop() async {
-        guard !isSessionHistoryUITest else { return }
+        guard !isSessionHistoryUITest, !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
         while !Task.isCancelled {
             await sync()
             do { try await Task.sleep(for: .seconds(2)) }
@@ -91,15 +118,66 @@ final class AppModel: ObservableObject {
         do {
             let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
             if URLComponents(string: value)?.path == "/device" {
-                try await approveDeviceRequest(DeviceRequestLink(value))
+                try stageDeviceAddition(DeviceRequestLink(value))
+                errorMessage = nil
+                return true
             } else {
-                try await joinSession(PairingLink(value))
+                let pairing = try PairingLink(value)
+#if DEBUG
+                if isSessionLinkUITest {
+                    errorMessage = nil
+                    return true
+                }
+#endif
+                try await joinSession(pairing)
             }
             errorMessage = nil
             await sync()
             return true
         } catch { show(error); return false }
     }
+
+    func confirmDeviceAddition() {
+        guard let link = pendingDeviceAddition else {
+            show(ProtocolError.invalidPairingLink("there is no device addition awaiting approval"))
+            return
+        }
+        clearPendingDeviceAddition()
+        Task { _ = await approveDeviceAddition(link, clearPendingOnSuccess: false) }
+    }
+
+    func approvePendingDeviceAddition() async -> Bool {
+        guard let link = pendingDeviceAddition else {
+            show(ProtocolError.invalidPairingLink("there is no device addition awaiting approval"))
+            return false
+        }
+        return await approveDeviceAddition(link, clearPendingOnSuccess: true)
+    }
+
+    private func approveDeviceAddition(_ link: DeviceRequestLink, clearPendingOnSuccess: Bool) async -> Bool {
+#if DEBUG
+        if isDeviceAdditionApprovalUITest {
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-device-addition-error") {
+                show(ProtocolError.invalidResponse("Device addition failed for UI testing"))
+                return false
+            }
+            if clearPendingOnSuccess { clearPendingDeviceAddition() }
+            return true
+        }
+#endif
+        do {
+            try await approveDeviceRequest(link)
+            if clearPendingOnSuccess { clearPendingDeviceAddition() }
+            errorMessage = nil
+            await sync()
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    func cancelDeviceAddition() { clearPendingDeviceAddition() }
 
     func openUniversalLink(_ url: URL) async {
         guard !hasFinishedStarting else {
@@ -294,7 +372,7 @@ final class AppModel: ObservableObject {
     }
 
     func sync() async {
-        guard !isSessionHistoryUITest else { return }
+        guard !isSessionHistoryUITest, !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
         guard isReady, !isSyncing else { return }
         isSyncing = true; connectionState = .syncing
         defer { isSyncing = false }
@@ -352,6 +430,19 @@ final class AppModel: ObservableObject {
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
         try persist(current)
+    }
+
+    private func stageDeviceAddition(_ link: DeviceRequestLink) throws {
+        guard pendingDeviceAddition == nil else {
+            throw ProtocolError.invalidPairingLink("another device addition is awaiting approval")
+        }
+        pendingDeviceAddition = link
+        isDeviceAdditionApprovalPending = true
+    }
+
+    private func clearPendingDeviceAddition() {
+        pendingDeviceAddition = nil
+        isDeviceAdditionApprovalPending = false
     }
 
     private func joinSession(_ pairing: PairingLink) async throws {
@@ -543,6 +634,7 @@ final class AppModel: ObservableObject {
     private func clearPublishedGroupState() {
         groupState = nil; groupDevices = []; currentKeyTimestamp = nil
         pendingDeviceRequest = nil; deviceRequestLink = nil
+        clearPendingDeviceAddition()
     }
 
     private func requiredVault() throws -> Vault {
