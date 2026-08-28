@@ -131,6 +131,11 @@ func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRView
 		case <-ticker.C:
 			count, err := store.RefreshGroups(ctx, sessionID)
 			if err != nil {
+				if notify.IsTransientAPIError(ctx, err) {
+					fmt.Fprintf(errorOutput, "\ntemporarily unable to check joined device groups: %v; will retry\n", err)
+					fmt.Fprint(output, "notifyg> ")
+					continue
+				}
 				return fmt.Errorf("detect joined device groups: %w", err)
 			}
 			if count > knownGroups {

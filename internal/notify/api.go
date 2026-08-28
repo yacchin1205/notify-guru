@@ -26,8 +26,38 @@ type APIError struct {
 	Message string `json:"message"`
 }
 
+type transientAPIError struct {
+	err error
+}
+
 func (e *APIError) Error() string {
 	return fmt.Sprintf("notify.guru API: %s (%d): %s", e.Code, e.Status, e.Message)
+}
+
+func (e *transientAPIError) Error() string {
+	return e.err.Error()
+}
+
+func (e *transientAPIError) Unwrap() error {
+	return e.err
+}
+
+func IsTransientAPIError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var apiError *APIError
+	if errors.As(err, &apiError) {
+		return isTransientHTTPStatus(apiError.Status)
+	}
+	var transientError *transientAPIError
+	return errors.As(err, &transientError) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func isTransientHTTPStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
 }
 
 func NewAPI(rawURL string) (*API, error) {
@@ -173,13 +203,13 @@ func (a *API) do(ctx context.Context, method, path, token string, input, output 
 	}
 	response, err := a.client.Do(request)
 	if err != nil {
-		return err
+		return &transientAPIError{err: err}
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, maxResponseBytes+1)
 	responseBody, err := io.ReadAll(limited)
 	if err != nil {
-		return err
+		return &transientAPIError{err: err}
 	}
 	if len(responseBody) > maxResponseBytes {
 		return fmt.Errorf("API response exceeds %d bytes", maxResponseBytes)
@@ -187,7 +217,11 @@ func (a *API) do(ctx context.Context, method, path, token string, input, output 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var apiError APIError
 		if err := decodeJSON(responseBody, &apiError); err != nil {
-			return fmt.Errorf("decode API error with status %d: %w", response.StatusCode, err)
+			decodeErr := fmt.Errorf("decode API error with status %d: %w", response.StatusCode, err)
+			if isTransientHTTPStatus(response.StatusCode) {
+				return &transientAPIError{err: decodeErr}
+			}
+			return decodeErr
 		}
 		apiError.Status = response.StatusCode
 		return &apiError

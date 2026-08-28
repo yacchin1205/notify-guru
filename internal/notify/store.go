@@ -20,6 +20,8 @@ var pastelPalette = []string{
 	"#cdeff2", "#d6e4ff", "#e5d4ff", "#f2d7ee",
 }
 
+var eventRetryDelays = [...]time.Duration{5 * time.Second, 30 * time.Second}
+
 type Store struct {
 	api      *API
 	mu       sync.RWMutex
@@ -428,7 +430,10 @@ func (s *Store) Close(ctx context.Context, sessionID string) error {
 }
 
 func (s *Store) send(ctx context.Context, sessionID string, value event, notificationKind string) error {
-	if _, err := s.RefreshGroups(ctx, sessionID); err != nil {
+	if err := retryEventOperation(ctx, eventRetryDelays[:], func() error {
+		_, err := s.RefreshGroups(ctx, sessionID)
+		return err
+	}); err != nil {
 		return err
 	}
 	session, err := s.session(sessionID)
@@ -464,7 +469,10 @@ func (s *Store) send(ctx context.Context, sessionID string, value event, notific
 			if !errors.As(err, &apiError) || apiError.Code != "group_key_unavailable" {
 				return err
 			}
-			if _, refreshErr := s.refreshGroupsLocked(ctx, session); refreshErr != nil {
+			if refreshErr := retryEventOperation(ctx, eventRetryDelays[:], func() error {
+				_, err := s.refreshGroupsLocked(ctx, session)
+				return err
+			}); refreshErr != nil {
 				return fmt.Errorf("refresh unavailable device group key: %w", refreshErr)
 			}
 			if retryErr := s.sendToGroup(ctx, session, group, value, notificationKind); retryErr != nil {
@@ -479,6 +487,12 @@ func (s *Store) send(ctx context.Context, sessionID string, value event, notific
 }
 
 func (s *Store) sendToGroup(ctx context.Context, session *managedSession, group *Group, value event, notificationKind string) error {
+	return retryEventOperation(ctx, eventRetryDelays[:], func() error {
+		return s.sendToGroupOnce(ctx, session, group, value, notificationKind)
+	})
+}
+
+func (s *Store) sendToGroupOnce(ctx context.Context, session *managedSession, group *Group, value event, notificationKind string) error {
 	if group.Timestamp == 0 {
 		return fmt.Errorf("device group %q has no key available for new events", group.ID)
 	}
@@ -514,6 +528,22 @@ func (s *Store) sendToGroup(ctx context.Context, session *managedSession, group 
 		ciphertext,
 		notificationKind,
 	)
+}
+
+func retryEventOperation(ctx context.Context, delays []time.Duration, operation func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := operation()
+		if err == nil || attempt == len(delays) || !IsTransientAPIError(ctx, err) {
+			return err
+		}
+		timer := time.NewTimer(delays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func eventItemID(value event, notificationKind string) (string, error) {
