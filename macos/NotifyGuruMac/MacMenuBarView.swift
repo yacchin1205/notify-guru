@@ -164,9 +164,23 @@ private struct MacSessionCard: View {
                 Text(session.title)
                     .font(.headline)
                 Spacer()
-                Text(expiryLabel)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    if session.unresolvedCount > 0 {
+                        Text("\(session.unresolvedCount)")
+                            .font(.caption2.bold().monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.notifyGuruAccent, in: Capsule())
+                            .accessibilityLabel(session.unresolvedAccessibilityLabel)
+                    }
+                    if let updatedAt = session.updatedAt {
+                        MacRelativeTimeText(timestampMilliseconds: updatedAt)
+                    }
+                    Text(expiryLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if !session.status.isEmpty {
@@ -176,12 +190,19 @@ private struct MacSessionCard: View {
 
             ForEach(session.notifications) { notification in
                 HStack(alignment: .top, spacing: 10) {
-                    Text(notification.message)
-                        .font(.callout)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(notification.message)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                        if let createdAt = notification.createdAt {
+                            MacRelativeTimeText(timestampMilliseconds: createdAt)
+                        }
+                    }
                     Spacer(minLength: 4)
                     Button("Dismiss Notification", systemImage: "xmark") {
-                        model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                        Task {
+                            await model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                        }
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
@@ -192,8 +213,13 @@ private struct MacSessionCard: View {
             if let request = session.request {
                 Divider()
                 HStack(alignment: .top, spacing: 10) {
-                    Text(request.prompt)
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(request.prompt)
+                            .font(.headline)
+                        if let createdAt = request.createdAt {
+                            MacRelativeTimeText(timestampMilliseconds: createdAt)
+                        }
+                    }
                     Spacer(minLength: 4)
                     Button("Dismiss Request", systemImage: "xmark") {
                         responding = true
@@ -270,6 +296,20 @@ private struct MacSessionCard: View {
         let remaining = Double(session.expiresAt) / 1_000 - Date().timeIntervalSince1970
         guard remaining > 0 else { return "Checking expiry" }
         return "~\(max(1, Int(ceil(remaining / 3_600))))h"
+    }
+}
+
+private struct MacRelativeTimeText: View {
+    let timestampMilliseconds: Int64
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let label = RelativeTime.label(timestampMilliseconds: timestampMilliseconds, now: context.date)
+            Text(label)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(label)
+        }
     }
 }
 

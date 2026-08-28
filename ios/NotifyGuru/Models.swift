@@ -109,11 +109,15 @@ struct SessionRequest: Codable, Equatable {
     let id: String
     let prompt: String
     let options: [SessionChoice]
+    var createdAt: Int64? = nil
+    var serverItemID: String? = nil
 }
 
 struct SessionNotification: Codable, Equatable, Identifiable {
     let id: String
     let message: String
+    var createdAt: Int64? = nil
+    var serverItemID: String? = nil
 }
 
 struct SessionRecord: Equatable, Identifiable {
@@ -132,6 +136,25 @@ struct SessionRecord: Equatable, Identifiable {
     var color: String?
     var updatedAt: Int64?
     var expiresAt: Int64
+
+    var unresolvedCount: Int { notifications.count + (request == nil ? 0 : 1) }
+    var unresolvedAccessibilityLabel: String {
+        "\(unresolvedCount) unresolved \(unresolvedCount == 1 ? "item" : "items")"
+    }
+}
+
+extension Collection where Element == SessionRecord {
+    var unresolvedCount: Int { reduce(0) { $0 + $1.unresolvedCount } }
+}
+
+enum RelativeTime {
+    static func label(timestampMilliseconds: Int64, now: Date = Date()) -> String {
+        let elapsed = max(0, Int(now.timeIntervalSince1970 - Double(timestampMilliseconds) / 1_000))
+        if elapsed < 60 { return "\(elapsed)s ago" }
+        if elapsed < 3_600 { return "\(elapsed / 60)m ago" }
+        if elapsed < 86_400 { return "\(elapsed / 3_600)h ago" }
+        return "\(elapsed / 86_400)d ago"
+    }
 }
 
 extension SessionRecord: Codable {

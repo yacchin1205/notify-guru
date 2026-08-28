@@ -66,9 +66,15 @@ final class PushCoordinator {
 }
 
 enum PushError: LocalizedError {
+    case badgesDisabled
     case unknownAuthorizationStatus
 
     var errorDescription: String? {
-        "macOS returned an unknown notification authorization status"
+        switch self {
+        case .badgesDisabled:
+            "App icon badges are turned off"
+        case .unknownAuthorizationStatus:
+            "macOS returned an unknown notification authorization status"
+        }
     }
 }

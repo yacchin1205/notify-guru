@@ -328,6 +328,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       throw new HttpError(404, "device_not_found", "Active device not found");
     }
     this.state.storage.sql.exec("DELETE FROM group_members_v3 WHERE device_id = ?", deviceId);
+    await this.devices.deactivateGroupDevice(meta.group_id, deviceId);
     return json({ removed: true });
   }
 

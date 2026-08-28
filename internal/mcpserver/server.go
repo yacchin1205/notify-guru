@@ -152,11 +152,17 @@ type deliveredOutput struct {
 	Delivered bool `json:"delivered"`
 }
 
-func (s *Server) notify(ctx context.Context, _ *mcp.CallToolRequest, input messageInput) (*mcp.CallToolResult, deliveredOutput, error) {
-	if err := s.store.SendNotify(ctx, input.SessionID, input.Message); err != nil {
-		return nil, deliveredOutput{}, err
+type notifiedOutput struct {
+	Delivered bool   `json:"delivered"`
+	ItemID    string `json:"item_id"`
+}
+
+func (s *Server) notify(ctx context.Context, _ *mcp.CallToolRequest, input messageInput) (*mcp.CallToolResult, notifiedOutput, error) {
+	itemID, err := s.store.SendNotify(ctx, input.SessionID, input.Message)
+	if err != nil {
+		return nil, notifiedOutput{}, err
 	}
-	return nil, deliveredOutput{Delivered: true}, nil
+	return nil, notifiedOutput{Delivered: true, ItemID: itemID}, nil
 }
 
 type statusInput struct {

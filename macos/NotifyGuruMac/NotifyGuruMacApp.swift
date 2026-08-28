@@ -41,8 +41,19 @@ private struct MacMenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Label("notify.guru", systemImage: model.sessions.contains { $0.request != nil } ? "bell.badge.fill" : "bell")
-            .accessibilityLabel("notify.guru")
+        let unresolvedCount = model.sessions.unresolvedCount
+        HStack(spacing: 3) {
+            Image(systemName: unresolvedCount == 0 ? "bell" : "bell.badge.fill")
+            if unresolvedCount > 0 {
+                Text("\(unresolvedCount)")
+                    .monospacedDigit()
+            }
+        }
+            .accessibilityLabel(
+                unresolvedCount == 0
+                    ? "notify.guru, no unresolved items"
+                    : "notify.guru, \(unresolvedCount) unresolved \(unresolvedCount == 1 ? "item" : "items")"
+            )
             .onChange(of: model.isDeviceAdditionApprovalPending) { _, pending in
                 if pending { presentDeviceAdditionApproval() }
             }

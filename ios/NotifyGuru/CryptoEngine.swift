@@ -176,9 +176,15 @@ enum CryptoEngine {
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
-    static func encryptDismiss(session: SessionRecord, timestamp: Int64, responseID: String, requestID: String, createdAt: String) throws -> EncryptedPayload {
+    static func encryptDismiss(session: SessionRecord, timestamp: Int64, responseID: String, eventID: String, createdAt: String) throws -> EncryptedPayload {
         guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("dismiss key is unavailable") }
-        let response = DismissPayload(id: responseID, type: "dismiss", requestID: requestID, createdAt: createdAt)
+        let response = DismissPayload(id: responseID, type: "dismiss", eventID: eventID, createdAt: createdAt)
+        return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
+    }
+
+    static func encryptLegacyRequestDismiss(session: SessionRecord, timestamp: Int64, responseID: String, requestID: String, createdAt: String) throws -> EncryptedPayload {
+        guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("dismiss key is unavailable") }
+        let response = LegacyDismissPayload(id: responseID, type: "dismiss", requestID: requestID, createdAt: createdAt)
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
@@ -251,6 +257,20 @@ private struct FeedbackPayload: Encodable {
 }
 
 private struct DismissPayload: Encodable {
+    let id: String
+    let type: String
+    let eventID: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case eventID = "eventId"
+        case createdAt
+    }
+}
+
+private struct LegacyDismissPayload: Encodable {
     let id: String
     let type: String
     let requestID: String

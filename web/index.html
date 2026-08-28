@@ -75,13 +75,20 @@
             <p class="card-label">SESSION</p>
             <h2 class="session-title"></h2>
           </div>
-          <span class="expiry"></span>
+          <div class="card-meta">
+            <span class="unresolved-count" hidden></span>
+            <span class="session-time relative-time"></span>
+            <span class="expiry"></span>
+          </div>
         </div>
         <p class="status"></p>
         <section class="notifications" aria-label="通知"></section>
         <section class="request" hidden>
           <div class="request-head">
-            <p class="request-prompt"></p>
+            <div class="request-content">
+              <p class="request-prompt"></p>
+              <span class="request-time relative-time"></span>
+            </div>
             <button class="request-dismiss dismiss-item" type="button" aria-label="リクエストを閉じる" title="リクエストを閉じる">×</button>
           </div>
           <div class="request-options"></div>

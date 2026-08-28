@@ -54,6 +54,7 @@ interface GroupRow extends Record<string, SqlStorageValue> {
 interface EventRow extends Record<string, SqlStorageValue> {
   sequence: number;
   event_id: string;
+  item_id: string | null;
   group_id: string;
   key_timestamp: number;
   nonce: string;
@@ -61,9 +62,16 @@ interface EventRow extends Record<string, SqlStorageValue> {
   created_at: number;
 }
 
+interface ItemRow extends Record<string, SqlStorageValue> {
+  item_id: string;
+  notification_kind: APNsAlertKind;
+  invalidated_at: number | null;
+}
+
 interface ResponseRow extends Record<string, SqlStorageValue> {
   sequence: number;
   response_id: string;
+  item_id: string | null;
   group_id: string;
   key_timestamp: number;
   nonce: string;
@@ -73,6 +81,7 @@ interface ResponseRow extends Record<string, SqlStorageValue> {
 
 interface PushJobRow extends Record<string, SqlStorageValue> {
   event_id: string;
+  item_id: string | null;
   device_id: string;
   attempt_count: number;
   next_attempt_at: number;
@@ -119,15 +128,18 @@ export class Session extends DurableObject<SessionEnv> {
     if ((await this.state.storage.get<boolean>(INITIALIZED_KEY)) !== true) return;
     const meta = this.metaRow();
     if (Date.now() >= meta.expires_at) {
+      await this.expireSession(meta.session_id);
       await this.state.storage.deleteAll();
       return;
     }
     const now = Date.now();
     await this.state.storage.setAlarm(Math.min(meta.expires_at, now + PUSH_ALARM_FALLBACK_MS));
     const jobs = Array.from(this.state.storage.sql.exec<PushJobRow>(
-      `SELECT event_id, device_id, attempt_count, next_attempt_at, notification_kind
-       FROM push_jobs_v3 WHERE next_attempt_at <= ?
-       ORDER BY next_attempt_at, event_id LIMIT 100`,
+      `SELECT p.event_id, e.item_id, p.device_id, p.attempt_count, p.next_attempt_at, p.notification_kind
+       FROM push_jobs_v3 p
+       JOIN session_events_v3 e ON e.event_id = p.event_id
+       WHERE p.next_attempt_at <= ?
+       ORDER BY p.next_attempt_at, p.event_id LIMIT 100`,
       now,
     ));
     if (jobs.length === 0) {
@@ -143,7 +155,12 @@ export class Session extends DurableObject<SessionEnv> {
         continue;
       }
       try {
-        const result = await this.apns.send(target.token, target.environment, job.notification_kind);
+        const result = await this.apns.send(
+          target.token,
+          target.environment,
+          job.notification_kind,
+          job.item_id === null ? undefined : target.badgeCount,
+        );
         switch (result.outcome) {
           case "delivered":
             this.deletePushJob(job);
@@ -200,6 +217,7 @@ export class Session extends DurableObject<SessionEnv> {
       const groupIds = Array.from(this.state.storage.sql.exec<{ id: string }>(
         "SELECT id FROM session_groups_v3 ORDER BY sequence",
       )).map((row) => row.id);
+      await this.expireSession(meta.session_id);
       await Promise.all(groupIds.map((groupId) => this.removeGroupSession(groupId, meta.session_id)));
       await this.state.storage.deleteAll();
       return new Response(null, { status: 204 });
@@ -321,24 +339,61 @@ export class Session extends DurableObject<SessionEnv> {
 
   private async addEvent(request: Request, meta: MetaRow): Promise<Response> {
     const body = await readObject(request);
-    expectKeys(body, ["eventId", "groupId", "keyTimestamp", "nonce", "ciphertext", "notificationKind"]);
+    const tracked = body.itemId !== undefined;
+    expectKeys(body, tracked
+      ? ["eventId", "itemId", "groupId", "keyTimestamp", "nonce", "ciphertext", "notificationKind"]
+      : ["eventId", "groupId", "keyTimestamp", "nonce", "ciphertext", "notificationKind"]);
     const eventId = stringField(body, "eventId", IDENTIFIER, 64);
+    const itemId = tracked ? stringField(body, "itemId", IDENTIFIER, 64) : null;
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
     const keyTimestamp = integerField(body, "keyTimestamp");
     const nonce = stringField(body, "nonce", BASE64URL, 32);
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
     const notificationKind = stringField(body, "notificationKind", NOTIFICATION_KIND, 16);
+    if (tracked && notificationKind === "none") {
+      throw new HttpError(400, "invalid_field", "Status events cannot contain an item ID");
+    }
     this.requireGroup(groupId);
+    if (itemId !== null) {
+      const existing = this.eventById(eventId);
+      if (existing !== null) {
+        if (
+          existing.item_id !== itemId || existing.group_id !== groupId ||
+          existing.key_timestamp !== keyTimestamp || existing.nonce !== nonce || existing.ciphertext !== ciphertext
+        ) {
+          throw new HttpError(409, "event_exists", "Event ID is already used by another event");
+        }
+        const item = this.requiredItem(itemId);
+        if (item.notification_kind !== notificationKind) {
+          throw new HttpError(409, "item_kind_changed", "Session item notification kind changed between groups");
+        }
+        if (item.invalidated_at === null) {
+          await this.devices.activateSessionItem(
+            meta.session_id,
+            groupId,
+            itemId,
+            this.eventRecipients(eventId),
+          );
+        }
+        await this.scheduleNextAlarm(meta.expires_at);
+        return json({ expiresAt: meta.expires_at }, 201);
+      }
+    }
     const recipients = await this.groupKeyRecipients(groupId, keyTimestamp);
     const now = Date.now();
     const expiresAt = now + SESSION_LIFETIME_MS;
     await this.putGroupSession(groupId, meta, expiresAt);
+    let activeItem = false;
     this.state.storage.transactionSync(() => {
+      if (itemId !== null) {
+        activeItem = this.ensureItem(itemId, notificationKind as APNsAlertKind, now);
+      }
       this.state.storage.sql.exec(
         `INSERT INTO session_events_v3
-           (event_id, group_id, key_timestamp, nonce, ciphertext, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (event_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         eventId,
+        itemId,
         groupId,
         keyTimestamp,
         nonce,
@@ -351,7 +406,7 @@ export class Session extends DurableObject<SessionEnv> {
           eventId,
           deviceId,
         );
-        if (notificationKind !== "none") {
+        if (notificationKind !== "none" && (itemId === null || activeItem)) {
           this.state.storage.sql.exec(
             `INSERT INTO push_jobs_v3 (event_id, device_id, attempt_count, next_attempt_at, notification_kind)
              VALUES (?, ?, 0, ?, ?)`,
@@ -364,6 +419,9 @@ export class Session extends DurableObject<SessionEnv> {
       }
       this.state.storage.sql.exec("UPDATE meta SET expires_at = ? WHERE singleton = 1", expiresAt);
     });
+    if (activeItem && itemId !== null) {
+      await this.devices.activateSessionItem(meta.session_id, groupId, itemId, recipients);
+    }
     await this.scheduleNextAlarm(expiresAt);
     return json({ expiresAt }, 201);
   }
@@ -374,8 +432,9 @@ export class Session extends DurableObject<SessionEnv> {
     this.requireGroup(groupId);
     await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
     const after = integerQuery(url, "after");
+    const includeActive = url.searchParams.get("includeActive") === "1";
     const events = Array.from(this.state.storage.sql.exec<EventRow>(
-      `SELECT e.sequence, e.event_id, e.group_id, e.key_timestamp, e.nonce, e.ciphertext, e.created_at
+      `SELECT e.sequence, e.event_id, e.item_id, e.group_id, e.key_timestamp, e.nonce, e.ciphertext, e.created_at
        FROM session_events_v3 e
        JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
        WHERE e.group_id = ? AND r.device_id = ? AND e.sequence > ?
@@ -386,19 +445,35 @@ export class Session extends DurableObject<SessionEnv> {
     )).map((row) => ({
       sequence: row.sequence,
       eventId: row.event_id,
+      ...(includeActive ? { itemId: row.item_id } : {}),
       groupId: row.group_id,
       keyTimestamp: row.key_timestamp,
       nonce: row.nonce,
       ciphertext: row.ciphertext,
       createdAt: row.created_at,
     }));
-    return json({ events, expiresAt: meta.expires_at });
+    if (!includeActive) return json({ events, expiresAt: meta.expires_at });
+    const activeItemIds = Array.from(this.state.storage.sql.exec<{ item_id: string }>(
+      `SELECT DISTINCT i.item_id
+       FROM session_items_v1 i
+       JOIN session_events_v3 e ON e.item_id = i.item_id
+       JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
+       WHERE e.group_id = ? AND r.device_id = ? AND i.invalidated_at IS NULL
+       ORDER BY i.item_id`,
+      groupId,
+      deviceId,
+    )).map((row) => row.item_id);
+    return json({ events, activeItemIds, expiresAt: meta.expires_at });
   }
 
   private async addResponse(request: Request, meta: MetaRow): Promise<Response> {
     const body = await readObject(request);
-    expectKeys(body, ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"]);
+    const tracked = body.itemId !== undefined;
+    expectKeys(body, tracked
+      ? ["responseId", "itemId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"]
+      : ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"]);
     const responseId = stringField(body, "responseId", IDENTIFIER, 64);
+    const itemId = tracked ? stringField(body, "itemId", IDENTIFIER, 64) : null;
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
     const deviceId = stringField(body, "deviceId", IDENTIFIER, 64);
     const keyTimestamp = integerField(body, "keyTimestamp");
@@ -407,29 +482,61 @@ export class Session extends DurableObject<SessionEnv> {
     this.requireGroup(groupId);
     await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
     await this.groupKeyDevice(groupId, keyTimestamp, deviceId);
-    this.state.storage.sql.exec(
-      `INSERT INTO session_responses_v3
-         (response_id, group_id, key_timestamp, nonce, ciphertext, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      responseId,
-      groupId,
-      keyTimestamp,
-      nonce,
-      ciphertext,
-      Date.now(),
-    );
+    if (this.responseExists(responseId)) {
+      throw new HttpError(409, "response_exists", "Response already exists");
+    }
+    if (itemId !== null) this.requireDeliveredItem(itemId, groupId, deviceId);
+    if (itemId !== null) await this.devices.deactivateSessionItem(meta.session_id, itemId);
+    const now = Date.now();
+    this.state.storage.transactionSync(() => {
+      this.state.storage.sql.exec(
+        `INSERT INTO session_responses_v3
+           (response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        responseId,
+        itemId,
+        groupId,
+        keyTimestamp,
+        nonce,
+        ciphertext,
+        now,
+      );
+      if (itemId !== null) {
+        this.state.storage.sql.exec(
+          "UPDATE session_items_v1 SET invalidated_at = COALESCE(invalidated_at, ?) WHERE item_id = ?",
+          now,
+          itemId,
+        );
+        this.state.storage.sql.exec(
+          `INSERT INTO push_jobs_v3
+             (event_id, device_id, attempt_count, next_attempt_at, notification_kind)
+           SELECT e.event_id, r.device_id, 0, ?, 'badge'
+           FROM session_events_v3 e
+           JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
+           WHERE e.item_id = ?
+           ON CONFLICT(event_id, device_id) DO UPDATE SET
+             attempt_count = 0,
+             next_attempt_at = excluded.next_attempt_at,
+             notification_kind = 'badge'`,
+          now,
+          itemId,
+        );
+      }
+    });
+    if (itemId !== null) await this.scheduleNextAlarm(meta.expires_at);
     return json({ expiresAt: meta.expires_at }, 201);
   }
 
   private responses(url: URL, meta: MetaRow): Response {
     const after = integerQuery(url, "after");
     const responses = Array.from(this.state.storage.sql.exec<ResponseRow>(
-      `SELECT sequence, response_id, group_id, key_timestamp, nonce, ciphertext, created_at
+      `SELECT sequence, response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at
        FROM session_responses_v3 WHERE sequence > ? ORDER BY sequence LIMIT 100`,
       after,
     )).map((row) => ({
       sequence: row.sequence,
       responseId: row.response_id,
+      itemId: row.item_id,
       groupId: row.group_id,
       keyTimestamp: row.key_timestamp,
       nonce: row.nonce,
@@ -445,6 +552,7 @@ export class Session extends DurableObject<SessionEnv> {
     }
     const meta = this.metaRow();
     if (Date.now() >= meta.expires_at) {
+      await this.expireSession(meta.session_id);
       await this.state.storage.deleteAll();
       throw new HttpError(410, "session_expired", "Session has expired");
     }
@@ -542,6 +650,81 @@ export class Session extends DurableObject<SessionEnv> {
     await this.devices.clearPushToken(target.deviceId, target.token);
   }
 
+  private ensureItem(itemId: string, notificationKind: APNsAlertKind, createdAt: number): boolean {
+    const rows = Array.from(this.state.storage.sql.exec<ItemRow>(
+      "SELECT item_id, notification_kind, invalidated_at FROM session_items_v1 WHERE item_id = ?",
+      itemId,
+    ));
+    if (rows.length === 0) {
+      this.state.storage.sql.exec(
+        `INSERT INTO session_items_v1 (item_id, notification_kind, created_at)
+         VALUES (?, ?, ?)`,
+        itemId,
+        notificationKind,
+        createdAt,
+      );
+      return true;
+    }
+    if (rows[0].notification_kind !== notificationKind) {
+      throw new HttpError(409, "item_kind_changed", "Session item notification kind changed between groups");
+    }
+    return rows[0].invalidated_at === null;
+  }
+
+  private requireDeliveredItem(itemId: string, groupId: string, deviceId: string): void {
+    const rows = Array.from(this.state.storage.sql.exec<{ item_id: string }>(
+      `SELECT e.item_id
+       FROM session_items_v1 i
+       JOIN session_events_v3 e ON e.item_id = i.item_id
+       JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
+       WHERE i.item_id = ? AND e.group_id = ? AND r.device_id = ?
+       LIMIT 1`,
+      itemId,
+      groupId,
+      deviceId,
+    ));
+    if (rows.length === 0) {
+      throw new HttpError(404, "item_not_delivered", "Session item was not delivered to this device");
+    }
+  }
+
+  private responseExists(responseId: string): boolean {
+    const rows = Array.from(this.state.storage.sql.exec<{ found: number }>(
+      "SELECT 1 AS found FROM session_responses_v3 WHERE response_id = ?",
+      responseId,
+    ));
+    return rows.length !== 0;
+  }
+
+  private eventById(eventId: string): EventRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<EventRow>(
+      `SELECT sequence, event_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at
+       FROM session_events_v3 WHERE event_id = ?`,
+      eventId,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private eventRecipients(eventId: string): string[] {
+    return Array.from(this.state.storage.sql.exec<{ device_id: string }>(
+      "SELECT device_id FROM session_event_recipients_v3 WHERE event_id = ? ORDER BY device_id",
+      eventId,
+    )).map((row) => row.device_id);
+  }
+
+  private requiredItem(itemId: string): ItemRow {
+    const rows = Array.from(this.state.storage.sql.exec<ItemRow>(
+      "SELECT item_id, notification_kind, invalidated_at FROM session_items_v1 WHERE item_id = ?",
+      itemId,
+    ));
+    if (rows.length !== 1) throw new Error("Tracked event must have exactly one session item");
+    return rows[0];
+  }
+
+  private async expireSession(sessionId: string): Promise<void> {
+    await this.devices.deactivateSession(sessionId);
+  }
+
   private createSchema(): void {
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -569,6 +752,7 @@ export class Session extends DurableObject<SessionEnv> {
       CREATE TABLE IF NOT EXISTS session_events_v3 (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT NOT NULL UNIQUE,
+        item_id TEXT,
         group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
         key_timestamp INTEGER NOT NULL,
         nonce TEXT NOT NULL,
@@ -583,6 +767,7 @@ export class Session extends DurableObject<SessionEnv> {
       CREATE TABLE IF NOT EXISTS session_responses_v3 (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         response_id TEXT NOT NULL UNIQUE,
+        item_id TEXT,
         group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
         key_timestamp INTEGER NOT NULL,
         nonce TEXT NOT NULL,
@@ -599,7 +784,25 @@ export class Session extends DurableObject<SessionEnv> {
       );
       CREATE INDEX IF NOT EXISTS push_jobs_v3_due
         ON push_jobs_v3(next_attempt_at, event_id);
+      CREATE TABLE IF NOT EXISTS session_items_v1 (
+        item_id TEXT PRIMARY KEY,
+        notification_kind TEXT NOT NULL CHECK (notification_kind IN ('notify', 'request')),
+        created_at INTEGER NOT NULL,
+        invalidated_at INTEGER
+      );
     `);
+    const eventColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_events_v3)"));
+    if (!eventColumns.some((column) => column.name === "item_id")) {
+      this.state.storage.sql.exec("ALTER TABLE session_events_v3 ADD COLUMN item_id TEXT");
+    }
+    this.state.storage.sql.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS session_events_v3_group_item
+       ON session_events_v3(group_id, item_id) WHERE item_id IS NOT NULL`,
+    );
+    const responseColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_responses_v3)"));
+    if (!responseColumns.some((column) => column.name === "item_id")) {
+      this.state.storage.sql.exec("ALTER TABLE session_responses_v3 ADD COLUMN item_id TEXT");
+    }
     const pushColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(push_jobs_v3)"));
     if (!pushColumns.some((column) => column.name === "notification_kind")) {
       this.state.storage.sql.exec("ALTER TABLE push_jobs_v3 ADD COLUMN notification_kind TEXT NOT NULL DEFAULT 'notify'");

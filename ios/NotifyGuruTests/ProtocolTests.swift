@@ -144,6 +144,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000).sessions.map(\.sessionID), ["current"])
     }
 
+    func testRelativeTimeUsesCompactUnits() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        XCTAssertEqual(RelativeTime.label(timestampMilliseconds: 1_999_999_998_000, now: now), "2s ago")
+        XCTAssertEqual(RelativeTime.label(timestampMilliseconds: 1_999_998_800_000, now: now), "20m ago")
+        XCTAssertEqual(RelativeTime.label(timestampMilliseconds: 1_999_989_200_000, now: now), "3h ago")
+        XCTAssertEqual(RelativeTime.label(timestampMilliseconds: 1_999_827_200_000, now: now), "2d ago")
+    }
+
     func testSessionRecordMigratesPreviousNotification() throws {
         let previous = Data(#"{"protocolVersion":3,"sessionID":"legacy","groupID":"group","creatorPublicKey":"creator","keys":{},"cursor":0,"title":"Session","status":"Connected","notification":"Earlier notification","expiresAt":2000}"#.utf8)
         let session = try JSONDecoder().decode(SessionRecord.self, from: previous)
@@ -158,7 +166,7 @@ final class ProtocolTests: XCTestCase {
         var record = session(id: "session")
         record.keys["42"] = key
         let encrypted = try CryptoEngine.encryptDismiss(
-            session: record, timestamp: 42, responseID: "response", requestID: "request",
+            session: record, timestamp: 42, responseID: "response", eventID: "request",
             createdAt: "2026-08-28T00:00:00Z"
         )
         let combined = try Base64URL.decode(encrypted.ciphertext)
@@ -172,8 +180,21 @@ final class ProtocolTests: XCTestCase {
         )
         let fields = try JSONSerialization.jsonObject(with: plaintext) as! [String: String]
         XCTAssertEqual(fields, [
-            "id": "response", "type": "dismiss", "requestId": "request", "createdAt": "2026-08-28T00:00:00Z",
+            "id": "response", "type": "dismiss", "eventId": "request", "createdAt": "2026-08-28T00:00:00Z",
         ])
+    }
+
+    func testSessionCollectionCountsUnresolvedItems() {
+        let notification = SessionNotification(id: "notice", message: "Notice")
+        let request = SessionRequest(id: "request", prompt: "Continue?", options: [])
+        var first = session(id: "one")
+        first.notifications = [notification]
+        first.request = request
+        var second = session(id: "two")
+        second.notifications = [notification]
+
+        XCTAssertEqual([first, second].unresolvedCount, 3)
+        XCTAssertEqual([SessionRecord]().unresolvedCount, 0)
     }
 
     func testDetachingGroupRemovesOnlyItsV3Sessions() throws {

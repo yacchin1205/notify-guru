@@ -9,6 +9,9 @@ struct NotifyGuruApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .onChange(of: model.sessions.unresolvedCount, initial: true) { _, count in
+                    PushCoordinator.shared.setDesiredBadgeCount(count)
+                }
                 .onOpenURL { url in
                     Task { await model.openUniversalLink(url) }
                 }

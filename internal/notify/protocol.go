@@ -29,7 +29,9 @@ type Choice struct {
 type Response struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`
+	ItemID    string    `json:"itemId,omitempty"`
 	RequestID string    `json:"requestId,omitempty"`
+	EventID   string    `json:"eventId,omitempty"`
 	OptionID  string    `json:"optionId,omitempty"`
 	Message   string    `json:"message,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -40,6 +42,7 @@ type decryptedResponse struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`
 	RequestID string    `json:"requestId,omitempty"`
+	EventID   string    `json:"eventId,omitempty"`
 	OptionID  string    `json:"optionId,omitempty"`
 	Message   string    `json:"message,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`

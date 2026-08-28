@@ -183,11 +183,12 @@ func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewe
 		}
 		fmt.Fprintf(output, "%s\n%s\nQR image: %s\n", qr, url, imageURL)
 	case "notify":
-		if err := store.SendNotify(ctx, sessionID, argument); err != nil {
+		itemID, err := store.SendNotify(ctx, sessionID, argument)
+		if err != nil {
 			fmt.Fprintln(errorOutput, err)
 			return false, nil
 		}
-		fmt.Fprintln(output, "sent")
+		fmt.Fprintf(output, "notification item=%s sent\n", itemID)
 	case "status":
 		if err := store.SendStatus(ctx, sessionID, argument); err != nil {
 			fmt.Fprintln(errorOutput, err)
@@ -228,14 +229,7 @@ func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewe
 			return false, nil
 		}
 		for _, response := range responses {
-			switch response.Type {
-			case "feedback":
-				fmt.Fprintf(output, "feedback message=%q group=%s at=%s\n", response.Message, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			case "dismiss":
-				fmt.Fprintf(output, "dismiss request=%s group=%s at=%s\n", response.RequestID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			case "response":
-				fmt.Fprintf(output, "response request=%s option=%s group=%s at=%s\n", response.RequestID, response.OptionID, response.GroupID, response.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			}
+			writeResponse(output, response)
 		}
 	case "close":
 		if err := store.Close(ctx, sessionID); err != nil {
@@ -250,4 +244,20 @@ func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewe
 		fmt.Fprintf(errorOutput, "unknown command %q\n", command)
 	}
 	return false, nil
+}
+
+func writeResponse(output io.Writer, response notify.Response) {
+	timestamp := response.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+	switch response.Type {
+	case "feedback":
+		fmt.Fprintf(output, "feedback message=%q group=%s at=%s\n", response.Message, response.GroupID, timestamp)
+	case "dismiss":
+		if response.ItemID != "" {
+			fmt.Fprintf(output, "dismiss item=%s group=%s at=%s\n", response.ItemID, response.GroupID, timestamp)
+		} else {
+			fmt.Fprintf(output, "dismiss request=%s group=%s at=%s\n", response.RequestID, response.GroupID, timestamp)
+		}
+	case "response":
+		fmt.Fprintf(output, "response request=%s option=%s group=%s at=%s\n", response.RequestID, response.OptionID, response.GroupID, timestamp)
+	}
 }

@@ -190,11 +190,18 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 	return len(session.groups), nil
 }
 
-func (s *Store) SendNotify(ctx context.Context, sessionID, message string) error {
+func (s *Store) SendNotify(ctx context.Context, sessionID, message string) (string, error) {
 	if err := validateText("message", message, 200_000); err != nil {
-		return err
+		return "", err
 	}
-	return s.send(ctx, sessionID, event{Type: "notify", Message: message}, "notify")
+	itemID, err := randomValue(18)
+	if err != nil {
+		return "", err
+	}
+	if err := s.send(ctx, sessionID, event{ID: itemID, Type: "notify", Message: message}, "notify"); err != nil {
+		return "", err
+	}
+	return itemID, nil
 }
 
 func (s *Store) SendStatus(ctx context.Context, sessionID, status string) error {
@@ -312,15 +319,23 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		}
 		switch decrypted.Type {
 		case "response":
-			if decrypted.RequestID == "" || decrypted.OptionID == "" || decrypted.Message != "" {
+			if decrypted.RequestID == "" || decrypted.EventID != "" || decrypted.OptionID == "" || decrypted.Message != "" {
 				return nil, fmt.Errorf("response %q has invalid response fields", decrypted.ID)
 			}
+			if envelope.ItemID != "" && decrypted.RequestID != envelope.ItemID {
+				return nil, fmt.Errorf("response %q target does not match its plaintext item ID", decrypted.ID)
+			}
 		case "dismiss":
-			if decrypted.RequestID == "" || decrypted.OptionID != "" || decrypted.Message != "" {
+			legacyDismiss := envelope.ItemID == "" && decrypted.RequestID != "" && decrypted.EventID == ""
+			trackedDismiss := envelope.ItemID != "" && decrypted.EventID != "" && decrypted.RequestID == ""
+			if (!legacyDismiss && !trackedDismiss) || decrypted.OptionID != "" || decrypted.Message != "" {
 				return nil, fmt.Errorf("response %q has invalid dismiss fields", decrypted.ID)
 			}
+			if envelope.ItemID != "" && decrypted.EventID != envelope.ItemID {
+				return nil, fmt.Errorf("response %q target does not match its plaintext item ID", decrypted.ID)
+			}
 		case "feedback":
-			if decrypted.Message == "" || decrypted.RequestID != "" || decrypted.OptionID != "" {
+			if decrypted.Message == "" || decrypted.RequestID != "" || decrypted.EventID != "" || decrypted.OptionID != "" || envelope.ItemID != "" {
 				return nil, fmt.Errorf("response %q has invalid feedback fields", decrypted.ID)
 			}
 		default:
@@ -329,7 +344,9 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		response := Response{
 			ID:        decrypted.ID,
 			Type:      decrypted.Type,
+			ItemID:    envelope.ItemID,
 			RequestID: decrypted.RequestID,
+			EventID:   decrypted.EventID,
 			OptionID:  decrypted.OptionID,
 			Message:   decrypted.Message,
 			CreatedAt: decrypted.CreatedAt,
@@ -423,9 +440,11 @@ func (s *Store) send(ctx context.Context, sessionID string, value event, notific
 	if len(session.groups) == 0 {
 		return fmt.Errorf("session has no authenticated device groups")
 	}
-	value.ID, err = randomValue(18)
-	if err != nil {
-		return err
+	if value.ID == "" {
+		value.ID, err = randomValue(18)
+		if err != nil {
+			return err
+		}
 	}
 	value.SessionTitle = session.title
 	if value.Type == "color" {
@@ -479,17 +498,41 @@ func (s *Store) sendToGroup(ctx context.Context, session *managedSession, group 
 	if err != nil {
 		return err
 	}
+	itemID, err := eventItemID(value, notificationKind)
+	if err != nil {
+		return err
+	}
 	return s.api.addEvent(
 		ctx,
 		session.id,
 		session.managerToken,
 		envelopeID,
+		itemID,
 		group.ID,
 		group.Timestamp,
 		nonce,
 		ciphertext,
 		notificationKind,
 	)
+}
+
+func eventItemID(value event, notificationKind string) (string, error) {
+	switch notificationKind {
+	case "none":
+		return "", nil
+	case "notify":
+		if value.Type != "notify" || value.ID == "" {
+			return "", fmt.Errorf("notify event is missing its item ID")
+		}
+		return value.ID, nil
+	case "request":
+		if value.Type != "request" || value.RequestID == "" {
+			return "", fmt.Errorf("request event is missing its request ID")
+		}
+		return value.RequestID, nil
+	default:
+		return "", fmt.Errorf("unsupported notification kind %q", notificationKind)
+	}
 }
 
 func resolveColor(value string) (string, error) {

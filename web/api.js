@@ -83,12 +83,19 @@ export async function joinSession(sessionId, body) {
 
 export async function getEvents(session, identity) {
   const result = await request(
-    `/api/sessions/${session.sessionId}/events?groupId=${identity.group.groupId}&deviceId=${identity.deviceId}&after=${session.cursor}`,
+    `/api/sessions/${session.sessionId}/events?groupId=${identity.group.groupId}&deviceId=${identity.deviceId}&after=${session.cursor}&includeActive=1`,
     { token: identity.accessToken },
   );
-  requireExactKeys(result, ["events", "expiresAt"]);
+  requireExactKeys(result, ["events", "activeItemIds", "expiresAt"]);
   if (!Array.isArray(result.events)) throw new Error("events must be an array");
-  return { events: result.events, expiresAt: integerValue(result.expiresAt, "expiresAt") };
+  if (!Array.isArray(result.activeItemIds) || result.activeItemIds.some((item) => typeof item !== "string")) {
+    throw new Error("activeItemIds must be strings");
+  }
+  return {
+    events: result.events,
+    activeItemIds: result.activeItemIds,
+    expiresAt: integerValue(result.expiresAt, "expiresAt"),
+  };
 }
 
 export async function postResponse(session, identity, body) {

@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     private var pendingUniversalLink: URL?
     private var hasFinishedStarting = false
     private var isSyncing = false
+    private var didReportDisabledBadges = false
 
     private var isSessionHistoryUITest: Bool {
 #if DEBUG
@@ -45,6 +46,14 @@ final class AppModel: ObservableObject {
     private var isSessionLinkUITest: Bool {
 #if DEBUG
         ProcessInfo.processInfo.arguments.contains("-ui-test-session-link")
+#else
+        false
+#endif
+    }
+
+    var isAppBadgeUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-app-badge")
 #else
         false
 #endif
@@ -77,7 +86,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 Task { await self.registerPushToken(token, environment: environment) }
             }
-            PushCoordinator.shared.onFailure = { [weak self] error in self?.show(error) }
+            PushCoordinator.shared.onFailure = { [weak self] error in self?.handlePushError(error) }
             let loaded = try keychain.load()
             var current: Vault
             if let loaded {
@@ -251,7 +260,7 @@ final class AppModel: ObservableObject {
             )
             current.sessions[index].expiresAt = try await api.postResponse(
                 session: current.sessions[index], identity: current.identity, timestamp: timestamp,
-                responseID: responseID, payload: payload
+                responseID: responseID, itemID: request.serverItemID, payload: payload
             )
             current.sessions[index].request = nil
             current.sessions[index].requestKeyTimestamp = nil
@@ -281,13 +290,21 @@ final class AppModel: ObservableObject {
             }
 #endif
             let responseID = try CryptoEngine.randomID()
-            let payload = try CryptoEngine.encryptDismiss(
-                session: current.sessions[index], timestamp: timestamp, responseID: responseID,
-                requestID: request.id, createdAt: RFC3339.string(from: Date())
-            )
+            let createdAt = RFC3339.string(from: Date())
+            let payload = if let itemID = request.serverItemID {
+                try CryptoEngine.encryptDismiss(
+                    session: current.sessions[index], timestamp: timestamp, responseID: responseID,
+                    eventID: itemID, createdAt: createdAt
+                )
+            } else {
+                try CryptoEngine.encryptLegacyRequestDismiss(
+                    session: current.sessions[index], timestamp: timestamp, responseID: responseID,
+                    requestID: request.id, createdAt: createdAt
+                )
+            }
             current.sessions[index].expiresAt = try await api.postResponse(
                 session: current.sessions[index], identity: current.identity, timestamp: timestamp,
-                responseID: responseID, payload: payload
+                responseID: responseID, itemID: request.serverItemID, payload: payload
             )
             current.sessions[index].request = nil
             current.sessions[index].requestKeyTimestamp = nil
@@ -296,12 +313,29 @@ final class AppModel: ObservableObject {
         } catch { show(error) }
     }
 
-    func dismissNotification(sessionID: String, notificationID: String) {
+    func dismissNotification(sessionID: String, notificationID: String) async {
         do {
             var current = try requiredVault()
             guard let sessionIndex = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
                   let notificationIndex = current.sessions[sessionIndex].notifications.firstIndex(where: { $0.id == notificationID }) else {
                 throw ProtocolError.invalidResponse("notification is no longer available")
+            }
+            let notification = current.sessions[sessionIndex].notifications[notificationIndex]
+            if let itemID = notification.serverItemID {
+                guard let group = current.identity.group,
+                      let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
+                    throw ProtocolError.invalidResponse("notification dismissal key is unavailable")
+                }
+                try populateSessionKeys(&current.sessions[sessionIndex], group: group)
+                let responseID = try CryptoEngine.randomID()
+                let payload = try CryptoEngine.encryptDismiss(
+                    session: current.sessions[sessionIndex], timestamp: key.timestamp, responseID: responseID,
+                    eventID: itemID, createdAt: RFC3339.string(from: Date())
+                )
+                current.sessions[sessionIndex].expiresAt = try await api.postResponse(
+                    session: current.sessions[sessionIndex], identity: current.identity, timestamp: key.timestamp,
+                    responseID: responseID, itemID: itemID, payload: payload
+                )
             }
             current.sessions[sessionIndex].notifications.remove(at: notificationIndex)
             try persist(current)
@@ -328,7 +362,7 @@ final class AppModel: ObservableObject {
             )
             current.sessions[index].expiresAt = try await api.postResponse(
                 session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
-                responseID: responseID, payload: payload
+                responseID: responseID, itemID: nil, payload: payload
             )
             try persist(current)
             return true
@@ -339,7 +373,12 @@ final class AppModel: ObservableObject {
     }
 
     func enableNotifications() async {
-        do { _ = try await PushCoordinator.shared.enable() } catch { show(error) }
+        do {
+            _ = try await PushCoordinator.shared.enable()
+            didReportDisabledBadges = false
+        } catch {
+            handlePushError(error)
+        }
     }
 
     func resumeNotifications() async { await PushCoordinator.shared.resumeIfAuthorized() }
@@ -398,10 +437,14 @@ final class AppModel: ObservableObject {
                         let result = try await api.events(for: current.sessions[index], identity: current.identity)
                         for envelope in result.events {
                             let event = try CryptoEngine.decryptEvent(session: current.sessions[index], envelope: envelope)
-                            apply(event, timestamp: envelope.keyTimestamp, to: &current.sessions[index])
+                            try apply(
+                                event, timestamp: envelope.keyTimestamp, createdAt: envelope.createdAt,
+                                serverItemID: envelope.itemID, to: &current.sessions[index]
+                            )
                             current.sessions[index].cursor = envelope.sequence
                             current.sessions[index].updatedAt = envelope.createdAt
                         }
+                        reconcileActiveItems(result.activeItemIDs, in: &current.sessions[index])
                         current.sessions[index].expiresAt = result.expiresAt
                     } catch let error as APIError
                         where (error.status == 404 && error.code == "session_not_found")
@@ -570,21 +613,52 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func apply(_ event: SessionEvent, timestamp: Int64, to session: inout SessionRecord) {
+    private func apply(
+        _ event: SessionEvent,
+        timestamp: Int64,
+        createdAt: Int64,
+        serverItemID: String?,
+        to session: inout SessionRecord
+    ) throws {
         switch event {
         case .notification(let id, let title, let message, let color):
+            if let serverItemID, serverItemID != id {
+                throw ProtocolError.invalidResponse("notification ID does not match its server item ID")
+            }
             session.title = title
-            session.notifications.append(SessionNotification(id: id, message: message))
+            session.notifications.append(
+                SessionNotification(id: id, message: message, createdAt: createdAt, serverItemID: serverItemID)
+            )
             session.color = color
         case .status(let title, let value, let color):
             session.title = title; session.status = value; session.color = color
         case .request(let title, let value, let color):
-            session.title = title; session.request = value; session.requestKeyTimestamp = timestamp; session.color = color
+            if let serverItemID, serverItemID != value.id {
+                throw ProtocolError.invalidResponse("request ID does not match its server item ID")
+            }
+            session.title = title
+            session.request = SessionRequest(
+                id: value.id, prompt: value.prompt, options: value.options,
+                createdAt: createdAt, serverItemID: serverItemID
+            )
+            session.requestKeyTimestamp = timestamp
+            session.color = color
         case .closeRequest(let title, let requestID, let color):
             session.title = title; session.color = color
             if session.request?.id == requestID { session.request = nil; session.requestKeyTimestamp = nil }
         case .color(let title, let value):
             session.title = title; session.color = value
+        }
+    }
+
+    private func reconcileActiveItems(_ activeItemIDs: [String], in session: inout SessionRecord) {
+        let active = Set(activeItemIDs)
+        session.notifications.removeAll { notification in
+            notification.serverItemID.map { !active.contains($0) } ?? false
+        }
+        if let itemID = session.request?.serverItemID, !active.contains(itemID) {
+            session.request = nil
+            session.requestKeyTimestamp = nil
         }
     }
 
@@ -654,6 +728,16 @@ final class AppModel: ObservableObject {
         errorMessage = error.localizedDescription; connectionState = .failed
     }
 
+    private func handlePushError(_ error: Error) {
+        if case PushError.badgesDisabled = error {
+            guard !didReportDisabledBadges else { return }
+            didReportDisabledBadges = true
+            noticeMessage = "App icon badges are turned off. To see the number of unresolved items on the Home Screen, enable Badges in Settings > Notifications > notify.guru."
+            return
+        }
+        show(error)
+    }
+
 #if DEBUG
     private func startSessionHistoryUITest() {
         let session = SessionRecord(
@@ -661,14 +745,21 @@ final class AppModel: ObservableObject {
             creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 3,
             title: "UI improvement test", status: "Working",
             notifications: [
-                SessionNotification(id: "notice-1", message: "First accumulated notice"),
-                SessionNotification(id: "notice-2", message: "Second accumulated notice"),
+                SessionNotification(
+                    id: "notice-1", message: "First accumulated notice",
+                    createdAt: Self.currentTimeMilliseconds() - 2_000
+                ),
+                SessionNotification(
+                    id: "notice-2", message: "Second accumulated notice",
+                    createdAt: Self.currentTimeMilliseconds() - 20 * 60_000
+                ),
             ],
             request: SessionRequest(
                 id: "request-1", prompt: "Continue the meeting?",
-                options: [SessionChoice(id: "yes", label: "Yes"), SessionChoice(id: "no", label: "No")]
+                options: [SessionChoice(id: "yes", label: "Yes"), SessionChoice(id: "no", label: "No")],
+                createdAt: Self.currentTimeMilliseconds() - 30_000
             ),
-            requestKeyTimestamp: 42, color: "#d9f2d0", updatedAt: Self.currentTimeMilliseconds(),
+            requestKeyTimestamp: 42, color: "#d9f2d0", updatedAt: Self.currentTimeMilliseconds() - 20 * 60_000,
             expiresAt: Self.currentTimeMilliseconds() + 86_400_000
         )
         let identity = DeviceIdentity(

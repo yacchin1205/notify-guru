@@ -6,7 +6,7 @@ export interface APNsConfig {
 }
 
 export type APNsEnvironment = "sandbox" | "production";
-export type APNsAlertKind = "notify" | "request";
+export type APNsAlertKind = "notify" | "request" | "badge";
 
 export type APNsResult =
   | { outcome: "delivered" }
@@ -51,7 +51,12 @@ export class APNsClient {
     private readonly transport?: typeof fetch,
   ) {}
 
-  async send(deviceToken: string, environment: APNsEnvironment, kind: APNsAlertKind): Promise<APNsResult> {
+  async send(
+    deviceToken: string,
+    environment: APNsEnvironment,
+    kind: APNsAlertKind,
+    badgeCount?: number,
+  ): Promise<APNsResult> {
     if (!DEVICE_TOKEN.test(deviceToken)) {
       throw new Error("APNs device token must be lowercase hexadecimal");
     }
@@ -59,6 +64,9 @@ export class APNsClient {
     const teamId = requiredIdentifier("APNS_TEAM_ID", this.config.teamId);
     if (this.config.privateKey === undefined || this.config.privateKey.length === 0) {
       throw new Error("APNS_PRIVATE_KEY is not configured");
+    }
+    if (badgeCount !== undefined && (!Number.isSafeInteger(badgeCount) || badgeCount < 0)) {
+      throw new Error("APNs badge count must be a non-negative safe integer");
     }
     const host = environment === "sandbox" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
     const authentication = await providerToken(keyId, teamId, this.config.privateKey);
@@ -74,8 +82,11 @@ export class APNsClient {
       },
       body: JSON.stringify({
         aps: {
-          alert: kind === "notify" ? "A new notification is available." : "Your input is requested.",
-          sound: "default",
+          ...(kind === "badge" ? {} : {
+            alert: kind === "notify" ? "A new notification is available." : "Your input is requested.",
+            sound: "default",
+          }),
+          ...(badgeCount === undefined ? {} : { badge: badgeCount }),
         },
       }),
     };

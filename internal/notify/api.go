@@ -113,15 +113,16 @@ func (a *API) joins(ctx context.Context, sessionID, managerToken string) (joinsR
 	return result, err
 }
 
-func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, groupID string, timestamp int64, nonce, ciphertext, notificationKind string) error {
+func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, itemID, groupID string, timestamp int64, nonce, ciphertext, notificationKind string) error {
 	request := struct {
 		EventID          string `json:"eventId"`
+		ItemID           string `json:"itemId,omitempty"`
 		GroupID          string `json:"groupId"`
 		KeyTimestamp     int64  `json:"keyTimestamp"`
 		Nonce            string `json:"nonce"`
 		Ciphertext       string `json:"ciphertext"`
 		NotificationKind string `json:"notificationKind"`
-	}{eventID, groupID, timestamp, nonce, ciphertext, notificationKind}
+	}{eventID, itemID, groupID, timestamp, nonce, ciphertext, notificationKind}
 	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", managerToken, request, &struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}{})
@@ -131,6 +132,7 @@ type responsesResult struct {
 	Responses []struct {
 		Sequence     int64  `json:"sequence"`
 		ResponseID   string `json:"responseId"`
+		ItemID       string `json:"itemId"`
 		GroupID      string `json:"groupId"`
 		KeyTimestamp int64  `json:"keyTimestamp"`
 		Nonce        string `json:"nonce"`

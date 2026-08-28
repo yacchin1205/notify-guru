@@ -18,6 +18,13 @@ struct ContentView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
+#if DEBUG
+                            if model.isAppBadgeUITest {
+                                Button("Enable notifications for UI test") {
+                                    Task { await model.enableNotifications() }
+                                }
+                            }
+#endif
                             if model.isAwaitingDeviceApproval {
                                 DeviceApprovalWaitingCard()
                             } else {
@@ -392,9 +399,23 @@ private struct SessionCard: View {
                         .font(.title3.weight(.semibold))
                 }
                 Spacer()
-                Text(expiryLabel)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 3) {
+                    if session.unresolvedCount > 0 {
+                        Text("\(session.unresolvedCount)")
+                            .font(.caption2.bold().monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.brandAccent, in: Capsule())
+                            .accessibilityLabel(session.unresolvedAccessibilityLabel)
+                    }
+                    if let updatedAt = session.updatedAt {
+                        RelativeTimeText(timestampMilliseconds: updatedAt)
+                    }
+                    Text(expiryLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if !session.status.isEmpty {
@@ -403,12 +424,19 @@ private struct SessionCard: View {
             }
             ForEach(session.notifications) { notification in
                 HStack(alignment: .top, spacing: 12) {
-                    Text(notification.message)
-                        .font(.body)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(notification.message)
+                            .font(.body)
+                            .textSelection(.enabled)
+                        if let createdAt = notification.createdAt {
+                            RelativeTimeText(timestampMilliseconds: createdAt)
+                        }
+                    }
                     Spacer(minLength: 8)
                     Button("Dismiss notification", systemImage: "xmark") {
-                        model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                        Task {
+                            await model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                        }
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
@@ -418,8 +446,13 @@ private struct SessionCard: View {
             if let request = session.request {
                 Divider()
                 HStack(alignment: .top, spacing: 12) {
-                    Text(request.prompt)
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(request.prompt)
+                            .font(.headline)
+                        if let createdAt = request.createdAt {
+                            RelativeTimeText(timestampMilliseconds: createdAt)
+                        }
+                    }
                     Spacer(minLength: 8)
                     Button("Dismiss request", systemImage: "xmark") {
                         responding = true
@@ -475,6 +508,18 @@ private struct SessionCard: View {
         guard remaining > 0 else { return "Checking expiry" }
         let hours = max(1, Int(ceil(remaining / 3_600)))
         return "~\(hours)h"
+    }
+}
+
+private struct RelativeTimeText: View {
+    let timestampMilliseconds: Int64
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            Text(RelativeTime.label(timestampMilliseconds: timestampMilliseconds, now: context.date))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

@@ -51,6 +51,26 @@ describe("APNs client", () => {
     expect(body).toEqual({ aps: { alert: "Your input is requested.", sound: "default" } });
   });
 
+  it("sets an absolute badge count and can update it without an alert", async () => {
+    const privateKey = await signingKey();
+    const bodies: unknown[] = [];
+    const client = new APNsClient(
+      { keyId: "BADGEKEY01", teamId: "BADGETEAM1", privateKey, topic: "guru.notify.app" },
+      (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    );
+
+    await client.send("aabb", "sandbox", "notify", 3);
+    await client.send("aabb", "sandbox", "badge", 2);
+
+    expect(bodies).toEqual([
+      { aps: { alert: "A new notification is available.", sound: "default", badge: 3 } },
+      { aps: { badge: 2 } },
+    ]);
+  });
+
   it("reuses one provider token across APNs clients in the same Worker isolate", async () => {
     const privateKey = await signingKey();
     const authorizations: string[] = [];

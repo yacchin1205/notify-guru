@@ -48,6 +48,93 @@ describe("devices and persistent groups", () => {
     expect((await postEvent(session, key.timestamp, "loud")).status).toBe(400);
   });
 
+  it("tracks opaque active items and invalidates them through ordinary responses", async () => {
+    const device = await newDevice();
+    const group = await createGroup(device);
+    const key = await registerKey(group.id, device, [device], true);
+    const session = await createJoinedSession(group, device, key);
+    const itemId = randomId();
+
+    const created = await postTrackedEvent(session, key.timestamp, itemId, "request");
+    expect(created.status).toBe(201);
+    expect((await postTrackedEvent(
+      session,
+      key.timestamp,
+      itemId,
+      "request",
+      created.eventId,
+      created.ciphertext,
+    )).status).toBe(201);
+    const conflictingRetry = await postTrackedEvent(
+      session,
+      key.timestamp,
+      itemId,
+      "request",
+      created.eventId,
+    );
+    expect(conflictingRetry.status).toBe(409);
+    expect(conflictingRetry.json.error).toBe("event_exists");
+    const before = await trackedEvents(session, device);
+    expect(before.json.activeItemIds).toEqual([itemId]);
+    expect(before.json.events).toEqual([
+      expect.objectContaining({ itemId }),
+    ]);
+    const registry = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM device_active_items_v1 WHERE device_id = ?",
+        device.id,
+      ))[0].count
+    )).toBe(1);
+
+    const trackedStatus = await api(`/api/sessions/${session.id}/events`, {
+      method: "POST",
+      token: session.managerToken,
+      body: {
+        eventId: randomId(),
+        itemId: randomId(),
+        groupId: session.groupId,
+        keyTimestamp: key.timestamp,
+        nonce: "A".repeat(16),
+        ciphertext: randomToken(),
+        notificationKind: "none",
+      },
+    });
+    expect(trackedStatus.status).toBe(400);
+    expect(trackedStatus.json.error).toBe("invalid_field");
+
+    const response = (responseId: string) => api(`/api/sessions/${session.id}/responses`, {
+      method: "POST",
+      token: device.token,
+      body: {
+        responseId,
+        itemId,
+        groupId: group.id,
+        deviceId: device.id,
+        keyTimestamp: key.timestamp,
+        nonce: "A".repeat(16),
+        ciphertext: randomToken(),
+      },
+    });
+    expect((await response(randomId())).status).toBe(201);
+    expect((await trackedEvents(session, device)).json.activeItemIds).toEqual([]);
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM device_active_items_v1 WHERE device_id = ?",
+        device.id,
+      ))[0].count
+    )).toBe(0);
+
+    expect((await response(randomId())).status).toBe(201);
+    const sessionStub = env.SESSIONS.get(env.SESSIONS.idFromName(session.id));
+    expect(await runInDurableObject(sessionStub, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM session_responses_v3 WHERE item_id = ?",
+        itemId,
+      ))[0].count
+    )).toBe(2);
+  });
+
   it("reverses device approval and binds group keys to their members", async () => {
     const first = await newDevice();
     const second = await newDevice();
@@ -98,6 +185,14 @@ describe("devices and persistent groups", () => {
     expect((await events(session, second)).json.events).toEqual([
       expect.objectContaining({ eventId: sharedEvent.json.eventId, keyTimestamp: sharedKey.timestamp }),
     ]);
+
+    const sharedItemID = randomId();
+    expect((await postTrackedEvent(session, sharedKey.timestamp, sharedItemID, "request")).status).toBe(201);
+    expect((await trackedEvents(session, first)).json.activeItemIds).toEqual([sharedItemID]);
+    expect((await trackedEvents(session, second)).json.activeItemIds).toEqual([sharedItemID]);
+    expect((await postTrackedResponse(session, second, sharedKey.timestamp, sharedItemID)).status).toBe(201);
+    expect((await trackedEvents(session, first)).json.activeItemIds).toEqual([]);
+    expect((await trackedEvents(session, second)).json.activeItemIds).toEqual([]);
 
     const removed = await api(`/api/groups/${group.id}/devices/${second.id}?deviceId=${first.id}`, {
       method: "DELETE",
@@ -156,9 +251,24 @@ describe("devices and persistent groups", () => {
     const replacementSharedKey = await registerKey(group.id, first, [first, second], false);
     expect((await postEvent(session, replacementSharedKey.timestamp)).status).toBe(201);
 
+    expect((await postTrackedEvent(session, replacementSharedKey.timestamp, randomId(), "notify")).status).toBe(201);
+    const registry = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM device_active_items_v1 WHERE session_id = ?",
+        session.id,
+      ))[0].count
+    )).toBe(2);
+
     expect((await groupState(group.id, first)).sessions).toHaveLength(1);
     expect((await api(`/api/sessions/${session.id}`, { method: "DELETE", token: session.managerToken })).status).toBe(204);
     expect((await groupState(group.id, first)).sessions).toEqual([]);
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM device_active_items_v1 WHERE session_id = ?",
+        session.id,
+      ))[0].count
+    )).toBe(0);
   });
 
   it("rejects key records whose members or packages differ from active membership", async () => {
@@ -423,9 +533,61 @@ async function postEvent(session: JoinedSession, keyTimestamp: number, notificat
   return { ...result, json: result.status === 201 ? { ...result.json, eventId } : result.json };
 }
 
+async function postTrackedEvent(
+  session: JoinedSession,
+  keyTimestamp: number,
+  itemId: string,
+  notificationKind: "notify" | "request",
+  eventId = randomId(),
+  ciphertext = randomToken(),
+) {
+  const result = await api(`/api/sessions/${session.id}/events`, {
+    method: "POST",
+    token: session.managerToken,
+    body: {
+      eventId,
+      itemId,
+      groupId: session.groupId,
+      keyTimestamp,
+      nonce: "A".repeat(16),
+      ciphertext,
+      notificationKind,
+    },
+  });
+  return { ...result, eventId, ciphertext };
+}
+
+async function postTrackedResponse(
+  session: JoinedSession,
+  device: Device,
+  keyTimestamp: number,
+  itemId: string,
+) {
+  return api(`/api/sessions/${session.id}/responses`, {
+    method: "POST",
+    token: device.token,
+    body: {
+      responseId: randomId(),
+      itemId,
+      groupId: session.groupId,
+      deviceId: device.id,
+      keyTimestamp,
+      nonce: "A".repeat(16),
+      ciphertext: randomToken(),
+    },
+  });
+}
+
 async function events(session: JoinedSession, device: Device) {
   return api(
     `/api/sessions/${session.id}/events?groupId=${session.groupId}&deviceId=${device.id}&after=0`,
+    { token: device.token },
+  );
+}
+
+async function trackedEvents(session: JoinedSession, device: Device) {
+  return api(
+    `/api/sessions/${session.id}/events?groupId=${session.groupId}&deviceId=${device.id}&after=0&includeActive=1`,
     { token: device.token },
   );
 }

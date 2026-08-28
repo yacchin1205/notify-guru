@@ -3,6 +3,7 @@ import Foundation
 struct EventEnvelope: Equatable {
     let sequence: Int64
     let eventID: String
+    let itemID: String?
     let groupID: String
     let keyTimestamp: Int64
     let nonce: String
@@ -10,7 +11,7 @@ struct EventEnvelope: Equatable {
     let createdAt: Int64
 }
 
-struct EventsResult: Equatable { let events: [EventEnvelope]; let expiresAt: Int64 }
+struct EventsResult: Equatable { let events: [EventEnvelope]; let activeItemIDs: [String]; let expiresAt: Int64 }
 
 enum DeviceRequestStatus: Equatable {
     case waiting(expiresAt: Int64)
@@ -198,27 +199,34 @@ struct APIClient {
 
     func events(for record: SessionRecord, identity: DeviceIdentity) async throws -> EventsResult {
         let path = pathWithQuery("/api/sessions/\(record.sessionID)/events", [
-            "groupId": record.groupID, "deviceId": identity.deviceID, "after": String(record.cursor),
+            "groupId": record.groupID, "deviceId": identity.deviceID, "after": String(record.cursor), "includeActive": "1",
         ])
         let data = try await request(method: "GET", path: path, token: identity.accessToken, body: nil, expectedStatus: 200)
-        let fields = try object(data, keys: ["events", "expiresAt"])
+        let fields = try object(data, keys: ["events", "activeItemIds", "expiresAt"])
         guard let eventObjects = fields["events"] as? [[String: Any]] else { throw ProtocolError.invalidResponse("events must be objects") }
         let events = try eventObjects.map { event in
-            try requireKeys(event, ["sequence", "eventId", "groupId", "keyTimestamp", "nonce", "ciphertext", "createdAt"])
+            try requireKeys(event, ["sequence", "eventId", "itemId", "groupId", "keyTimestamp", "nonce", "ciphertext", "createdAt"])
+            guard event["itemId"] is NSNull || event["itemId"] is String else {
+                throw ProtocolError.invalidResponse("event itemId must be a string or null")
+            }
             let envelope = EventEnvelope(
                 sequence: try integer(event, "sequence"), eventID: try text(event, "eventId"),
+                itemID: event["itemId"] as? String,
                 groupID: try text(event, "groupId"), keyTimestamp: try integer(event, "keyTimestamp"),
                 nonce: try text(event, "nonce"), ciphertext: try text(event, "ciphertext"), createdAt: try integer(event, "createdAt")
             )
             guard envelope.groupID == record.groupID else { throw ProtocolError.invalidResponse("event group mismatch") }
             return envelope
         }
-        return EventsResult(events: events, expiresAt: try integer(fields, "expiresAt"))
+        guard let activeItemIDs = fields["activeItemIds"] as? [String] else {
+            throw ProtocolError.invalidResponse("activeItemIds must be strings")
+        }
+        return EventsResult(events: events, activeItemIDs: activeItemIDs, expiresAt: try integer(fields, "expiresAt"))
     }
 
-    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, payload: EncryptedPayload) async throws -> Int64 {
+    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, payload: EncryptedPayload) async throws -> Int64 {
         let body = PostResponseRequest(
-            responseID: responseID, groupID: record.groupID, deviceID: identity.deviceID,
+            responseID: responseID, itemID: itemID, groupID: record.groupID, deviceID: identity.deviceID,
             keyTimestamp: timestamp, nonce: payload.nonce, ciphertext: payload.ciphertext
         )
         let data = try await request(
@@ -300,10 +308,10 @@ private struct JoinRequest: Encodable {
 }
 
 private struct PostResponseRequest: Encodable {
-    let responseID: String; let groupID: String; let deviceID: String; let keyTimestamp: Int64
+    let responseID: String; let itemID: String?; let groupID: String; let deviceID: String; let keyTimestamp: Int64
     let nonce: String; let ciphertext: String
     enum CodingKeys: String, CodingKey {
-        case responseID = "responseId"; case groupID = "groupId"; case deviceID = "deviceId"
+        case responseID = "responseId"; case itemID = "itemId"; case groupID = "groupId"; case deviceID = "deviceId"
         case keyTimestamp, nonce, ciphertext
     }
 }

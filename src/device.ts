@@ -25,6 +25,10 @@ interface DeviceRow extends Record<string, SqlStorageValue> {
   push_environment: string | null;
 }
 
+interface DevicePushRow extends DeviceRow {
+  badge_count: number;
+}
+
 interface DeviceRequestRow extends Record<string, SqlStorageValue> {
   id: string;
   device_id: string;
@@ -50,6 +54,7 @@ export interface DevicePushTarget {
   deviceId: string;
   token: string;
   environment: "sandbox" | "production";
+  badgeCount: number;
 }
 
 export class DeviceRegistry extends DurableObject<DeviceEnv> {
@@ -78,6 +83,18 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
         created_at INTEGER NOT NULL,
         approved_at INTEGER
       );
+      CREATE TABLE IF NOT EXISTS device_active_items_v1 (
+        device_id TEXT NOT NULL REFERENCES devices(id),
+        session_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (device_id, session_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS device_active_items_v1_session_item
+        ON device_active_items_v1(session_id, item_id);
+      CREATE INDEX IF NOT EXISTS device_active_items_v1_group_device
+        ON device_active_items_v1(group_id, device_id);
     `);
   }
 
@@ -152,14 +169,54 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
 
   getPushTargets(deviceIds: string[]): DevicePushTarget[] {
     return deviceIds.flatMap((deviceId) => {
-      const device = this.requiredDevice(deviceId);
+      const device = this.pushDevice(deviceId);
       if (device.push_token === null || device.push_environment === null) return [];
       return [{
         deviceId,
         token: device.push_token,
         environment: device.push_environment as "sandbox" | "production",
+        badgeCount: device.badge_count,
       }];
     });
+  }
+
+  activateSessionItem(sessionId: string, groupId: string, itemId: string, deviceIds: string[]): void {
+    const now = Date.now();
+    this.state.storage.transactionSync(() => {
+      for (const deviceId of deviceIds) {
+        this.requiredDevice(deviceId);
+        this.state.storage.sql.exec(
+          `INSERT OR IGNORE INTO device_active_items_v1
+             (device_id, session_id, group_id, item_id, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          deviceId,
+          sessionId,
+          groupId,
+          itemId,
+          now,
+        );
+      }
+    });
+  }
+
+  deactivateSessionItem(sessionId: string, itemId: string): void {
+    this.state.storage.sql.exec(
+      "DELETE FROM device_active_items_v1 WHERE session_id = ? AND item_id = ?",
+      sessionId,
+      itemId,
+    );
+  }
+
+  deactivateSession(sessionId: string): void {
+    this.state.storage.sql.exec("DELETE FROM device_active_items_v1 WHERE session_id = ?", sessionId);
+  }
+
+  deactivateGroupDevice(groupId: string, deviceId: string): void {
+    this.state.storage.sql.exec(
+      "DELETE FROM device_active_items_v1 WHERE group_id = ? AND device_id = ?",
+      groupId,
+      deviceId,
+    );
   }
 
   clearPushToken(deviceId: string, token: string): void {
@@ -290,6 +347,20 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       deviceId,
     ));
     return rows.length === 0 ? null : rows[0];
+  }
+
+  private pushDevice(deviceId: string): DevicePushRow {
+    const rows = Array.from(this.state.storage.sql.exec<DevicePushRow>(
+      `SELECT d.id, d.signing_public_key, d.push_token, d.push_environment,
+              COUNT(a.item_id) AS badge_count
+       FROM devices d
+       LEFT JOIN device_active_items_v1 a ON a.device_id = d.id
+       WHERE d.id = ?
+       GROUP BY d.id, d.signing_public_key, d.push_token, d.push_environment`,
+      deviceId,
+    ));
+    if (rows.length === 0) throw new HttpError(404, "device_not_found", "Device not found");
+    return rows[0];
   }
 
   private deviceByPublicKey(publicKey: string): DeviceRow | null {

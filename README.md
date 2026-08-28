@@ -49,7 +49,7 @@ quit
 
 - `pair` creates another one-shot QR code for an additional device group.
 - `color` changes the card color during the session; use `color random` to select another pastel color.
-- `status` updates the card silently. `notify` shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in either OS alert.
+- `status` updates the card silently. `notify` returns the item ID used to identify a later dismissal and shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in either OS alert.
 - `close-request` ends the identified request on connected devices.
 - Each local QR image remains available for 10 minutes or until `notifyg` exits. It is held only in process memory, and the response prevents browser caching.
 - `responses` retrieves every choice response, request dismissal, and free-form message without selecting or aggregating them.

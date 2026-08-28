@@ -62,12 +62,15 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
         XCTAssertEqual(app.buttons.matching(identifier: "Dismiss notification").count, 2)
         XCTAssertTrue(app.buttons["Dismiss request"].exists)
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label == '20m ago'")).allElementsBoundByIndex.isEmpty)
         attachScreenshot(named: "10-notification-history-and-request", app: app)
 
         app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
         XCTAssertFalse(app.staticTexts["First accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
         XCTAssertEqual(app.buttons.matching(identifier: "Dismiss notification").count, 1)
+        XCTAssertTrue(app.staticTexts["2 unresolved items"].exists)
         attachScreenshot(named: "11-first-notification-dismissed", app: app)
 
         app.buttons["Dismiss request"].tap()
@@ -75,6 +78,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Yes"].exists)
         XCTAssertFalse(app.buttons["No"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["1 unresolved item"].exists)
         attachScreenshot(named: "12-request-dismissed", app: app)
     }
 
@@ -88,7 +92,43 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         XCTAssertTrue(app.alerts["notify.guru error"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].exists)
         attachScreenshot(named: "13-dismiss-error-keeps-request", app: app)
+    }
+
+    func testAppIconBadgeTracksUnresolvedItems() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-app-badge"]
+        app.launch()
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let enableNotifications = app.buttons["Enable notifications for UI test"]
+        XCTAssertTrue(enableNotifications.waitForExistence(timeout: 5))
+        enableNotifications.tap()
+        let permissionAlert = springboard.alerts.firstMatch
+        XCTAssertTrue(permissionAlert.waitForExistence(timeout: 5))
+        let buttons = permissionAlert.buttons
+        XCTAssertEqual(buttons.count, 2)
+        buttons.element(boundBy: 1).tap()
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].waitForExistence(timeout: 5))
+        let icon = springboard.icons["notify.guru"]
+        showHomeScreen(icon: icon)
+        attachScreenshot(named: "14-app-icon-badge-three", screen: .main)
+
+        icon.tap()
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].waitForExistence(timeout: 5))
+        app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
+        XCTAssertTrue(app.staticTexts["2 unresolved items"].waitForExistence(timeout: 5))
+        showHomeScreen(icon: icon)
+        attachScreenshot(named: "15-app-icon-badge-two", screen: .main)
+
+        icon.tap()
+        XCTAssertTrue(app.staticTexts["2 unresolved items"].waitForExistence(timeout: 5))
+        app.buttons["Dismiss request"].tap()
+        app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
+        XCTAssertFalse(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 2))
+        showHomeScreen(icon: icon)
+        attachScreenshot(named: "16-app-icon-badge-cleared", screen: .main)
     }
 
     func testDeviceAdditionRequiresConfirmationAndCanBeCancelled() {
@@ -168,5 +208,21 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func attachScreenshot(named name: String, screen: XCUIScreen) {
+        let attachment = XCTAttachment(screenshot: screen.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func showHomeScreen(icon: XCUIElement) {
+        Thread.sleep(forTimeInterval: 1)
+        XCUIDevice.shared.press(.home)
+        if !icon.waitForExistence(timeout: 2) {
+            XCUIDevice.shared.press(.home)
+        }
+        XCTAssertTrue(icon.waitForExistence(timeout: 5))
     }
 }

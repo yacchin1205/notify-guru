@@ -49,6 +49,30 @@ func TestJoinURLCarriesInitialColorInTheFragment(t *testing.T) {
 	}
 }
 
+func TestEventItemIDUsesTheLogicalItemIdentifier(t *testing.T) {
+	t.Parallel()
+
+	notifyID, err := eventItemID(event{ID: "notification", Type: "notify"}, "notify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifyID != "notification" {
+		t.Fatalf("notify item ID = %q", notifyID)
+	}
+
+	requestID, err := eventItemID(event{ID: "envelope-payload", Type: "request", RequestID: "request"}, "request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestID != "request" {
+		t.Fatalf("request item ID = %q", requestID)
+	}
+
+	if _, err := eventItemID(event{ID: "status", Type: "status"}, "notify"); err == nil {
+		t.Fatal("status event was accepted as a notification item")
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

@@ -11,25 +11,38 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launchArguments = ["-ui-test-session-history"]
         app.launch()
 
-        let statusItem = app.menuBars.statusItems["notify.guru"]
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        attachScreenshot(named: "00-menu-bar-count", app: app)
         statusItem.click()
 
         XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["First accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].exists)
         attachScreenshot(named: "01-menu-bar-session", app: app)
+        XCTAssertTrue(app.staticTexts["20m ago"].exists)
 
         app.buttons.matching(identifier: "Dismiss Notification").element(boundBy: 0).click()
         XCTAssertFalse(app.staticTexts["First accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["2 unresolved items"].exists)
+        XCTAssertTrue(app.menuBars.statusItems["notify.guru, 2 unresolved items"].waitForExistence(timeout: 5))
         attachScreenshot(named: "02-notification-dismissed", app: app)
 
         app.buttons["Dismiss Request"].click()
         XCTAssertFalse(app.staticTexts["Continue the meeting?"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertTrue(app.staticTexts["1 unresolved item"].exists)
+        XCTAssertTrue(app.menuBars.statusItems["notify.guru, 1 unresolved item"].waitForExistence(timeout: 5))
         attachScreenshot(named: "03-request-dismissed", app: app)
+
+        app.buttons["Dismiss Notification"].click()
+        XCTAssertFalse(app.staticTexts["Second accumulated notice"].exists)
+        XCTAssertFalse(app.staticTexts["1 unresolved item"].exists)
+        XCTAssertTrue(app.menuBars.statusItems["notify.guru, no unresolved items"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "04-all-cleared", app: app)
     }
 
     func testDismissErrorKeepsRequestVisible() {
@@ -37,7 +50,7 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launchArguments = ["-ui-test-session-history", "-ui-test-dismiss-error"]
         app.launch()
 
-        let statusItem = app.menuBars.statusItems["notify.guru"]
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
 
@@ -46,7 +59,8 @@ final class MenuBarFlowUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["error-message"].exists)
-        attachScreenshot(named: "04-dismiss-error-keeps-request", app: app)
+        XCTAssertTrue(app.staticTexts["3 unresolved items"].exists)
+        attachScreenshot(named: "05-dismiss-error-keeps-request", app: app)
     }
 
     func testManagementWindowsOpenFromMenuBar() {
@@ -54,7 +68,7 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launchArguments = ["-ui-test-session-history"]
         app.launch()
 
-        let statusItem = app.menuBars.statusItems["notify.guru"]
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
 
@@ -123,7 +137,7 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launchArguments = ["-ui-test-session-link"]
         app.launch()
 
-        let statusItem = app.menuBars.statusItems["notify.guru"]
+        let statusItem = app.menuBars.statusItems["notify.guru, no unresolved items"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
         app.buttons["Add Session"].click()
