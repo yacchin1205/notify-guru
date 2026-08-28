@@ -57,7 +57,69 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "35-startup-error", app: app)
     }
 
-    func testAddToGroupRequestIsVisibleAndDiscardedAfterRelaunch() {
+    func testIPhoneKeepsSessionCardsInOneColumn() throws {
+        XCUIDevice.shared.orientation = .portrait
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-ipad-layout"]
+        app.launch()
+
+        let newest = app.staticTexts["Build pipeline"]
+        let middle = app.staticTexts["Security audit"]
+        let oldest = app.staticTexts["UI improvement test"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        try XCTSkipIf(app.windows.firstMatch.frame.width >= 600, "iPhone layout requires an iPhone destination")
+        XCTAssertTrue(middle.exists)
+        XCTAssertTrue(oldest.exists)
+        XCTAssertEqual(newest.frame.minX, middle.frame.minX, accuracy: 4)
+        XCTAssertLessThan(newest.frame.minY, middle.frame.minY)
+
+        app.swipeUp()
+        XCTAssertTrue(oldest.waitForExistence(timeout: 2))
+        XCTAssertEqual(middle.frame.minX, oldest.frame.minX, accuracy: 4)
+        XCTAssertLessThan(middle.frame.minY, oldest.frame.minY)
+        attachScreenshot(named: "40-iphone-one-column", app: app)
+    }
+
+    func testIPadUsesTwoPortraitColumnsAndThreeLandscapeColumns() throws {
+        XCUIDevice.shared.orientation = .portrait
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-ipad-layout"]
+        app.launch()
+
+        let newest = app.staticTexts["Build pipeline"]
+        let middle = app.staticTexts["Security audit"]
+        let oldest = app.staticTexts["UI improvement test"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        try XCTSkipUnless(app.windows.firstMatch.frame.width >= 600, "iPad layout requires an iPad destination")
+        XCTAssertTrue(middle.exists)
+        XCTAssertTrue(oldest.exists)
+        XCTAssertEqual(newest.frame.minY, middle.frame.minY, accuracy: 4)
+        XCTAssertLessThan(newest.frame.minX, middle.frame.minX)
+        XCTAssertLessThan(newest.frame.minY, oldest.frame.minY)
+        attachScreenshot(named: "41-ipad-portrait-two-columns", app: app)
+
+        app.buttons["Manage group"].tap()
+        XCTAssertTrue(app.navigationBars["Device Group"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "42-ipad-device-group-management", app: app)
+        app.buttons["Done"].tap()
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(newest.frame.minY, middle.frame.minY, accuracy: 4)
+        XCTAssertEqual(middle.frame.minY, oldest.frame.minY, accuracy: 4)
+        XCTAssertLessThan(newest.frame.minX, middle.frame.minX)
+        XCTAssertLessThan(middle.frame.minX, oldest.frame.minX)
+        attachScreenshot(named: "43-ipad-landscape-three-columns", screen: .main)
+    }
+
+    func testAddToGroupRequestIsVisibleAndDiscardedAfterRelaunch() throws {
+        XCUIDevice.shared.orientation = .portrait
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+
         let app = XCUIApplication()
         app.launch()
 
@@ -83,22 +145,35 @@ final class DeviceGroupFlowUITests: XCTestCase {
             removeAndContinue.tap()
         }
 
-        let invitationQRCode = app.images["QR code for adding this device to a group"]
-        XCTAssertTrue(invitationQRCode.waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["Share link"].exists)
+        let invitationQRCodes = app.images.matching(identifier: "QR code for adding this device to a group")
+        XCTAssertTrue(invitationQRCodes.firstMatch.waitForExistence(timeout: 20))
+        let invitationQRCode = try XCTUnwrap(invitationQRCodes.allElementsBoundByIndex.last)
+        let shareLinks = app.buttons.matching(identifier: "Share link")
+        let shareLink = try XCTUnwrap(shareLinks.allElementsBoundByIndex.last)
+        XCTAssertTrue(shareLink.exists)
         XCTAssertFalse(addToGroup.exists)
+        assertSquareQRCodeFits(invitationQRCode, in: app)
         attachScreenshot(named: "03-waiting-for-group", app: app)
+
+        if app.windows.firstMatch.frame.width >= 600 {
+            XCUIDevice.shared.orientation = .landscapeLeft
+            XCTAssertTrue(invitationQRCode.waitForExistence(timeout: 5))
+            assertSquareQRCodeFits(invitationQRCode, in: app)
+            XCTAssertTrue(shareLink.isHittable)
+            attachScreenshot(named: "06-ipad-landscape-waiting-for-group", screen: .main)
+            XCUIDevice.shared.orientation = .portrait
+        }
 
         app.terminate()
         app.launch()
 
         XCTAssertTrue(manageGroup.waitForExistence(timeout: 20))
-        XCTAssertFalse(invitationQRCode.exists)
+        XCTAssertEqual(invitationQRCodes.count, 0)
         attachScreenshot(named: "04-after-relaunch", app: app)
 
         manageGroup.tap()
         XCTAssertTrue(addToGroup.waitForExistence(timeout: 5))
-        XCTAssertFalse(invitationQRCode.exists)
+        XCTAssertEqual(invitationQRCodes.count, 0)
         attachScreenshot(named: "05-management-after-relaunch", app: app)
     }
 
@@ -275,5 +350,16 @@ final class DeviceGroupFlowUITests: XCTestCase {
             XCUIDevice.shared.press(.home)
         }
         XCTAssertTrue(icon.waitForExistence(timeout: 5))
+    }
+
+    private func assertSquareQRCodeFits(_ qrCode: XCUIElement, in app: XCUIApplication) {
+        let qrFrame = qrCode.frame
+        let windowFrame = app.windows.firstMatch.frame
+        XCTAssertEqual(qrFrame.width, qrFrame.height, accuracy: 2)
+        XCTAssertLessThanOrEqual(qrFrame.width, 328)
+        XCTAssertGreaterThanOrEqual(qrFrame.minX, windowFrame.minX)
+        XCTAssertLessThanOrEqual(qrFrame.maxX, windowFrame.maxX)
+        XCTAssertGreaterThanOrEqual(qrFrame.minY, windowFrame.minY)
+        XCTAssertLessThanOrEqual(qrFrame.maxY, windowFrame.maxY)
     }
 }

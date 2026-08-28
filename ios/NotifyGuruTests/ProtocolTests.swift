@@ -1,8 +1,17 @@
 import CryptoKit
+import UIKit
 import XCTest
 @testable import NotifyGuru
 
 final class ProtocolTests: XCTestCase {
+    func testSessionGridColumnsFollowDeviceAndOrientation() {
+        XCTAssertEqual(SessionGridLayout.columnCount(idiom: .phone, size: CGSize(width: 390, height: 844)), 1)
+        XCTAssertEqual(SessionGridLayout.columnCount(idiom: .phone, size: CGSize(width: 844, height: 390)), 1)
+        XCTAssertEqual(SessionGridLayout.columnCount(idiom: .pad, size: CGSize(width: 500, height: 1_000)), 1)
+        XCTAssertEqual(SessionGridLayout.columnCount(idiom: .pad, size: CGSize(width: 820, height: 1_180)), 2)
+        XCTAssertEqual(SessionGridLayout.columnCount(idiom: .pad, size: CGSize(width: 1_180, height: 820)), 3)
+    }
+
     func testPairingLinkRequiresExactV3Fragment() throws {
         let token = Base64URL.encode(Data(repeating: 1, count: 32))
         let secret = Base64URL.encode(Data(repeating: 2, count: 32))

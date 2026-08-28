@@ -770,6 +770,7 @@ final class AppModel: ObservableObject {
 
 #if DEBUG
     private func startSessionHistoryUITest() {
+        let now = Self.currentTimeMilliseconds()
         let session = SessionRecord(
             protocolVersion: 3, sessionID: "ui-test-session", groupID: "ui-test-group",
             creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 3,
@@ -777,28 +778,50 @@ final class AppModel: ObservableObject {
             notifications: [
                 SessionNotification(
                     id: "notice-1", message: "First accumulated notice",
-                    createdAt: Self.currentTimeMilliseconds() - 2_000
+                    createdAt: now - 2_000
                 ),
                 SessionNotification(
                     id: "notice-2", message: "Second accumulated notice",
-                    createdAt: Self.currentTimeMilliseconds() - 20 * 60_000
+                    createdAt: now - 20 * 60_000
                 ),
             ],
             request: SessionRequest(
                 id: "request-1", prompt: "Continue the meeting?",
                 options: [SessionChoice(id: "yes", label: "Yes"), SessionChoice(id: "no", label: "No")],
-                createdAt: Self.currentTimeMilliseconds() - 30_000
+                createdAt: now - 30_000
             ),
-            requestKeyTimestamp: 42, color: "#d9f2d0", updatedAt: Self.currentTimeMilliseconds() - 20 * 60_000,
-            expiresAt: Self.currentTimeMilliseconds() + 86_400_000
+            requestKeyTimestamp: 42, color: "#d9f2d0", updatedAt: now - 20 * 60_000,
+            expiresAt: now + 86_400_000
         )
+        var uiTestSessions = [session]
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-ipad-layout") {
+            uiTestSessions[0].notifications = []
+            uiTestSessions[0].request = nil
+            uiTestSessions[0].requestKeyTimestamp = nil
+            uiTestSessions.append(contentsOf: [
+                SessionRecord(
+                    protocolVersion: 3, sessionID: "ui-test-build", groupID: "ui-test-group",
+                    creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 1,
+                    title: "Build pipeline", status: "Building", notifications: [], request: nil,
+                    requestKeyTimestamp: nil, color: "#d6e4ff", updatedAt: now - 5 * 60_000,
+                    expiresAt: now + 86_400_000
+                ),
+                SessionRecord(
+                    protocolVersion: 3, sessionID: "ui-test-audit", groupID: "ui-test-group",
+                    creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 1,
+                    title: "Security audit", status: "Reviewing", notifications: [], request: nil,
+                    requestKeyTimestamp: nil, color: "#f2d7ee", updatedAt: now - 10 * 60_000,
+                    expiresAt: now + 86_400_000
+                ),
+            ])
+        }
         let identity = DeviceIdentity(
             deviceID: "ui-test-device", accessToken: "unused",
             encryptionPrivateKey: Data(repeating: 1, count: 32),
             signingPrivateKey: Data(repeating: 2, count: 32),
             group: DeviceGroup(groupID: "ui-test-group", keys: [:])
         )
-        let current = Vault(version: 3, identity: identity, sessions: [session])
+        let current = Vault(version: 3, identity: identity, sessions: uiTestSessions)
         vault = current
         publish(current)
         groupDevices = [GroupDevice(deviceID: identity.deviceID, encryptionPublicKey: "unused", addedAt: 0)]

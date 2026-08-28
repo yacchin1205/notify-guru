@@ -16,37 +16,42 @@ struct ContentView: View {
                 } else if !model.isReady {
                     StartupView()
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
+                    GeometryReader { geometry in
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
 #if DEBUG
-                            if model.isAppBadgeUITest {
-                                Button("Enable notifications for UI test") {
-                                    Task { await model.enableNotifications() }
+                                if model.isAppBadgeUITest {
+                                    Button("Enable notifications for UI test") {
+                                        Task { await model.enableNotifications() }
+                                    }
                                 }
-                            }
 #endif
-                            if model.isAwaitingDeviceApproval {
-                                DeviceApprovalWaitingCard()
-                            } else {
-                                DeviceSummaryCard(showingManagement: $showingDeviceManagement)
-                            }
-                            ForEach(model.sessions) { session in
-                                SessionCard(session: session)
-                            }
-                            if model.sessions.isEmpty {
-                                ContentUnavailableView {
-                                    Label("No sessions", systemImage: "link.badge.plus")
-                                } description: {
-                                    Text("Scan the one-shot QR code shown by notifyg.")
-                                } actions: {
-                                    Button("Scan QR code") { showingJoin = true }
-                                        .buttonStyle(.borderedProminent)
+                                if model.isAwaitingDeviceApproval {
+                                    DeviceApprovalWaitingCard()
+                                } else {
+                                    DeviceSummaryCard(showingManagement: $showingDeviceManagement)
+                                }
+                                if model.sessions.isEmpty {
+                                    ContentUnavailableView {
+                                        Label("No sessions", systemImage: "link.badge.plus")
+                                    } description: {
+                                        Text("Scan the one-shot QR code shown by notifyg.")
+                                    } actions: {
+                                        Button("Scan QR code") { showingJoin = true }
+                                            .buttonStyle(.borderedProminent)
+                                    }
+                                } else {
+                                    LazyVGrid(columns: sessionColumns(for: geometry.size), alignment: .leading, spacing: 16) {
+                                        ForEach(model.sessions) { session in
+                                            SessionCard(session: session)
+                                        }
+                                    }
                                 }
                             }
+                            .padding()
                         }
-                        .padding()
+                        .refreshable { await model.sync() }
                     }
-                    .refreshable { await model.sync() }
                 }
             }
             .background(Color.brandBackground.ignoresSafeArea())
@@ -133,6 +138,20 @@ struct ContentView: View {
         case .current: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
         }
+    }
+
+    private func sessionColumns(for size: CGSize) -> [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(), spacing: 16, alignment: .top),
+            count: SessionGridLayout.columnCount(idiom: UIDevice.current.userInterfaceIdiom, size: size)
+        )
+    }
+}
+
+enum SessionGridLayout {
+    static func columnCount(idiom: UIUserInterfaceIdiom, size: CGSize) -> Int {
+        guard idiom == .pad, size.width >= 600 else { return 1 }
+        return size.width > size.height ? 3 : 2
     }
 }
 
@@ -371,6 +390,8 @@ private struct DeviceManagementView: View {
 }
 
 private struct InvitationQRCodeView: View {
+    private static let maximumImageSide: CGFloat = 328
+
     let value: String
 
     var body: some View {
@@ -385,8 +406,10 @@ private struct InvitationQRCodeView: View {
                 ContentUnavailableView("QR code unavailable", systemImage: "qrcode")
             }
         }
+        .frame(maxWidth: Self.maximumImageSide)
         .padding(16)
         .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
