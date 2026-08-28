@@ -206,6 +206,65 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual([SessionRecord]().unresolvedCount, 0)
     }
 
+    func testWidgetSnapshotUsesRequestBeforeNotificationAndStatus() throws {
+        var record = session(id: "widget", expiresAt: 4_000)
+        record.title = "Release review"
+        record.status = "Building"
+        record.color = "#f2d7ee"
+        record.updatedAt = 1_000
+        record.notifications = [SessionNotification(id: "notice", message: "Build finished", createdAt: 2_000)]
+        record.request = SessionRequest(id: "request", prompt: "Deploy this build?", options: [], createdAt: 3_000)
+
+        let snapshot = try XCTUnwrap(WidgetSnapshotBuilder.make(from: [record]).sessions.first)
+        XCTAssertEqual(snapshot.title, "Release review")
+        XCTAssertEqual(snapshot.summary, "Deploy this build?")
+        XCTAssertEqual(snapshot.itemKind, .request)
+        XCTAssertEqual(snapshot.unresolvedCount, 2)
+        XCTAssertEqual(snapshot.updatedAt, 3_000)
+        XCTAssertEqual(snapshot.expiresAt, 4_000)
+    }
+
+    func testWidgetSnapshotJSONContainsOnlyPresentationFields() throws {
+        var record = session(id: "widget")
+        record.color = "#d6e4ff"
+        let data = try JSONEncoder().encode(WidgetSnapshotBuilder.make(from: [record]))
+        let root = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(Set(root.keys), ["sessions"])
+        let sessions = root["sessions"] as! [[String: Any]]
+        XCTAssertEqual(
+            Set(try XCTUnwrap(sessions.first).keys),
+            ["id", "title", "summary", "itemKind", "color", "unresolvedCount", "updatedAt", "expiresAt"]
+        )
+        XCTAssertNil(root["keys"])
+        XCTAssertNil(root["accessToken"])
+    }
+
+    func testWidgetSnapshotFiltersExpiredSessions() {
+        let snapshot = WidgetSnapshot(sessions: [
+            WidgetSessionSnapshot(
+                id: "expired", title: "Expired", summary: "Done", itemKind: .status, color: nil,
+                unresolvedCount: 0, updatedAt: 500, expiresAt: 1_000
+            ),
+            WidgetSessionSnapshot(
+                id: "active", title: "Active", summary: "Working", itemKind: .status, color: nil,
+                unresolvedCount: 0, updatedAt: 500, expiresAt: 1_001
+            ),
+        ])
+        XCTAssertEqual(snapshot.activeSessions(at: Date(timeIntervalSince1970: 1)).map(\.id), ["active"])
+    }
+
+    func testWidgetSnapshotStoreWritesOnlyWhenContentChanges() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        addTeardownBlock { try FileManager.default.removeItem(at: directory) }
+        let store = WidgetSnapshotStore(directoryURL: directory)
+        let snapshot = WidgetSnapshotBuilder.make(from: [session(id: "widget")])
+
+        XCTAssertTrue(try store.saveIfChanged(snapshot))
+        XCTAssertFalse(try store.saveIfChanged(snapshot))
+        XCTAssertEqual(try store.load(), snapshot)
+    }
+
     func testDetachingGroupRemovesOnlyItsV3Sessions() throws {
         var identity = try fixedIdentity()
         identity.group = DeviceGroup(groupID: "current-group", keys: [:])

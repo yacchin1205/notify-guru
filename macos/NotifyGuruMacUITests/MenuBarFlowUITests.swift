@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 final class MenuBarFlowUITests: XCTestCase {
@@ -92,6 +93,20 @@ final class MenuBarFlowUITests: XCTestCase {
         attachScreenshot(named: "06-device-group-window", app: app)
     }
 
+    func testSessionsWidgetLinkOpensSessionsWindow() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        XCTAssertTrue(app.menuBars.statusItems["notify.guru, 3 unresolved items"].waitForExistence(timeout: 5))
+        XCTAssertTrue(NSWorkspace.shared.open(try XCTUnwrap(URL(string: "notifyguru://sessions"))))
+
+        XCTAssertTrue(app.windows["Sessions"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.windows["Sessions"].staticTexts["UI improvement test"].exists)
+        XCTAssertTrue(app.windows["Sessions"].staticTexts["Continue the meeting?"].exists)
+        attachScreenshot(named: "07-widget-link-sessions-window", app: app)
+    }
+
     func testDeviceAdditionRequiresConfirmationAndCanBeCancelled() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-device-addition-approval"]
@@ -137,7 +152,7 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launchArguments = ["-ui-test-session-link"]
         app.launch()
 
-        let statusItem = app.menuBars.statusItems["notify.guru, no unresolved items"]
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
         app.buttons["Add Session"].click()
