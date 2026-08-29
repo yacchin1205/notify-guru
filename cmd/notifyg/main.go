@@ -30,11 +30,12 @@ func run() (runErr error) {
 	baseURL := flags.String("base-url", "https://notify.guru", "notify.guru service URL")
 	title := flags.String("title", "Development session", "interactive session title")
 	color := flags.String("color", "random", "session panel color: random or #rrggbb")
+	noTerminalQR := flags.Bool("no-terminal-qr", false, "do not draw the pairing QR code in the terminal; the QR image URL and pairing URL are still printed")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() > 1 {
-		return fmt.Errorf("usage: notifyg [--base-url URL] [--title TITLE] [--color random|#rrggbb] [mcp]")
+		return fmt.Errorf("usage: notifyg [--base-url URL] [--title TITLE] [--color random|#rrggbb] [--no-terminal-qr] [mcp]")
 	}
 
 	api, err := notify.NewAPI(*baseURL)
@@ -59,13 +60,25 @@ func run() (runErr error) {
 			}
 			return mcpserver.New(store, viewer).Run(ctx)
 		}
-		return interactive(ctx, store, viewer, *title, *color, os.Stdin, os.Stdout, os.Stderr)
+		terminalQR := !*noTerminalQR && isCharacterDevice(os.Stdout)
+		return interactive(ctx, store, viewer, *title, *color, terminalQR, os.Stdin, os.Stdout, os.Stderr)
 	}
 	err = supervise(ctx, viewer, operation)
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+// isCharacterDevice reports whether output goes to a terminal. A block-character
+// QR code depends on the cell geometry of a terminal, so it is only drawn when
+// notifyg writes to one; redirected output gets the URLs alone.
+func isCharacterDevice(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func supervise(ctx context.Context, viewer *notify.QRViewer, operation func(context.Context) error) error {
@@ -88,12 +101,8 @@ func supervise(ctx context.Context, viewer *notify.QRViewer, operation func(cont
 	}
 }
 
-func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, title, color string, input io.Reader, output, errorOutput io.Writer) error {
+func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, title, color string, terminalQR bool, input io.Reader, output, errorOutput io.Writer) error {
 	sessionID, pairingURL, err := store.Create(ctx, title, color)
-	if err != nil {
-		return err
-	}
-	qr, err := notify.QRCode(pairingURL)
 	if err != nil {
 		return err
 	}
@@ -101,7 +110,10 @@ func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRView
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Session: %s\n%s\n%s\nQR image: %s\n", sessionID, qr, pairingURL, imageURL)
+	fmt.Fprintf(output, "Session: %s\n", sessionID)
+	if err := writePairing(output, pairingURL, imageURL, terminalQR); err != nil {
+		return err
+	}
 	fmt.Fprintln(output, "Commands: join, pair, notify TEXT, status TEXT, color #rrggbb|random, request PROMPT | OPTION | OPTION, close-request REQUEST_ID, responses, close, quit")
 
 	scanner := bufio.NewScanner(input)
@@ -150,7 +162,7 @@ func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRView
 				continue
 			}
 			command, argument, _ := strings.Cut(line, " ")
-			exit, err := runCommand(ctx, store, viewer, sessionID, command, argument, &knownGroups, output, errorOutput)
+			exit, err := runCommand(ctx, store, viewer, sessionID, command, argument, &knownGroups, terminalQR, output, errorOutput)
 			if err != nil {
 				return err
 			}
@@ -162,7 +174,19 @@ func interactive(ctx context.Context, store *notify.Store, viewer *notify.QRView
 	}
 }
 
-func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, sessionID, command, argument string, knownGroups *int, output, errorOutput io.Writer) (bool, error) {
+func writePairing(output io.Writer, pairingURL, imageURL string, terminalQR bool) error {
+	if terminalQR {
+		qr, err := notify.QRCode(pairingURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "%s\n", qr)
+	}
+	fmt.Fprintf(output, "%s\nQR image: %s\n", pairingURL, imageURL)
+	return nil
+}
+
+func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewer, sessionID, command, argument string, knownGroups *int, terminalQR bool, output, errorOutput io.Writer) (bool, error) {
 	switch command {
 	case "join":
 		count, err := store.RefreshGroups(ctx, sessionID)
@@ -178,15 +202,13 @@ func runCommand(ctx context.Context, store *notify.Store, viewer *notify.QRViewe
 			fmt.Fprintln(errorOutput, err)
 			return false, nil
 		}
-		qr, err := notify.QRCode(url)
-		if err != nil {
-			return false, err
-		}
 		imageURL, err := viewer.Publish(url)
 		if err != nil {
 			return false, err
 		}
-		fmt.Fprintf(output, "%s\n%s\nQR image: %s\n", qr, url, imageURL)
+		if err := writePairing(output, url, imageURL, terminalQR); err != nil {
+			return false, err
+		}
 	case "notify":
 		itemID, err := store.SendNotify(ctx, sessionID, argument)
 		if err != nil {

@@ -51,6 +51,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	created := callTool[pairingToolOutput](t, ctx, clientSession, "session_create", map[string]any{
 		"title": "MCP integration",
 	})
+	assertNoTerminalQRCode(t, created)
 	assertQRImage(t, created.QRImageURL)
 	joined := joinFromPairingURL(t, ctx, api, created.PairingURL)
 
@@ -67,6 +68,7 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if additionalPairing.PairingURL == created.PairingURL {
 		t.Fatal("additional pairing reused the initial one-shot URL")
 	}
+	assertNoTerminalQRCode(t, additionalPairing)
 	assertQRImage(t, additionalPairing.QRImageURL)
 	secondGroup := joinFromPairingURL(t, ctx, api, additionalPairing.PairingURL)
 	waited = callTool[waitDeviceToolOutput](t, ctx, clientSession, "session_wait_for_device", map[string]any{
@@ -79,9 +81,12 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	callTool[deliveredToolOutput](t, ctx, clientSession, "status", map[string]any{
 		"session_id": created.SessionID, "status": "Testing MCP",
 	})
-	callTool[deliveredToolOutput](t, ctx, clientSession, "notify", map[string]any{
+	notified := callTool[notifiedToolOutput](t, ctx, clientSession, "notify", map[string]any{
 		"session_id": created.SessionID, "message": "Encrypted notification",
 	})
+	if notified.ItemID == "" {
+		t.Fatal("notify did not return the item ID used to identify a later dismissal")
+	}
 	requested := callTool[requestToolOutput](t, ctx, clientSession, "request", map[string]any{
 		"session_id": created.SessionID,
 		"prompt":     "Continue?",
@@ -135,6 +140,25 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected dismiss response: %+v", response)
 	}
 
+	// A device can write at any time and nothing pushes the message to the agent,
+	// so every send hands over what arrived before it.
+	feedbackID := postEncryptedFeedback(t, ctx, api, created.SessionID, "Anything else to check?", groups[0], eventsExpiry)
+	afterFeedback := callTool[deliveredToolOutput](t, ctx, clientSession, "status", map[string]any{
+		"session_id": created.SessionID, "status": "Draining device messages",
+	})
+	if len(afterFeedback.Responses) != 1 {
+		t.Fatalf("status handed over %d responses, want the 1 message written before it", len(afterFeedback.Responses))
+	}
+	if response := afterFeedback.Responses[0]; response.ID != feedbackID || response.Type != "feedback" || response.Message != "Anything else to check?" || response.GroupID != groups[0].GroupID {
+		t.Fatalf("unexpected feedback handed over by status: %+v", response)
+	}
+	drained := callTool[responsesToolOutput](t, ctx, clientSession, "responses_wait", map[string]any{
+		"session_id": created.SessionID, "timeout_seconds": 1,
+	})
+	if len(drained.Responses) != 0 {
+		t.Fatalf("responses_wait returned %d already handed over responses, want 0", len(drained.Responses))
+	}
+
 	closed := callTool[closeToolOutput](t, ctx, clientSession, "session_close", map[string]any{
 		"session_id": created.SessionID,
 	})
@@ -145,6 +169,13 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	var apiError *APIError
 	if !errors.As(err, &apiError) || apiError.Status != http.StatusNotFound {
 		t.Fatalf("fetch after close error = %v, want 404 API error", err)
+	}
+}
+
+func assertNoTerminalQRCode(t *testing.T, pairing pairingToolOutput) {
+	t.Helper()
+	if pairing.TerminalQRCode != "" {
+		t.Fatal("MCP pairing result carried a terminal QR code; only the loopback image URL and the pairing URL belong on the MCP surface")
 	}
 }
 
@@ -180,17 +211,52 @@ func postEncryptedRequestResult(
 	expectedExpiry int64,
 ) string {
 	t.Helper()
+	return postEncryptedResponse(t, ctx, api, sessionID, group, expectedExpiry, func(responseID string) decryptedResponse {
+		return decryptedResponse{
+			ID:        responseID,
+			Type:      responseType,
+			RequestID: requestID,
+			OptionID:  optionID,
+			CreatedAt: time.Now().UTC(),
+		}
+	})
+}
+
+func postEncryptedFeedback(
+	t *testing.T,
+	ctx context.Context,
+	api *API,
+	sessionID string,
+	message string,
+	group joinedDeviceGroup,
+	expectedExpiry int64,
+) string {
+	t.Helper()
+	return postEncryptedResponse(t, ctx, api, sessionID, group, expectedExpiry, func(responseID string) decryptedResponse {
+		return decryptedResponse{
+			ID:        responseID,
+			Type:      "feedback",
+			Message:   message,
+			CreatedAt: time.Now().UTC(),
+		}
+	})
+}
+
+func postEncryptedResponse(
+	t *testing.T,
+	ctx context.Context,
+	api *API,
+	sessionID string,
+	group joinedDeviceGroup,
+	expectedExpiry int64,
+	build func(responseID string) decryptedResponse,
+) string {
+	t.Helper()
 	responseID, err := randomValue(18)
 	if err != nil {
 		t.Fatal(err)
 	}
-	responseBody := decryptedResponse{
-		ID:        responseID,
-		Type:      responseType,
-		RequestID: requestID,
-		OptionID:  optionID,
-		CreatedAt: time.Now().UTC(),
-	}
+	responseBody := build(responseID)
 	nonce, ciphertext, err := encryptJSON(
 		group.Key,
 		responseAAD(sessionID, group.GroupID, responseID, group.Timestamp),
@@ -219,10 +285,13 @@ func postEncryptedRequestResult(
 }
 
 type pairingToolOutput struct {
-	SessionID  string `json:"session_id"`
-	PairingURL string `json:"pairing_url"`
-	QRCode     string `json:"qr_code"`
-	QRImageURL string `json:"qr_image_url"`
+	SessionID string `json:"session_id"`
+	// TerminalQRCode must stay empty: the MCP surface offers only the loopback
+	// image and the pairing URL, because an agent renders the result before a
+	// person sees it and no one can verify that a block-character QR survived.
+	TerminalQRCode string `json:"qr_code"`
+	PairingURL     string `json:"pairing_url"`
+	QRImageURL     string `json:"qr_image_url"`
 }
 
 type waitDeviceToolOutput struct {
@@ -230,12 +299,20 @@ type waitDeviceToolOutput struct {
 }
 
 type deliveredToolOutput struct {
-	Delivered bool `json:"delivered"`
+	Delivered bool       `json:"delivered"`
+	Responses []Response `json:"responses"`
+}
+
+type notifiedToolOutput struct {
+	Delivered bool       `json:"delivered"`
+	ItemID    string     `json:"item_id"`
+	Responses []Response `json:"responses"`
 }
 
 type requestToolOutput struct {
-	RequestID string   `json:"request_id"`
-	Choices   []Choice `json:"choices"`
+	RequestID string     `json:"request_id"`
+	Choices   []Choice   `json:"choices"`
+	Responses []Response `json:"responses"`
 }
 
 type responsesToolOutput struct {
@@ -243,7 +320,8 @@ type responsesToolOutput struct {
 }
 
 type closeToolOutput struct {
-	Closed bool `json:"closed"`
+	Closed    bool       `json:"closed"`
+	Responses []Response `json:"responses"`
 }
 
 type joinedDeviceGroup struct {

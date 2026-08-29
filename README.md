@@ -28,6 +28,8 @@ notifyg --title "Deployment"
 
 The CLI prints a terminal QR code, its pairing URL, and a `QR image` URL such as `http://127.0.0.1:49152/qr/...`. Open the local URL in a browser to display a full-size QR image without creating a file, then scan it with the receiving device. The CLI reports when a new device group starts receiving the session.
 
+The terminal QR code depends on the cell geometry of a terminal, so it is drawn only when `notifyg` writes to one; redirected or piped output gets the two URLs alone. Pass `--no-terminal-qr` to suppress it on a terminal as well, when the block characters are noise, when the terminal is too narrow to render them, or when the screen is being shared or recorded. The pairing URL is still printed either way and remains a temporary secret.
+
 Session cards use a randomly selected pastel color by default. Pass `--color '#a1b2c3'` to choose an exact color at startup.
 
 The PWA and iOS app prepare a single-device cryptographic group automatically. To receive the same notifications on another device, open device management, create a 10-minute invitation, scan it on the other device, compare the six-digit code, and approve it on the inviting device. Invitation QR codes and links disappear as soon as approval is pending. A device can stop sharing only while two or more devices are connected; it then returns automatically to single-device use. Different people should join the Agent session as separate device groups instead of sharing one group.
@@ -83,9 +85,13 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions. `session_create` and `session_pairing_create` return `qr_image_url` in addition to the terminal QR code and pairing URL. One MCP process can manage multiple independent notification sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions. One MCP process can manage multiple independent notification sessions.
 
-The image URL is reachable only from the same machine as the `notifyg` process. When MCP runs in a container, on a remote host, or across SSH without port forwarding, use the terminal QR code or pairing URL instead.
+Nothing pushes a response to the agent, so every send also hands over the responses received before it: `status`, `notify`, `session_color`, `request`, and `request_close` return them alongside their own result. Each response is handed over once, whether by a send or by `responses_wait`.
+
+`session_create` and `session_pairing_create` return `qr_image_url` and `pairing_url`. They do not return a terminal QR code: an MCP result is rendered by an agent before a person sees it, and neither `notifyg` nor the agent can check that block characters survived that rendering intact. Ask the person to open `qr_image_url` in a browser.
+
+The image URL is reachable only from the same machine as the `notifyg` process. When MCP runs in a container, on a remote host, or across SSH without port forwarding, use the pairing URL instead.
 
 ## Security notes
 

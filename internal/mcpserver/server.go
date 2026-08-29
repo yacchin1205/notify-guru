@@ -10,7 +10,7 @@ import (
 	"notify.guru/internal/notify"
 )
 
-const instructions = "Create a notify.guru session for each agent task the user wants to follow. Show the returned local QR image URL when the browser runs on the same machine as notifyg; otherwise show the terminal QR code or pairing URL. Then wait for a device before sending events. Send status and notifications as work changes. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
+const instructions = "Create a notify.guru session for each agent task the user wants to follow. Ask the user to open the returned local QR image URL in a browser when the browser runs on the same machine as notifyg; otherwise give them the pairing URL. Do not claim a device is paired until session_wait_for_device confirms it, and do not send events before that. Send status and notifications as work changes. Every send result may carry responses from devices, including messages the user wrote without being asked; read that field every time, because responses are handed over once and nothing else will surface them. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
 
 type Server struct {
 	store  *notify.Store
@@ -32,11 +32,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_create",
-		Description: "Create an ephemeral notification session and return the QR code used by a device group to join it.",
+		Description: "Create an ephemeral notification session and return the loopback QR image URL and pairing URL used by a device group to join it.",
 	}, s.create)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_pairing_create",
-		Description: "Create another one-shot pairing QR code so an additional device group can join an existing session.",
+		Description: "Create another one-shot pairing so an additional device group can join an existing session.",
 	}, s.addPairing)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_wait_for_device",
@@ -44,31 +44,31 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.waitForDevice)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "notify",
-		Description: "Send an encrypted notification to every device group joined to a session.",
+		Description: "Send an encrypted notification to every device group joined to a session. The result also hands over any responses received so far.",
 	}, s.notify)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "status",
-		Description: "Update the encrypted current status shown on a session card without showing an OS notification.",
+		Description: "Update the encrypted current status shown on a session card without showing an OS notification. The result also hands over any responses received so far.",
 	}, s.status)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_color",
-		Description: "Change the encrypted #rrggbb color of a session card, or choose another random pastel color.",
+		Description: "Change the encrypted #rrggbb color of a session card, or choose another random pastel color. The result also hands over any responses received so far.",
 	}, s.color)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "request",
-		Description: "Send an encrypted question with two or more choices to every joined device group.",
+		Description: "Send an encrypted question with two or more choices to every joined device group. The result also hands over any responses received before the question.",
 	}, s.request)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "request_close",
-		Description: "End an open request on every joined device group.",
+		Description: "End an open request on every joined device group. The result also hands over any responses received so far.",
 	}, s.closeRequest)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "responses_wait",
-		Description: "Wait for and return every newly received encrypted choice, dismissal, or message. The agent decides how to interpret them.",
+		Description: "Wait for and return every encrypted choice, dismissal, or message not yet handed over. The agent decides how to interpret them.",
 	}, s.waitResponses)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_close",
-		Description: "Immediately close a session and remove its card from devices. Do not call this for ordinary process exit.",
+		Description: "Immediately close a session and remove its card from devices, handing over any unread responses. Do not call this for ordinary process exit.",
 	}, s.close)
 
 	return server.Run(ctx, &mcp.StdioTransport{})
@@ -79,10 +79,14 @@ type createInput struct {
 	Color string `json:"color,omitempty" jsonschema:"optional panel color as #rrggbb; omit or use random to select from the pastel palette"`
 }
 
+// pairingOutput deliberately omits the terminal QR code. The MCP result passes
+// through an agent's rendering before a person sees it, and neither notifyg nor
+// the agent can inspect the result, so a block-character QR cannot be trusted to
+// stay scannable. Callers show the loopback image, or the pairing URL when the
+// browser is not on this machine.
 type pairingOutput struct {
 	SessionID  string `json:"session_id"`
 	PairingURL string `json:"pairing_url"`
-	QRCode     string `json:"qr_code"`
 	QRImageURL string `json:"qr_image_url"`
 }
 
@@ -91,15 +95,11 @@ func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input creat
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	qr, err := notify.QRCode(pairingURL)
-	if err != nil {
-		return nil, pairingOutput{}, err
-	}
 	imageURL, err := s.viewer.Publish(pairingURL)
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	return nil, pairingOutput{SessionID: sessionID, PairingURL: pairingURL, QRCode: qr, QRImageURL: imageURL}, nil
+	return nil, pairingOutput{SessionID: sessionID, PairingURL: pairingURL, QRImageURL: imageURL}, nil
 }
 
 type sessionInput struct {
@@ -111,15 +111,11 @@ func (s *Server) addPairing(ctx context.Context, _ *mcp.CallToolRequest, input s
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	qr, err := notify.QRCode(pairingURL)
-	if err != nil {
-		return nil, pairingOutput{}, err
-	}
 	imageURL, err := s.viewer.Publish(pairingURL)
 	if err != nil {
 		return nil, pairingOutput{}, err
 	}
-	return nil, pairingOutput{SessionID: input.SessionID, PairingURL: pairingURL, QRCode: qr, QRImageURL: imageURL}, nil
+	return nil, pairingOutput{SessionID: input.SessionID, PairingURL: pairingURL, QRImageURL: imageURL}, nil
 }
 
 type waitInput struct {
@@ -149,12 +145,14 @@ type messageInput struct {
 }
 
 type deliveredOutput struct {
-	Delivered bool `json:"delivered"`
+	Delivered bool              `json:"delivered"`
+	Responses []notify.Response `json:"responses,omitempty"`
 }
 
 type notifiedOutput struct {
-	Delivered bool   `json:"delivered"`
-	ItemID    string `json:"item_id"`
+	Delivered bool              `json:"delivered"`
+	ItemID    string            `json:"item_id"`
+	Responses []notify.Response `json:"responses,omitempty"`
 }
 
 func (s *Server) notify(ctx context.Context, _ *mcp.CallToolRequest, input messageInput) (*mcp.CallToolResult, notifiedOutput, error) {
@@ -162,7 +160,7 @@ func (s *Server) notify(ctx context.Context, _ *mcp.CallToolRequest, input messa
 	if err != nil {
 		return nil, notifiedOutput{}, err
 	}
-	return nil, notifiedOutput{Delivered: true, ItemID: itemID}, nil
+	return nil, notifiedOutput{Delivered: true, ItemID: itemID, Responses: s.drainResponses(ctx, input.SessionID)}, nil
 }
 
 type statusInput struct {
@@ -174,7 +172,7 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, input statu
 	if err := s.store.SendStatus(ctx, input.SessionID, input.Status); err != nil {
 		return nil, deliveredOutput{}, err
 	}
-	return nil, deliveredOutput{Delivered: true}, nil
+	return nil, deliveredOutput{Delivered: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
 }
 
 type colorInput struct {
@@ -186,7 +184,7 @@ func (s *Server) color(ctx context.Context, _ *mcp.CallToolRequest, input colorI
 	if err := s.store.SetColor(ctx, input.SessionID, input.Color); err != nil {
 		return nil, deliveredOutput{}, err
 	}
-	return nil, deliveredOutput{Delivered: true}, nil
+	return nil, deliveredOutput{Delivered: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
 }
 
 type requestInput struct {
@@ -196,8 +194,9 @@ type requestInput struct {
 }
 
 type requestOutput struct {
-	RequestID string          `json:"request_id"`
-	Choices   []notify.Choice `json:"choices"`
+	RequestID string            `json:"request_id"`
+	Choices   []notify.Choice   `json:"choices"`
+	Responses []notify.Response `json:"responses,omitempty"`
 }
 
 func (s *Server) request(ctx context.Context, _ *mcp.CallToolRequest, input requestInput) (*mcp.CallToolResult, requestOutput, error) {
@@ -205,7 +204,7 @@ func (s *Server) request(ctx context.Context, _ *mcp.CallToolRequest, input requ
 	if err != nil {
 		return nil, requestOutput{}, err
 	}
-	return nil, requestOutput{RequestID: requestID, Choices: choices}, nil
+	return nil, requestOutput{RequestID: requestID, Choices: choices, Responses: s.drainResponses(ctx, input.SessionID)}, nil
 }
 
 type closeRequestInput struct {
@@ -217,7 +216,7 @@ func (s *Server) closeRequest(ctx context.Context, _ *mcp.CallToolRequest, input
 	if err := s.store.CloseRequest(ctx, input.SessionID, input.RequestID); err != nil {
 		return nil, closeOutput{}, err
 	}
-	return nil, closeOutput{Closed: true}, nil
+	return nil, closeOutput{Closed: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
 }
 
 type responsesOutput struct {
@@ -237,14 +236,36 @@ func (s *Server) waitResponses(ctx context.Context, _ *mcp.CallToolRequest, inpu
 }
 
 type closeOutput struct {
-	Closed bool `json:"closed"`
+	Closed    bool              `json:"closed"`
+	Responses []notify.Response `json:"responses,omitempty"`
 }
 
 func (s *Server) close(ctx context.Context, _ *mcp.CallToolRequest, input sessionInput) (*mcp.CallToolResult, closeOutput, error) {
+	// Closing discards whatever the session still holds, so hand over unread
+	// responses first rather than dropping a device message silently.
+	responses := s.drainResponses(ctx, input.SessionID)
 	if err := s.store.Close(ctx, input.SessionID); err != nil {
 		return nil, closeOutput{}, err
 	}
-	return nil, closeOutput{Closed: true}, nil
+	return nil, closeOutput{Closed: true, Responses: responses}, nil
+}
+
+// drainResponses returns the responses received before this call so that a
+// choice, dismissal, or device message cannot sit unseen until the agent happens
+// to wait for one. Nothing pushes a response to the agent, and an agent that is
+// working rather than waiting would otherwise never look.
+//
+// The send has already taken effect by the time this runs, so a failure here
+// must not become a tool error: that would invite the caller to send again and
+// deliver the event twice. responses_wait remains the path that reports such a
+// failure. Responses are handed over once, so a caller that ignores this field
+// will not see them again.
+func (s *Server) drainResponses(ctx context.Context, sessionID string) []notify.Response {
+	responses, err := s.store.Responses(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	return responses
 }
 
 func timeoutDuration(seconds int) (time.Duration, error) {
