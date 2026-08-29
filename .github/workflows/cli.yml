@@ -23,10 +23,33 @@ jobs:
           cache-dependency-path: go.sum
       - run: go test ./...
       - run: go vet ./...
+      - run: go vet -tags integration ./...
+
+  integration:
+    runs-on: ubuntu-24.04
+    env:
+      NOTIFY_INTEGRATION_BASE_URL: http://127.0.0.1:8787
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: npm ci
+      # The MCP round trip needs a running relay, so the worker runs locally.
+      # Address it as 127.0.0.1: wrangler answers localhost with a redirect loop.
+      - name: Start the local worker
+        run: |
+          npm run dev -- --ip 127.0.0.1 --port 8787 > wrangler.log 2>&1 &
+          curl -sSf --retry 60 --retry-delay 2 --retry-all-errors --retry-connrefused "$NOTIFY_INTEGRATION_BASE_URL/api/health"
+      - run: go test -tags integration ./internal/notify
+      - if: always()
+        run: cat wrangler.log
 
   snapshot:
     if: github.ref_type != 'tag'
-    needs: verify
+    needs: [verify, integration]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -55,7 +78,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: verify
+    needs: [verify, integration]
     permissions:
       contents: write
     runs-on: ubuntu-24.04
