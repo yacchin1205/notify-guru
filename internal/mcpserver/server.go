@@ -10,7 +10,7 @@ import (
 	"notify.guru/internal/notify"
 )
 
-const instructions = "Create a notify.guru session for each agent task the user wants to follow. Ask the user to open the returned local QR image URL in a browser when the browser runs on the same machine as notifyg; otherwise give them the pairing URL. Do not claim a device is paired until session_wait_for_device confirms it, and do not send events before that. Send status and notifications as work changes. Every send result may carry responses from devices, including messages the user wrote without being asked; read that field every time, because responses are handed over once and nothing else will surface them. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
+const instructions = "Call session_create for the work the user wants to follow; it returns the session this process is already running when there is one, so an agent never manages more than one session and never asks for a second QR code. Add a device with session_pairing_create, and start a separate session only by closing the running one first, at the user's request. Ask the user to open the returned local QR image URL in a browser when the browser runs on the same machine as notifyg; otherwise give them the pairing URL. Do not claim a device is paired until session_wait_for_device confirms it, and do not send events before that. Send status and notifications as work changes. Every send result may carry responses from devices, including messages the user wrote without being asked; read that field every time, because responses are handed over once and nothing else will surface them. A request may have multiple choices. Forward every response to the agent; notify.guru does not select or aggregate responses. Close a session only when immediate removal is intended; normal process exit leaves it to expire."
 
 type Server struct {
 	store  *notify.Store
@@ -32,11 +32,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_create",
-		Description: "Create an ephemeral notification session and return the loopback QR image URL and pairing URL used by a device group to join it.",
+		Description: "Return the session this process is already running, or create one when there is none. A session identifies the agent, so do not expect a second one: to start a separate session, close the running one first. The pairing URL and QR image URL are returned only while no device group has joined yet.",
 	}, s.create)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_pairing_create",
-		Description: "Create another one-shot pairing so an additional device group can join an existing session.",
+		Description: "Create another one-shot pairing so an additional device group can join an existing session. Use this to add a device rather than closing and recreating the session.",
 	}, s.addPairing)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_wait_for_device",
@@ -68,10 +68,23 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.waitResponses)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_close",
-		Description: "Immediately close a session and remove its card from devices, handing over any unread responses. Do not call this for ordinary process exit.",
+		Description: "Immediately close a session and remove its card from devices, handing over any unread responses. Call it when the user asks for a separate session, since session_create otherwise returns the running one. Do not call this for ordinary process exit.",
 	}, s.close)
 
 	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+// sessionOutput reports whether the caller got a new session or the one this
+// process was already running, so an agent asked to notify does not start a
+// second card for work the person is already following. The pairing fields are
+// absent once a device group has joined: nothing needs to be scanned then.
+type sessionOutput struct {
+	SessionID        string `json:"session_id"`
+	Title            string `json:"title"`
+	Reused           bool   `json:"reused"`
+	DeviceGroupCount int    `json:"device_group_count"`
+	PairingURL       string `json:"pairing_url,omitempty"`
+	QRImageURL       string `json:"qr_image_url,omitempty"`
 }
 
 type createInput struct {
@@ -90,16 +103,26 @@ type pairingOutput struct {
 	QRImageURL string `json:"qr_image_url"`
 }
 
-func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input createInput) (*mcp.CallToolResult, pairingOutput, error) {
-	sessionID, pairingURL, err := s.store.Create(ctx, input.Title, input.Color)
+func (s *Server) create(ctx context.Context, _ *mcp.CallToolRequest, input createInput) (*mcp.CallToolResult, sessionOutput, error) {
+	state, err := s.store.EnsureSession(ctx, input.Title, input.Color)
 	if err != nil {
-		return nil, pairingOutput{}, err
+		return nil, sessionOutput{}, err
 	}
-	imageURL, err := s.viewer.Publish(pairingURL)
-	if err != nil {
-		return nil, pairingOutput{}, err
+	output := sessionOutput{
+		SessionID:        state.SessionID,
+		Title:            state.Title,
+		Reused:           state.Reused,
+		DeviceGroupCount: state.DeviceGroupCount,
+		PairingURL:       state.PairingURL,
 	}
-	return nil, pairingOutput{SessionID: sessionID, PairingURL: pairingURL, QRImageURL: imageURL}, nil
+	if state.PairingURL != "" {
+		imageURL, err := s.viewer.Publish(state.PairingURL)
+		if err != nil {
+			return nil, sessionOutput{}, err
+		}
+		output.QRImageURL = imageURL
+	}
+	return nil, output, nil
 }
 
 type sessionInput struct {

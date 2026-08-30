@@ -91,6 +91,100 @@ func (s *Store) Create(ctx context.Context, title, color string) (sessionID, pai
 	return sessionID, s.api.JoinURL(sessionID, pairing, publicKey, color), nil
 }
 
+// SessionState describes the session this process manages. PairingURL is empty
+// when a device group has already joined and no one needs to scan anything.
+type SessionState struct {
+	SessionID        string
+	Title            string
+	Reused           bool
+	DeviceGroupCount int
+	PairingURL       string
+}
+
+// EnsureSession returns the session this process already manages and creates one
+// only when there is none. A session identifies the agent, so creating a second
+// one for work the person is already following would give them a second card and
+// another QR code to scan for no gain. A session the relay no longer knows about
+// is dropped and replaced.
+func (s *Store) EnsureSession(ctx context.Context, title, color string) (SessionState, error) {
+	existing := s.anySessionID()
+	if existing != "" {
+		state, err := s.reuse(ctx, existing)
+		if err == nil {
+			return state, nil
+		}
+		if !isMissingSession(err) {
+			return SessionState{}, err
+		}
+		s.mu.Lock()
+		delete(s.sessions, existing)
+		s.mu.Unlock()
+	}
+	sessionID, pairingURL, err := s.Create(ctx, title, color)
+	if err != nil {
+		return SessionState{}, err
+	}
+	return SessionState{SessionID: sessionID, Title: title, PairingURL: pairingURL}, nil
+}
+
+func (s *Store) anySessionID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for id := range s.sessions {
+		return id
+	}
+	return ""
+}
+
+func (s *Store) reuse(ctx context.Context, sessionID string) (SessionState, error) {
+	count, err := s.RefreshGroups(ctx, sessionID)
+	if err != nil {
+		return SessionState{}, err
+	}
+	session, err := s.session(sessionID)
+	if err != nil {
+		return SessionState{}, err
+	}
+	state := SessionState{SessionID: sessionID, Reused: true, DeviceGroupCount: count}
+	session.mu.Lock()
+	state.Title = session.title
+	unused := unusedPairing(session)
+	session.mu.Unlock()
+	if count > 0 {
+		return state, nil
+	}
+	if unused.ID != "" {
+		state.PairingURL = s.api.JoinURL(sessionID, unused, session.publicKey, session.color)
+		return state, nil
+	}
+	pairingURL, err := s.AddPairing(ctx, sessionID)
+	if err != nil {
+		return SessionState{}, err
+	}
+	state.PairingURL = pairingURL
+	return state, nil
+}
+
+// unusedPairing returns a pairing no device group has consumed, so that reusing a
+// session nobody joined yet does not mint another one-shot secret.
+func unusedPairing(session *managedSession) Pairing {
+	consumed := make(map[string]struct{}, len(session.groups))
+	for _, group := range session.groups {
+		consumed[group.PairingID] = struct{}{}
+	}
+	for id, pairing := range session.pairings {
+		if _, used := consumed[id]; !used {
+			return pairing
+		}
+	}
+	return Pairing{}
+}
+
+func isMissingSession(err error) bool {
+	var apiError *APIError
+	return errors.As(err, &apiError) && apiError.Status == 404
+}
+
 func (s *Store) AddPairing(ctx context.Context, sessionID string) (string, error) {
 	session, err := s.session(sessionID)
 	if err != nil {

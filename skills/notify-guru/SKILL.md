@@ -17,7 +17,8 @@ memory — they are not recoverable and not stored anywhere else.
 ## Standard flow
 
 ```
-session_create           -> session_id, qr_image_url, pairing_url
+session_create           -> session_id (+ pairing fields only if nobody joined)
+  (returns the running session with reused: true when there is one)
   (get the QR in front of the person — see below)
 session_wait_for_device  -> wait for a device group to join
 status / notify / request
@@ -25,6 +26,28 @@ responses_wait           -> every response, unaggregated
 request_close            -> after you have acted on a request
   (do NOT call session_close on normal exit)
 ```
+
+**One session identifies this agent.** A session covers the work the person is
+following, not one request and not one notification. "Notify me" while a session
+is open is an instruction to send, not to start over.
+
+`session_create` enforces this: when this process already has a session, it
+hands that one back with `reused: true`, its `device_group_count`, and its
+original title, and it omits the pairing fields entirely once a device group has
+joined — there is nothing left to scan. So calling it when you have lost track
+of the `session_id` is safe and is how you recover one.
+
+Two things that are not a new session:
+
+- **Another device or another person.** Use `session_pairing_create` for an
+  additional device group on the same session.
+- **A later phase of the same work.** Send `status`.
+
+A genuinely separate session — the person moved to a different device group and
+wants a clean card, or the work is unrelated — takes an explicit
+`session_close` first, at the user's request. Do not close on your own judgment
+to get a fresh session: closing removes the card from their device immediately,
+including anything they have not read.
 
 ## 1. Pairing: you do not display the QR code — the browser does
 
@@ -103,6 +126,11 @@ The person's decision is required to continue   -> request
 The task came back to the person's hands        -> notify
 Everything else                                 -> status
 ```
+
+Write every one of them in the language the person is speaking to you. A title,
+a status line, a notification, and a question are read by them, not by you. The
+examples in this file are English because the file is — that is not an
+instruction about what you send.
 
 A send that reports `delivered: true` (or `closed: true` — `request` reports
 neither, only its `request_id` and `choices`) means the relay accepted the
@@ -253,7 +281,7 @@ notify-guru repository.
 
 | Tool | Notes |
 |---|---|
-| `session_create` | `title` ≤ 200 bytes. `color` is `#rrggbb` or omitted for a random pastel |
+| `session_create` | Returns the running session if there is one. `title` ≤ 200 bytes, and is ignored on reuse. `color` is `#rrggbb` or omitted for a random pastel |
 | `session_pairing_create` | A new one-shot pairing for an additional device group |
 | `session_wait_for_device` | `timeout_seconds` 1–600. Returns `device_group_count` |
 | `status` | ≤ 10,000 bytes. Silent, overwrites |
@@ -291,4 +319,6 @@ closed, so do not close defensively.
 - Picking one response out of several device groups and not saying you did.
 - Ignoring the `responses` a send hands back, so a message goes unread.
 - Leaving a request open after acting on it.
-- `session_close` on normal exit.
+- Writing the card in a language the person does not use with you.
+- `session_close` on normal exit, or to force a fresh session for yourself.
+- Starting a second session for work the person is already following.

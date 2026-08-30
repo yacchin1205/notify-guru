@@ -85,7 +85,9 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions. One MCP process can manage multiple independent notification sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions.
+
+A session identifies the agent, so one MCP process runs one session: `session_create` returns the session already running instead of starting another, and omits the pairing fields once a device group has joined. Add a device group with `session_pairing_create`; start a separate session by closing the running one first.
 
 Nothing pushes a response to the agent, so every send also hands over the responses received before it: `status`, `notify`, `session_color`, `request`, and `request_close` return them alongside their own result. Each response is handed over once, whether by a send or by `responses_wait`.
 

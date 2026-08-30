@@ -48,10 +48,13 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		}
 	})
 
-	created := callTool[pairingToolOutput](t, ctx, clientSession, "session_create", map[string]any{
+	created := callTool[sessionToolOutput](t, ctx, clientSession, "session_create", map[string]any{
 		"title": "MCP integration",
 	})
-	assertNoTerminalQRCode(t, created)
+	if created.Reused || created.DeviceGroupCount != 0 || created.PairingURL == "" {
+		t.Fatalf("first session_create should have created an unjoined session: %+v", created)
+	}
+	assertNoTerminalQRCode(t, created.TerminalQRCode)
 	assertQRImage(t, created.QRImageURL)
 	joined := joinFromPairingURL(t, ctx, api, created.PairingURL)
 
@@ -62,13 +65,28 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		t.Fatalf("device group count = %d, want 1", waited.DeviceGroupCount)
 	}
 
+	// A session identifies the agent, so asking again must hand back the running
+	// one with nothing left to scan rather than starting a second card.
+	again := callTool[sessionToolOutput](t, ctx, clientSession, "session_create", map[string]any{
+		"title": "A different title",
+	})
+	if !again.Reused || again.SessionID != created.SessionID {
+		t.Fatalf("second session_create did not reuse the running session: %+v", again)
+	}
+	if again.PairingURL != "" || again.QRImageURL != "" {
+		t.Fatalf("reused session offered a pairing although a device group had joined: %+v", again)
+	}
+	if again.Title != "MCP integration" || again.DeviceGroupCount != 1 {
+		t.Fatalf("reused session reported the wrong identity: %+v", again)
+	}
+
 	additionalPairing := callTool[pairingToolOutput](t, ctx, clientSession, "session_pairing_create", map[string]any{
 		"session_id": created.SessionID,
 	})
 	if additionalPairing.PairingURL == created.PairingURL {
 		t.Fatal("additional pairing reused the initial one-shot URL")
 	}
-	assertNoTerminalQRCode(t, additionalPairing)
+	assertNoTerminalQRCode(t, additionalPairing.TerminalQRCode)
 	assertQRImage(t, additionalPairing.QRImageURL)
 	secondGroup := joinFromPairingURL(t, ctx, api, additionalPairing.PairingURL)
 	waited = callTool[waitDeviceToolOutput](t, ctx, clientSession, "session_wait_for_device", map[string]any{
@@ -170,11 +188,20 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if !errors.As(err, &apiError) || apiError.Status != http.StatusNotFound {
 		t.Fatalf("fetch after close error = %v, want 404 API error", err)
 	}
+
+	// Closing is how the user asks for a separate session, so the next create
+	// must start a fresh one rather than hand back the closed identity.
+	replacement := callTool[sessionToolOutput](t, ctx, clientSession, "session_create", map[string]any{
+		"title": "After the close",
+	})
+	if replacement.Reused || replacement.SessionID == created.SessionID || replacement.PairingURL == "" {
+		t.Fatalf("session_create after a close did not start a separate session: %+v", replacement)
+	}
 }
 
-func assertNoTerminalQRCode(t *testing.T, pairing pairingToolOutput) {
+func assertNoTerminalQRCode(t *testing.T, terminalQRCode string) {
 	t.Helper()
-	if pairing.TerminalQRCode != "" {
+	if terminalQRCode != "" {
 		t.Fatal("MCP pairing result carried a terminal QR code; only the loopback image URL and the pairing URL belong on the MCP surface")
 	}
 }
@@ -282,6 +309,16 @@ func postEncryptedResponse(
 		t.Fatal("response unexpectedly changed the session lifetime")
 	}
 	return responseID
+}
+
+type sessionToolOutput struct {
+	SessionID        string `json:"session_id"`
+	Title            string `json:"title"`
+	Reused           bool   `json:"reused"`
+	DeviceGroupCount int    `json:"device_group_count"`
+	TerminalQRCode   string `json:"qr_code"`
+	PairingURL       string `json:"pairing_url"`
+	QRImageURL       string `json:"qr_image_url"`
 }
 
 type pairingToolOutput struct {
