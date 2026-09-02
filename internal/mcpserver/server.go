@@ -48,7 +48,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.notify)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "status",
-		Description: "Update the encrypted current status shown on a session card without showing an OS notification. The result also hands over any responses received so far.",
+		Description: "Update the encrypted current status shown on a session card. Silent by default; a device that turned on attention for the session gets an OS alert. The result also hands over any responses received so far.",
 	}, s.status)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_color",

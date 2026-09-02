@@ -46,6 +46,46 @@ final class MenuBarFlowUITests: XCTestCase {
         attachScreenshot(named: "04-all-cleared", app: app)
     }
 
+    func testSessionSyncErrorStaysOnTheCard() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-session-sync-error"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Invalid server response: object fields do not match the protocol"].exists)
+        XCTAssertFalse(app.staticTexts["error-message"].exists)
+        attachScreenshot(named: "07-session-sync-error-on-card", app: app)
+    }
+
+    func testContextMenuAndLongPressToggleStatusAttention() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        let title = app.staticTexts["UI improvement test"]
+        let watching = app.images["Watching Status Updates"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertFalse(watching.exists)
+
+        title.rightClick()
+        let watch = app.menuItems["Watch Status Updates"]
+        XCTAssertTrue(watch.waitForExistence(timeout: 5))
+        watch.click()
+        XCTAssertTrue(watching.waitForExistence(timeout: 5))
+        attachScreenshot(named: "05-attention-on", app: app)
+
+        title.press(forDuration: 1)
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: watching)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 5), .completed)
+        attachScreenshot(named: "06-attention-off", app: app)
+    }
+
     func testDismissErrorKeepsRequestVisible() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-session-history", "-ui-test-dismiss-error"]

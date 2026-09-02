@@ -136,6 +136,7 @@ struct SessionRecord: Equatable, Identifiable {
     var color: String?
     var updatedAt: Int64?
     var expiresAt: Int64
+    var attention: Bool = false
 
     var unresolvedCount: Int { notifications.count + (request == nil ? 0 : 1) }
     var unresolvedAccessibilityLabel: String {
@@ -160,7 +161,7 @@ enum RelativeTime {
 extension SessionRecord: Codable {
     private enum CodingKeys: String, CodingKey {
         case protocolVersion, sessionID, groupID, creatorPublicKey, keys, cursor, title, status
-        case notification, notifications, request, requestKeyTimestamp, color, updatedAt, expiresAt
+        case notification, notifications, request, requestKeyTimestamp, color, updatedAt, expiresAt, attention
     }
 
     init(from decoder: Decoder) throws {
@@ -184,6 +185,7 @@ extension SessionRecord: Codable {
         color = try values.decodeIfPresent(String.self, forKey: .color)
         updatedAt = try values.decodeIfPresent(Int64.self, forKey: .updatedAt)
         expiresAt = try values.decode(Int64.self, forKey: .expiresAt)
+        attention = try values.decodeIfPresent(Bool.self, forKey: .attention) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -202,6 +204,7 @@ extension SessionRecord: Codable {
         try values.encodeIfPresent(color, forKey: .color)
         try values.encodeIfPresent(updatedAt, forKey: .updatedAt)
         try values.encode(expiresAt, forKey: .expiresAt)
+        try values.encode(attention, forKey: .attention)
     }
 }
 

@@ -11,7 +11,7 @@ struct EventEnvelope: Equatable {
     let createdAt: Int64
 }
 
-struct EventsResult: Equatable { let events: [EventEnvelope]; let activeItemIDs: [String]; let expiresAt: Int64 }
+struct EventsResult: Equatable { let events: [EventEnvelope]; let activeItemIDs: [String]; let attention: Bool; let expiresAt: Int64 }
 
 enum DeviceRequestStatus: Equatable {
     case waiting(expiresAt: Int64)
@@ -199,10 +199,11 @@ struct APIClient {
 
     func events(for record: SessionRecord, identity: DeviceIdentity) async throws -> EventsResult {
         let path = pathWithQuery("/api/sessions/\(record.sessionID)/events", [
-            "groupId": record.groupID, "deviceId": identity.deviceID, "after": String(record.cursor), "includeActive": "1",
+            "groupId": record.groupID, "deviceId": identity.deviceID, "after": String(record.cursor),
+            "includeActive": "1", "includeAttention": "1",
         ])
         let data = try await request(method: "GET", path: path, token: identity.accessToken, body: nil, expectedStatus: 200)
-        let fields = try object(data, keys: ["events", "activeItemIds", "expiresAt"])
+        let fields = try object(data, keys: ["events", "activeItemIds", "attention", "expiresAt"])
         guard let eventObjects = fields["events"] as? [[String: Any]] else { throw ProtocolError.invalidResponse("events must be objects") }
         let events = try eventObjects.map { event in
             try requireKeys(event, ["sequence", "eventId", "itemId", "groupId", "keyTimestamp", "nonce", "ciphertext", "createdAt"])
@@ -221,7 +222,21 @@ struct APIClient {
         guard let activeItemIDs = fields["activeItemIds"] as? [String] else {
             throw ProtocolError.invalidResponse("activeItemIds must be strings")
         }
-        return EventsResult(events: events, activeItemIDs: activeItemIDs, expiresAt: try integer(fields, "expiresAt"))
+        guard let attention = fields["attention"] as? Bool else {
+            throw ProtocolError.invalidResponse("attention must be a boolean")
+        }
+        return EventsResult(events: events, activeItemIDs: activeItemIDs, attention: attention, expiresAt: try integer(fields, "expiresAt"))
+    }
+
+    func setAttention(session record: SessionRecord, identity: DeviceIdentity, attention: Bool) async throws {
+        let data = try await request(
+            method: "PUT", path: "/api/sessions/\(record.sessionID)/attention", token: identity.accessToken,
+            body: try encode(["groupId": record.groupID, "deviceId": identity.deviceID, "attention": attention]),
+            expectedStatus: 200
+        )
+        guard try object(data, keys: ["attention", "expiresAt"])["attention"] as? Bool == attention else {
+            throw ProtocolError.invalidResponse("attention change was not confirmed")
+        }
     }
 
     func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, payload: EncryptedPayload) async throws -> Int64 {

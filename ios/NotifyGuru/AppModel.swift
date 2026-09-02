@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var canResetLocalData = false
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
+    @Published private(set) var sessionSyncErrors: [String: String] = [:]
 
     private let keychain = KeychainVault()
     private let api = APIClient()
@@ -361,6 +362,26 @@ final class AppModel: ObservableObject {
         } catch { show(error) }
     }
 
+    func setAttention(sessionID: String, attention: Bool) async -> Bool {
+        do {
+            var current = try requiredVault()
+            guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }) else {
+                throw ProtocolError.invalidResponse("session is no longer available")
+            }
+#if DEBUG
+            if isSessionHistoryUITest {
+                current.sessions[index].attention = attention
+                try persist(current)
+                return true
+            }
+#endif
+            try await api.setAttention(session: current.sessions[index], identity: current.identity, attention: attention)
+            current.sessions[index].attention = attention
+            try persist(current)
+            return true
+        } catch { show(error); return false }
+    }
+
     func sendFeedback(sessionID: String, message: String) async -> Bool {
         do {
             let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -475,14 +496,25 @@ final class AppModel: ObservableObject {
                             current.sessions[index].updatedAt = envelope.createdAt
                         }
                         reconcileActiveItems(result.activeItemIDs, in: &current.sessions[index])
+                        current.sessions[index].attention = result.attention
                         current.sessions[index].expiresAt = result.expiresAt
                     } catch let error as APIError
                         where (error.status == 404 && error.code == "session_not_found")
                            || (error.status == 410 && error.code == "session_expired") {
                         current.sessions.remove(at: index)
                         try persist(current)
+                    } catch let error as APIError where error.status == 403 && error.code == "device_removed" {
+                        throw error
+                    } catch where Self.isCancellation(error) {
+                        throw error
+                    } catch {
+                        // One session failing to sync must not hide the others behind an alert.
+                        sessionSyncErrors[sessionID] = error.localizedDescription
+                        continue
                     }
+                    sessionSyncErrors[sessionID] = nil
                 }
+                sessionSyncErrors = sessionSyncErrors.filter { entry in current.sessions.contains { $0.sessionID == entry.key } }
             }
             current = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
             try persist(current)
@@ -754,8 +786,12 @@ final class AppModel: ObservableObject {
     }
 
     private func show(_ error: Error) {
-        guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return }
+        guard !Self.isCancellation(error) else { return }
         errorMessage = error.localizedDescription; connectionState = .failed
+    }
+
+    nonisolated private static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
     private func handlePushError(_ error: Error) {
@@ -824,6 +860,9 @@ final class AppModel: ObservableObject {
         let current = Vault(version: 3, identity: identity, sessions: uiTestSessions)
         vault = current
         publish(current)
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-session-sync-error") {
+            sessionSyncErrors[session.sessionID] = "Invalid server response: object fields do not match the protocol"
+        }
         groupDevices = [GroupDevice(deviceID: identity.deviceID, encryptionPublicKey: "unused", addedAt: 0)]
         connectionState = .current
         isReady = true

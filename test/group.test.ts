@@ -48,6 +48,61 @@ describe("devices and persistent groups", () => {
     expect((await postEvent(session, key.timestamp, "loud")).status).toBe(400);
   });
 
+  it("alerts status updates only to devices that asked for attention", async () => {
+    const device = await newDevice();
+    const group = await createGroup(device);
+    const key = await registerKey(group.id, device, [device], true);
+    const session = await createJoinedSession(group, device, key);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session.id));
+    const pushJobs = () => runInDurableObject(stub, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ event_id: string; notification_kind: string }>(
+        "SELECT event_id, notification_kind FROM push_jobs_v3 ORDER BY event_id",
+      )));
+
+    expect((await postEvent(session, key.timestamp, "status")).status).toBe(201);
+    expect(await pushJobs()).toEqual([]);
+    const initial = await attentionEvents(session, device);
+    expect(Object.keys(initial.json).sort()).toEqual(["attention", "events", "expiresAt"]);
+    expect(initial.json.attention).toBe(false);
+
+    const rejected = await setAttention(session, { ...device, token: randomToken() }, true);
+    expect(rejected.status).toBe(401);
+    expect(rejected.json.error).toBe("invalid_device_token");
+    const enabled = await setAttention(session, device, true);
+    expect(enabled).toEqual({ status: 200, json: { attention: true, expiresAt: expect.any(Number) } });
+    expect((await attentionEvents(session, device)).json.attention).toBe(true);
+
+    const first = await postEvent(session, key.timestamp, "status");
+    expect(first.status).toBe(201);
+    expect(await pushJobs()).toEqual([{ event_id: first.json.eventId, notification_kind: "status" }]);
+    const second = await postEvent(session, key.timestamp, "status");
+    expect(second.status).toBe(201);
+    expect(await pushJobs()).toEqual([{ event_id: second.json.eventId, notification_kind: "status" }]);
+    expect((await postEvent(session, key.timestamp, "none")).status).toBe(201);
+    expect(await pushJobs()).toEqual([{ event_id: second.json.eventId, notification_kind: "status" }]);
+
+    expect((await setAttention(session, device, false)).json.attention).toBe(false);
+    expect(await pushJobs()).toEqual([]);
+    expect((await postEvent(session, key.timestamp, "status")).status).toBe(201);
+    expect(await pushJobs()).toEqual([]);
+
+    const trackedStatus = await api(`/api/sessions/${session.id}/events`, {
+      method: "POST",
+      token: session.managerToken,
+      body: {
+        eventId: randomId(),
+        itemId: randomId(),
+        groupId: session.groupId,
+        keyTimestamp: key.timestamp,
+        nonce: "A".repeat(16),
+        ciphertext: randomToken(),
+        notificationKind: "status",
+      },
+    });
+    expect(trackedStatus.status).toBe(400);
+    expect(trackedStatus.json.error).toBe("invalid_field");
+  });
+
   it("tracks opaque active items and invalidates them through ordinary responses", async () => {
     const device = await newDevice();
     const group = await createGroup(device);
@@ -581,6 +636,21 @@ async function postTrackedResponse(
 async function events(session: JoinedSession, device: Device) {
   return api(
     `/api/sessions/${session.id}/events?groupId=${session.groupId}&deviceId=${device.id}&after=0`,
+    { token: device.token },
+  );
+}
+
+async function setAttention(session: JoinedSession, device: Device, attention: boolean) {
+  return api(`/api/sessions/${session.id}/attention`, {
+    method: "PUT",
+    token: device.token,
+    body: { groupId: session.groupId, deviceId: device.id, attention },
+  });
+}
+
+async function attentionEvents(session: JoinedSession, device: Device) {
+  return api(
+    `/api/sessions/${session.id}/events?groupId=${session.groupId}&deviceId=${device.id}&after=0&includeAttention=1`,
     { token: device.token },
   );
 }

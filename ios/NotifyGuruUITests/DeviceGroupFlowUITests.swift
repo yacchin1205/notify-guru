@@ -222,6 +222,42 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "13-dismiss-error-keeps-request", app: app)
     }
 
+    func testSessionSyncErrorStaysOnTheCard() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-session-sync-error"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Invalid server response: object fields do not match the protocol"].exists)
+        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        XCTAssertTrue(app.buttons["Yes"].isHittable)
+        attachScreenshot(named: "17-session-sync-error-on-card", app: app)
+    }
+
+    func testLongPressTogglesStatusAttention() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        let title = app.staticTexts["UI improvement test"]
+        let watching = app.images["Watching status updates"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertFalse(watching.exists)
+        attachScreenshot(named: "14-attention-off", app: app)
+
+        title.press(forDuration: 1)
+        XCTAssertTrue(watching.waitForExistence(timeout: 5))
+        attachScreenshot(named: "15-attention-on", app: app)
+
+        title.press(forDuration: 1)
+        XCTAssertEqual(XCTWaiter().wait(for: [absence(of: watching)], timeout: 5), .completed)
+        attachScreenshot(named: "16-attention-off-again", app: app)
+    }
+
+    private func absence(of element: XCUIElement) -> XCTestExpectation {
+        XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
+    }
+
     func testAppIconBadgeTracksUnresolvedItems() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-session-history", "-ui-test-app-badge"]

@@ -7,6 +7,7 @@ import {
   IDENTIFIER,
   SHA256_HEX,
   bearerToken,
+  booleanField,
   equalHex,
   expectKeys,
   integerField,
@@ -24,7 +25,9 @@ const MAX_PUSH_ATTEMPTS = 8;
 const PUSH_RETRY_BASE_MS = 30_000;
 const PUSH_RETRY_CAP_MS = 30 * 60 * 1000;
 const PUSH_ALARM_FALLBACK_MS = 15 * 60 * 1000;
-const NOTIFICATION_KIND = /^(none|notify|request)$/;
+const NOTIFICATION_KIND = /^(none|status|notify|request)$/;
+
+type ItemKind = "notify" | "request";
 
 interface SessionEnv {
   GROUPS: DurableObjectNamespace<DeviceGroup>;
@@ -64,7 +67,7 @@ interface EventRow extends Record<string, SqlStorageValue> {
 
 interface ItemRow extends Record<string, SqlStorageValue> {
   item_id: string;
-  notification_kind: APNsAlertKind;
+  notification_kind: ItemKind;
   invalidated_at: number | null;
 }
 
@@ -160,6 +163,7 @@ export class Session extends DurableObject<SessionEnv> {
           target.environment,
           job.notification_kind,
           job.item_id === null ? undefined : target.badgeCount,
+          job.notification_kind === "status" ? meta.session_id : undefined,
         );
         switch (result.outcome) {
           case "delivered":
@@ -207,6 +211,7 @@ export class Session extends DurableObject<SessionEnv> {
       return this.addEvent(request, meta);
     }
     if (request.method === "GET" && url.pathname === "/events") return this.events(request, url, meta);
+    if (request.method === "PUT" && url.pathname === "/attention") return this.setAttention(request, meta);
     if (request.method === "POST" && url.pathname === "/responses") return this.addResponse(request, meta);
     if (request.method === "GET" && url.pathname === "/responses") {
       await this.requireManager(request, meta);
@@ -350,7 +355,7 @@ export class Session extends DurableObject<SessionEnv> {
     const nonce = stringField(body, "nonce", BASE64URL, 32);
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
     const notificationKind = stringField(body, "notificationKind", NOTIFICATION_KIND, 16);
-    if (tracked && notificationKind === "none") {
+    if (tracked && (notificationKind === "none" || notificationKind === "status")) {
       throw new HttpError(400, "invalid_field", "Status events cannot contain an item ID");
     }
     this.requireGroup(groupId);
@@ -383,10 +388,11 @@ export class Session extends DurableObject<SessionEnv> {
     const now = Date.now();
     const expiresAt = now + SESSION_LIFETIME_MS;
     await this.putGroupSession(groupId, meta, expiresAt);
+    const attentive = this.attentiveDevices();
     let activeItem = false;
     this.state.storage.transactionSync(() => {
       if (itemId !== null) {
-        activeItem = this.ensureItem(itemId, notificationKind as APNsAlertKind, now);
+        activeItem = this.ensureItem(itemId, notificationKind as ItemKind, now);
       }
       this.state.storage.sql.exec(
         `INSERT INTO session_events_v3
@@ -406,16 +412,21 @@ export class Session extends DurableObject<SessionEnv> {
           eventId,
           deviceId,
         );
-        if (notificationKind !== "none" && (itemId === null || activeItem)) {
-          this.state.storage.sql.exec(
-            `INSERT INTO push_jobs_v3 (event_id, device_id, attempt_count, next_attempt_at, notification_kind)
-             VALUES (?, ?, 0, ?, ?)`,
-            eventId,
-            deviceId,
-            now,
-            notificationKind,
-          );
+        if (notificationKind === "none") continue;
+        if (notificationKind === "status") {
+          if (!attentive.has(deviceId)) continue;
+          this.deleteStatusPushJobs(deviceId);
+        } else if (itemId !== null && !activeItem) {
+          continue;
         }
+        this.state.storage.sql.exec(
+          `INSERT INTO push_jobs_v3 (event_id, device_id, attempt_count, next_attempt_at, notification_kind)
+           VALUES (?, ?, 0, ?, ?)`,
+          eventId,
+          deviceId,
+          now,
+          notificationKind,
+        );
       }
       this.state.storage.sql.exec("UPDATE meta SET expires_at = ? WHERE singleton = 1", expiresAt);
     });
@@ -433,6 +444,7 @@ export class Session extends DurableObject<SessionEnv> {
     await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
     const after = integerQuery(url, "after");
     const includeActive = url.searchParams.get("includeActive") === "1";
+    const includeAttention = url.searchParams.get("includeAttention") === "1";
     const events = Array.from(this.state.storage.sql.exec<EventRow>(
       `SELECT e.sequence, e.event_id, e.item_id, e.group_id, e.key_timestamp, e.nonce, e.ciphertext, e.created_at
        FROM session_events_v3 e
@@ -452,18 +464,49 @@ export class Session extends DurableObject<SessionEnv> {
       ciphertext: row.ciphertext,
       createdAt: row.created_at,
     }));
-    if (!includeActive) return json({ events, expiresAt: meta.expires_at });
-    const activeItemIds = Array.from(this.state.storage.sql.exec<{ item_id: string }>(
-      `SELECT DISTINCT i.item_id
-       FROM session_items_v1 i
-       JOIN session_events_v3 e ON e.item_id = i.item_id
-       JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
-       WHERE e.group_id = ? AND r.device_id = ? AND i.invalidated_at IS NULL
-       ORDER BY i.item_id`,
-      groupId,
-      deviceId,
-    )).map((row) => row.item_id);
-    return json({ events, activeItemIds, expiresAt: meta.expires_at });
+    const result: Record<string, unknown> = { events };
+    if (includeActive) {
+      result.activeItemIds = Array.from(this.state.storage.sql.exec<{ item_id: string }>(
+        `SELECT DISTINCT i.item_id
+         FROM session_items_v1 i
+         JOIN session_events_v3 e ON e.item_id = i.item_id
+         JOIN session_event_recipients_v3 r ON r.event_id = e.event_id
+         WHERE e.group_id = ? AND r.device_id = ? AND i.invalidated_at IS NULL
+         ORDER BY i.item_id`,
+        groupId,
+        deviceId,
+      )).map((row) => row.item_id);
+    }
+    if (includeAttention) result.attention = this.attentiveDevices().has(deviceId);
+    result.expiresAt = meta.expires_at;
+    return json(result);
+  }
+
+  // Attention is a per-device choice: a status alert on one phone says nothing
+  // about whether the Mac in the same group wants to hear every step too.
+  private async setAttention(request: Request, meta: MetaRow): Promise<Response> {
+    const body = await readObject(request);
+    expectKeys(body, ["groupId", "deviceId", "attention"]);
+    const groupId = stringField(body, "groupId", IDENTIFIER, 64);
+    const deviceId = stringField(body, "deviceId", IDENTIFIER, 64);
+    const attention = booleanField(body, "attention");
+    this.requireGroup(groupId);
+    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
+    if (attention) {
+      this.state.storage.sql.exec(
+        `INSERT INTO session_attention_v1 (device_id, created_at) VALUES (?, ?)
+         ON CONFLICT(device_id) DO NOTHING`,
+        deviceId,
+        Date.now(),
+      );
+      return json({ attention, expiresAt: meta.expires_at });
+    }
+    this.state.storage.transactionSync(() => {
+      this.state.storage.sql.exec("DELETE FROM session_attention_v1 WHERE device_id = ?", deviceId);
+      this.deleteStatusPushJobs(deviceId);
+    });
+    await this.scheduleNextAlarm(meta.expires_at);
+    return json({ attention, expiresAt: meta.expires_at });
   }
 
   private async addResponse(request: Request, meta: MetaRow): Promise<Response> {
@@ -650,7 +693,22 @@ export class Session extends DurableObject<SessionEnv> {
     await this.devices.clearPushToken(target.deviceId, target.token);
   }
 
-  private ensureItem(itemId: string, notificationKind: APNsAlertKind, createdAt: number): boolean {
+  private attentiveDevices(): Set<string> {
+    return new Set(Array.from(this.state.storage.sql.exec<{ device_id: string }>(
+      "SELECT device_id FROM session_attention_v1",
+    )).map((row) => row.device_id));
+  }
+
+  // A status replaces the previous one, so an alert still waiting for the old
+  // status has nothing left to announce.
+  private deleteStatusPushJobs(deviceId: string): void {
+    this.state.storage.sql.exec(
+      "DELETE FROM push_jobs_v3 WHERE device_id = ? AND notification_kind = 'status'",
+      deviceId,
+    );
+  }
+
+  private ensureItem(itemId: string, notificationKind: ItemKind, createdAt: number): boolean {
     const rows = Array.from(this.state.storage.sql.exec<ItemRow>(
       "SELECT item_id, notification_kind, invalidated_at FROM session_items_v1 WHERE item_id = ?",
       itemId,
@@ -789,6 +847,10 @@ export class Session extends DurableObject<SessionEnv> {
         notification_kind TEXT NOT NULL CHECK (notification_kind IN ('notify', 'request')),
         created_at INTEGER NOT NULL,
         invalidated_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS session_attention_v1 (
+        device_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
       );
     `);
     const eventColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_events_v3)"));

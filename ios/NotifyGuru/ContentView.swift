@@ -435,15 +435,25 @@ private struct SessionCard: View {
     let session: SessionRecord
     @State private var responding = false
     @State private var showingFeedback = false
+    @State private var togglingAttention = false
+    @State private var attentionChanges = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("SESSION")
-                        .font(.caption2.weight(.bold))
-                        .tracking(1.5)
-                        .foregroundStyle(Color.brandAccent)
+                    HStack(spacing: 6) {
+                        Text("SESSION")
+                            .font(.caption2.weight(.bold))
+                            .tracking(1.5)
+                            .foregroundStyle(Color.brandAccent)
+                        if session.attention {
+                            Image(systemName: "eye.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.brandAccent)
+                                .accessibilityLabel("Watching status updates")
+                        }
+                    }
                     Text(session.title)
                         .font(.title3.weight(.semibold))
                 }
@@ -467,6 +477,12 @@ private struct SessionCard: View {
                 }
             }
 
+            if let syncError = model.sessionSyncErrors[session.sessionID] {
+                Label(syncError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("session-sync-error")
+            }
             if !session.status.isEmpty {
                 Label(session.status, systemImage: "waveform.path.ecg")
                     .font(.subheadline.weight(.medium))
@@ -541,10 +557,27 @@ private struct SessionCard: View {
         .background(panelColor.opacity(colorScheme == .dark ? 0.35 : 0.75), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
+                .stroke(session.attention ? Color.brandAccent : Color.primary.opacity(0.08), lineWidth: session.attention ? 2 : 1)
         }
+        .shadow(color: session.attention ? Color.brandAccent.opacity(0.55) : .clear, radius: 14)
+        .onLongPressGesture { toggleAttention() }
+        .accessibilityAction(named: session.attention ? "Stop watching status updates" : "Watch status updates") {
+            toggleAttention()
+        }
+        .sensoryFeedback(.success, trigger: attentionChanges)
         .sheet(isPresented: $showingFeedback) {
             FeedbackView(sessionID: session.sessionID, isPresented: $showingFeedback)
+        }
+    }
+
+    private func toggleAttention() {
+        guard !togglingAttention else { return }
+        togglingAttention = true
+        Task {
+            if await model.setAttention(sessionID: session.sessionID, attention: !session.attention) {
+                attentionChanges += 1
+            }
+            togglingAttention = false
         }
     }
 

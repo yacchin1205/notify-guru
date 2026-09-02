@@ -51,7 +51,7 @@ quit
 
 - `pair` creates another one-shot QR code for an additional device group.
 - `color` changes the card color during the session; use `color random` to select another pastel color.
-- `status` updates the card silently. `notify` returns the item ID used to identify a later dismissal and shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in either OS alert.
+- `status` updates the card silently, unless the device is watching the session: long-press a card on iOS or macOS to watch it, and every status update then shows a generic status-updated alert, collapsed to the latest one. `notify` returns the item ID used to identify a later dismissal and shows a generic new-notification alert, while `request` shows a generic input-requested alert. Encrypted event content is not included in any OS alert.
 - `close-request` ends the identified request on connected devices.
 - Each local QR image remains available for 10 minutes or until `notifyg` exits. It is held only in process memory, and the response prevents browser caching.
 - `responses` retrieves every choice response, request dismissal, and free-form message without selecting or aggregating them.
@@ -85,7 +85,7 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a device group, send notifications and silent status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions.
 
 A session identifies the agent, so one MCP process runs one session: `session_create` returns the session already running instead of starting another, and omits the pairing fields once a device group has joined. Add a device group with `session_pairing_create`; start a separate session by closing the running one first.
 

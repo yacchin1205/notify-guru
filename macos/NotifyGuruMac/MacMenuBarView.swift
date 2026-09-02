@@ -157,12 +157,18 @@ private struct MacSessionCard: View {
     @State private var composingMessage = false
     @State private var message = ""
     @State private var sendingMessage = false
+    @State private var togglingAttention = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 Text(session.title)
                     .font(.headline)
+                if session.attention {
+                    Image(systemName: "eye.fill")
+                        .foregroundStyle(Color.notifyGuruAccent)
+                        .accessibilityLabel("Watching Status Updates")
+                }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     if session.unresolvedCount > 0 {
@@ -183,6 +189,12 @@ private struct MacSessionCard: View {
                 }
             }
 
+            if let syncError = model.sessionSyncErrors[session.sessionID] {
+                Label(syncError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("session-sync-error")
+            }
             if !session.status.isEmpty {
                 Label(session.status, systemImage: "waveform.path.ecg")
                     .font(.subheadline.weight(.medium))
@@ -272,7 +284,21 @@ private struct MacSessionCard: View {
         .background(panelColor.opacity(colorScheme == .dark ? 0.35 : 0.72), in: RoundedRectangle(cornerRadius: 14))
         .overlay {
             RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.primary.opacity(0.08))
+                .stroke(session.attention ? Color.notifyGuruAccent : Color.primary.opacity(0.08), lineWidth: session.attention ? 2 : 1)
+        }
+        .shadow(color: session.attention ? Color.notifyGuruAccent.opacity(0.55) : .clear, radius: 12)
+        .onLongPressGesture { toggleAttention() }
+        .contextMenu {
+            Button(session.attention ? "Stop Watching Status Updates" : "Watch Status Updates") { toggleAttention() }
+        }
+    }
+
+    private func toggleAttention() {
+        guard !togglingAttention else { return }
+        togglingAttention = true
+        Task {
+            _ = await model.setAttention(sessionID: session.sessionID, attention: !session.attention)
+            togglingAttention = false
         }
     }
 

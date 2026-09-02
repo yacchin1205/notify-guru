@@ -28,6 +28,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .badge, .sound]
+        // A status alert has nothing to add while the card is on screen updating itself.
+        if notification.request.content.userInfo["kind"] as? String == "status" { return [] }
+        return [.banner, .badge, .sound]
     }
 }

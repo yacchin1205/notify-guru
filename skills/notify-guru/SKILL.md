@@ -145,10 +145,14 @@ handed over once — if you ignore the field, nothing will surface them again, a
 a message written while you worked is lost to you until the person repeats it.
 Act on what comes back, or at minimum tell the user what they sent.
 
-### `status` — silent, overwritten, safe to miss
+### `status` — silent by default, overwritten, safe to miss
 
-No OS notification. It replaces the card's current-state line and does not
-appear on the badge. It is the session's *current position*, not a log; earlier
+No OS notification unless the person chose one: on iOS and macOS they can
+long-press a session card to watch it, and every `status` then raises a
+generic "Status updated." alert on that device, collapsed to the latest one.
+You cannot tell whether anyone is watching, and it changes nothing about how
+you write: `status` replaces the card's current-state line and does not appear
+on the badge. It is the session's *current position*, not a log; earlier
 values are gone. Write it so a person glancing at the card at any moment knows
 where the task is. Nothing bad happens if they never read one, so update it as
 often as it is genuinely useful.
@@ -241,7 +245,8 @@ the mechanism. The accurate picture:
   another session or group without decryption failing.
 - OS notifications carry no content: `notify` shows "A new notification is
   available.", `request` shows "Your input is requested.", `status` shows
-  nothing. Push exists only on the iOS and macOS clients, through APNs.
+  nothing, or "Status updated." on a device watching the session. Push exists
+  only on the iOS and macOS clients, through APNs.
 - The QR image is served on loopback only, held in process memory, never
   written to disk, marked `no-store`, and expires in 10 minutes. Its URL is
   random and independent of the pairing data.
@@ -256,7 +261,8 @@ gets lost:
   transcripts, issues, PRs, and commits.
 - A joined device group cannot be removed individually. The only revocation is
   closing the whole session.
-- The relay still observes metadata: timestamps, identifiers, ciphertext sizes.
+- The relay still observes metadata: timestamps, identifiers, ciphertext sizes,
+  and which device is watching which session.
 - The system does not authenticate clients. It is open source, anyone can build
   a client that speaks the API, and the server cannot tell one from another.
   Security rests on key possession, not on client identity — which is why
@@ -284,7 +290,7 @@ notify-guru repository.
 | `session_create` | Returns the running session if there is one. `title` ≤ 200 bytes, and is ignored on reuse. `color` is `#rrggbb` or omitted for a random pastel |
 | `session_pairing_create` | A new one-shot pairing for an additional device group |
 | `session_wait_for_device` | `timeout_seconds` 1–600. Returns `device_group_count` |
-| `status` | ≤ 10,000 bytes. Silent, overwrites |
+| `status` | ≤ 10,000 bytes. Silent unless the device watches the session; overwrites |
 | `notify` | ≤ 200,000 bytes. Returns `item_id`; badges until dismissed |
 | `session_color` | `#rrggbb` or `random`, mid-session |
 | `request` | 2–20 options, labels ≤ 500 bytes, prompt ≤ 20,000 bytes |

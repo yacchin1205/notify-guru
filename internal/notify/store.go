@@ -304,7 +304,7 @@ func (s *Store) SendStatus(ctx context.Context, sessionID, status string) error 
 	if err := validateText("status", status, 10_000); err != nil {
 		return err
 	}
-	return s.send(ctx, sessionID, event{Type: "status", Status: status}, "none")
+	return s.send(ctx, sessionID, event{Type: "status", Status: status}, "status")
 }
 
 func (s *Store) SetColor(ctx context.Context, sessionID, color string) error {
@@ -642,7 +642,7 @@ func retryEventOperation(ctx context.Context, delays []time.Duration, operation 
 
 func eventItemID(value event, notificationKind string) (string, error) {
 	switch notificationKind {
-	case "none":
+	case "none", "status":
 		return "", nil
 	case "notify":
 		if value.Type != "notify" || value.ID == "" {

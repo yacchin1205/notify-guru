@@ -30,6 +30,7 @@ describe("APNs client", () => {
     });
     expect(JSON.parse(String(receivedInit?.body))).toEqual({
       aps: { alert: "A new notification is available.", sound: "default" },
+      kind: "notify",
     });
     const authorization = (receivedInit?.headers as Record<string, string>).authorization;
     expect(authorization.startsWith("bearer ")).toBe(true);
@@ -48,7 +49,23 @@ describe("APNs client", () => {
     );
 
     await client.send("aabb", "sandbox", "request");
-    expect(body).toEqual({ aps: { alert: "Your input is requested.", sound: "default" } });
+    expect(body).toEqual({ aps: { alert: "Your input is requested.", sound: "default" }, kind: "request" });
+  });
+
+  it("announces a status update silently and collapses it per session", async () => {
+    const privateKey = await signingKey();
+    let init: RequestInit | undefined;
+    const client = new APNsClient(
+      { keyId: "STATUSKEY1", teamId: "STATUSTEAM", privateKey, topic: "guru.notify.app" },
+      (async (_input: RequestInfo | URL, requestInit?: RequestInit) => {
+        init = requestInit;
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    );
+
+    await client.send("aabb", "sandbox", "status", undefined, "session-id");
+    expect(init?.headers).toMatchObject({ "apns-collapse-id": "session-id" });
+    expect(JSON.parse(String(init?.body))).toEqual({ aps: { alert: "Status updated." }, kind: "status" });
   });
 
   it("sets an absolute badge count and can update it without an alert", async () => {
@@ -66,8 +83,8 @@ describe("APNs client", () => {
     await client.send("aabb", "sandbox", "badge", 2);
 
     expect(bodies).toEqual([
-      { aps: { alert: "A new notification is available.", sound: "default", badge: 3 } },
-      { aps: { badge: 2 } },
+      { aps: { alert: "A new notification is available.", sound: "default", badge: 3 }, kind: "notify" },
+      { aps: { badge: 2 }, kind: "badge" },
     ]);
   });
 

@@ -6,7 +6,7 @@ export interface APNsConfig {
 }
 
 export type APNsEnvironment = "sandbox" | "production";
-export type APNsAlertKind = "notify" | "request" | "badge";
+export type APNsAlertKind = "notify" | "request" | "status" | "badge";
 
 export type APNsResult =
   | { outcome: "delivered" }
@@ -22,6 +22,11 @@ export class APNsTransportError extends Error {
 }
 
 const IDENTIFIER = /^[A-Z0-9]{10}$/;
+const ALERTS = {
+  notify: "A new notification is available.",
+  request: "Your input is requested.",
+  status: "Status updated.",
+};
 const DEVICE_TOKEN = /^[a-f0-9]+$/;
 const PROVIDER_TOKEN_REFRESH_SECONDS = 50 * 60;
 const PROVIDER_TOKEN_UPDATE_DELAY_MS = 20 * 60 * 1000;
@@ -56,6 +61,7 @@ export class APNsClient {
     environment: APNsEnvironment,
     kind: APNsAlertKind,
     badgeCount?: number,
+    collapseId?: string,
   ): Promise<APNsResult> {
     if (!DEVICE_TOKEN.test(deviceToken)) {
       throw new Error("APNs device token must be lowercase hexadecimal");
@@ -79,15 +85,15 @@ export class APNsClient {
         "apns-priority": "10",
         "apns-topic": this.config.topic,
         "content-type": "application/json",
+        ...(collapseId === undefined ? {} : { "apns-collapse-id": collapseId }),
       },
       body: JSON.stringify({
         aps: {
-          ...(kind === "badge" ? {} : {
-            alert: kind === "notify" ? "A new notification is available." : "Your input is requested.",
-            sound: "default",
-          }),
+          ...(kind === "badge" ? {} : { alert: ALERTS[kind] }),
+          ...(kind === "notify" || kind === "request" ? { sound: "default" } : {}),
           ...(badgeCount === undefined ? {} : { badge: badgeCount }),
         },
+        kind,
       }),
     };
     const transport = this.transport;

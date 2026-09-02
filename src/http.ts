@@ -93,6 +93,14 @@ export function integerField(value: Record<string, unknown>, key: string): numbe
   return field as number;
 }
 
+export function booleanField(value: Record<string, unknown>, key: string): boolean {
+  const field = value[key];
+  if (typeof field !== "boolean") {
+    throw new HttpError(400, "invalid_field", `Invalid field: ${key}`);
+  }
+  return field;
+}
+
 export function bearerToken(request: Request): string {
   const header = request.headers.get("authorization");
   if (header === null || !header.startsWith("Bearer ")) {

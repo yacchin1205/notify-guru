@@ -31,6 +31,7 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationC
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        if notification.request.content.userInfo["kind"] as? String == "status" { return [] }
+        return [.banner, .sound]
     }
 }

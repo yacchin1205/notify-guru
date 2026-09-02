@@ -71,6 +71,14 @@ func TestEventItemIDUsesTheLogicalItemIdentifier(t *testing.T) {
 		t.Fatalf("request item ID = %q", requestID)
 	}
 
+	statusID, err := eventItemID(event{ID: "status", Type: "status"}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusID != "" {
+		t.Fatalf("status item ID = %q, want none", statusID)
+	}
+
 	if _, err := eventItemID(event{ID: "status", Type: "status"}, "notify"); err == nil {
 		t.Fatal("status event was accepted as a notification item")
 	}
