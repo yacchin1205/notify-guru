@@ -30,9 +30,32 @@ func tokenHash(token string) string {
 
 func deriveGroupKey(
 	privateKey *ecdh.PrivateKey,
-	encodedPublicKey, sessionID, groupID string,
+	encodedPublicKey string,
+	protocolVersion int,
+	sessionID, groupID string,
 	timestamp int64,
 ) ([]byte, error) {
+	info := fmt.Sprintf("notify.guru/session/v%d\n%s\n%s\n%d", protocolVersion, sessionID, groupID, timestamp)
+	return deriveECDHKey(privateKey, encodedPublicKey, info)
+}
+
+func deriveAttachmentKey(
+	privateKey *ecdh.PrivateKey,
+	encodedPublicKey, sessionID, groupID, responseID, attachmentID string,
+	timestamp int64,
+) ([]byte, error) {
+	info := fmt.Sprintf(
+		"notify.guru/attachment/v4\n%s\n%s\n%d\n%s\n%s",
+		sessionID,
+		groupID,
+		timestamp,
+		responseID,
+		attachmentID,
+	)
+	return deriveECDHKey(privateKey, encodedPublicKey, info)
+}
+
+func deriveECDHKey(privateKey *ecdh.PrivateKey, encodedPublicKey, info string) ([]byte, error) {
 	publicBytes, err := decode(encodedPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("decode device group public key: %w", err)
@@ -45,7 +68,6 @@ func deriveGroupKey(
 	if err != nil {
 		return nil, fmt.Errorf("derive group ECDH secret: %w", err)
 	}
-	info := fmt.Sprintf("notify.guru/session/v3\n%s\n%s\n%d", sessionID, groupID, timestamp)
 	key, err := hkdf.Key[hash.Hash](sha256.New, sharedSecret, nil, info, 32)
 	if err != nil {
 		return nil, fmt.Errorf("derive group session key: %w", err)
@@ -53,8 +75,10 @@ func deriveGroupKey(
 	return key, nil
 }
 
-func verifyPairingProofV3(
-	authSecret, sessionID, pairingID, groupID string,
+func verifyPairingProof(
+	authSecret string,
+	protocolVersion int,
+	sessionID, pairingID, groupID string,
 	timestamp int64,
 	publicKey, proof string,
 ) error {
@@ -67,11 +91,30 @@ func verifyPairingProofV3(
 		return fmt.Errorf("decode pairing proof: %w", err)
 	}
 	mac := hmac.New(sha256.New, secret)
-	fmt.Fprintf(mac, "v3\n%s\n%s\n%s\n%d\n%s", sessionID, pairingID, groupID, timestamp, publicKey)
+	fmt.Fprintf(mac, "v%d\n%s\n%s\n%s\n%d\n%s", protocolVersion, sessionID, pairingID, groupID, timestamp, publicKey)
 	if !hmac.Equal(received, mac.Sum(nil)) {
 		return fmt.Errorf("pairing proof does not authenticate the device group key")
 	}
 	return nil
+}
+
+func decryptAttachment(key []byte, additionalData, encodedNonce string, ciphertext []byte) ([]byte, error) {
+	nonce, err := decode(encodedNonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode attachment nonce: %w", err)
+	}
+	aead, err := newAEAD(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("invalid attachment nonce size: %d", len(nonce))
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, []byte(additionalData))
+	if err != nil {
+		return nil, fmt.Errorf("decrypt attachment: %w", err)
+	}
+	return plaintext, nil
 }
 
 func encryptJSON(key []byte, additionalData string, value any) (nonce, ciphertext string, err error) {

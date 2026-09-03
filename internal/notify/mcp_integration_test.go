@@ -3,6 +3,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -10,6 +11,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,11 +179,42 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		t.Fatalf("responses_wait returned %d already handed over responses, want 0", len(drained.Responses))
 	}
 
+	_, attachmentExpiry := fetchAndDecryptEvents(t, ctx, api, created.SessionID, groups[0])
+	attachmentResponseID, jpeg := postEncryptedAttachment(t, ctx, api, created.SessionID, groups[0], attachmentExpiry)
+	attachmentResult, rawAttachmentResult := callToolResult[responsesToolOutput](t, ctx, clientSession, "responses_wait", map[string]any{
+		"session_id": created.SessionID, "timeout_seconds": 5,
+	})
+	if len(attachmentResult.Responses) != 1 {
+		t.Fatalf("attachment response count = %d, want 1", len(attachmentResult.Responses))
+	}
+	attachmentResponse := attachmentResult.Responses[0]
+	if attachmentResponse.ID != attachmentResponseID || attachmentResponse.Attachment == nil {
+		t.Fatalf("unexpected attachment response: %+v", attachmentResponse)
+	}
+	decryptedPath := attachmentResponse.Attachment.Path
+	decrypted, err := os.ReadFile(decryptedPath)
+	if err != nil {
+		t.Fatalf("read decrypted attachment: %v", err)
+	}
+	if !bytes.Equal(decrypted, jpeg) {
+		t.Fatalf("decrypted attachment = %x, want %x", decrypted, jpeg)
+	}
+	if len(rawAttachmentResult.Content) != 1 {
+		t.Fatalf("MCP attachment content count = %d, want 1", len(rawAttachmentResult.Content))
+	}
+	link, ok := rawAttachmentResult.Content[0].(*mcp.ResourceLink)
+	if !ok || link.URI != attachmentResponse.Attachment.URI || link.MIMEType != "image/jpeg" {
+		t.Fatalf("unexpected MCP attachment resource: %#v", rawAttachmentResult.Content[0])
+	}
+
 	closed := callTool[closeToolOutput](t, ctx, clientSession, "session_close", map[string]any{
 		"session_id": created.SessionID,
 	})
 	if !closed.Closed {
 		t.Fatal("session_close did not report closure")
+	}
+	if _, err := os.Stat(decryptedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("decrypted attachment still exists after session close: %v", err)
 	}
 	err = api.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/events?groupId=%s&deviceId=%s&after=0", created.SessionID, joined.GroupID, joined.DeviceID), joined.AccessToken, nil, &struct{}{})
 	var apiError *APIError
@@ -269,6 +302,112 @@ func postEncryptedFeedback(
 	})
 }
 
+func postEncryptedAttachment(
+	t *testing.T,
+	ctx context.Context,
+	api *API,
+	sessionID string,
+	group joinedDeviceGroup,
+	expectedExpiry int64,
+) (string, []byte) {
+	t.Helper()
+	responseID, err := randomValue(18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachmentID, err := randomValue(18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jpeg := []byte{
+		0xff, 0xd8,
+		0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+		0xff, 0xd9,
+	}
+	attachmentKey, err := deriveAttachmentKey(
+		group.PrivateKey, group.CreatorPublicKey, sessionID, group.GroupID, responseID, attachmentID, group.Timestamp,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := newAEAD(attachmentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := aead.Seal(
+		nil,
+		nonce,
+		jpeg,
+		[]byte(attachmentAAD(sessionID, group.GroupID, responseID, attachmentID, group.Timestamp)),
+	)
+	digest := sha256.Sum256(ciphertext)
+	manifest := &attachmentManifest{
+		ID: attachmentID, Kind: "image", MediaType: "image/jpeg", ByteLength: int64(len(jpeg)),
+		Width: 1, Height: 1, Nonce: encode(nonce), CiphertextLength: int64(len(ciphertext)),
+		CiphertextSHA256: hex.EncodeToString(digest[:]),
+	}
+	var reservation struct {
+		AttachmentID       string `json:"attachmentId"`
+		UploadToken        string `json:"uploadToken"`
+		MaxCiphertextBytes int64  `json:"maxCiphertextBytes"`
+		UploadExpiresAt    int64  `json:"uploadExpiresAt"`
+	}
+	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/attachments", group.AccessToken, map[string]any{
+		"attachmentId": attachmentID, "responseId": responseID, "groupId": group.GroupID,
+		"deviceId": group.DeviceID, "keyTimestamp": group.Timestamp,
+		"ciphertextLength": len(ciphertext), "ciphertextSha256": manifest.CiphertextSHA256,
+	}, &reservation); err != nil {
+		t.Fatalf("reserve encrypted attachment: %v", err)
+	}
+	if reservation.MaxCiphertextBytes < int64(len(ciphertext)) {
+		t.Fatalf("attachment reservation limit = %d, need %d", reservation.MaxCiphertextBytes, len(ciphertext))
+	}
+	upload, err := http.NewRequestWithContext(
+		ctx, http.MethodPut,
+		api.baseURL.String()+"/api/sessions/"+sessionID+"/attachments/"+attachmentID,
+		bytes.NewReader(ciphertext),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload.Header.Set("Authorization", "Bearer "+reservation.UploadToken)
+	upload.Header.Set("Content-Type", "application/octet-stream")
+	uploadResponse, err := api.client.Do(upload)
+	if err != nil {
+		t.Fatalf("upload encrypted attachment: %v", err)
+	}
+	uploadResponse.Body.Close()
+	if uploadResponse.StatusCode != http.StatusOK {
+		t.Fatalf("upload encrypted attachment status = %d", uploadResponse.StatusCode)
+	}
+	responseNonce, responseCiphertext, err := encryptJSON(
+		group.Key,
+		responseAAD(4, sessionID, group.GroupID, responseID, group.Timestamp),
+		decryptedResponse{ID: responseID, Type: "feedback", Attachment: manifest, CreatedAt: time.Now().UTC()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var posted struct {
+		ExpiresAt int64 `json:"expiresAt"`
+	}
+	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/responses", group.AccessToken, map[string]any{
+		"responseId": responseID, "attachmentId": attachmentID, "groupId": group.GroupID,
+		"deviceId": group.DeviceID, "keyTimestamp": group.Timestamp,
+		"nonce": responseNonce, "ciphertext": responseCiphertext,
+	}, &posted); err != nil {
+		t.Fatalf("commit encrypted attachment response: %v", err)
+	}
+	if posted.ExpiresAt != expectedExpiry {
+		t.Fatal("attachment response unexpectedly changed the session lifetime")
+	}
+	return responseID, jpeg
+}
+
 func postEncryptedResponse(
 	t *testing.T,
 	ctx context.Context,
@@ -286,7 +425,7 @@ func postEncryptedResponse(
 	responseBody := build(responseID)
 	nonce, ciphertext, err := encryptJSON(
 		group.Key,
-		responseAAD(sessionID, group.GroupID, responseID, group.Timestamp),
+		responseAAD(4, sessionID, group.GroupID, responseID, group.Timestamp),
 		responseBody,
 	)
 	if err != nil {
@@ -362,14 +501,22 @@ type closeToolOutput struct {
 }
 
 type joinedDeviceGroup struct {
-	GroupID     string
-	DeviceID    string
-	AccessToken string
-	Timestamp   int64
-	Key         []byte
+	GroupID          string
+	DeviceID         string
+	AccessToken      string
+	Timestamp        int64
+	Key              []byte
+	PrivateKey       *ecdh.PrivateKey
+	CreatorPublicKey string
 }
 
 func callTool[T any](t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, arguments any) T {
+	t.Helper()
+	output, _ := callToolResult[T](t, ctx, session, name, arguments)
+	return output
+}
+
+func callToolResult[T any](t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, arguments any) (T, *mcp.CallToolResult) {
 	t.Helper()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
 	if err != nil {
@@ -390,7 +537,7 @@ func callTool[T any](t *testing.T, ctx context.Context, session *mcp.ClientSessi
 	if err := decodeJSON(encoded, &output); err != nil {
 		t.Fatalf("decode MCP tool %s structured result: %v", name, err)
 	}
-	return output
+	return output, result
 }
 
 func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL string) joinedDeviceGroup {
@@ -403,7 +550,7 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if err != nil {
 		t.Fatalf("parse pairing fragment: %v", err)
 	}
-	if len(parameters) != 7 || parameters.Get("v") != "3" {
+	if len(parameters) != 7 || parameters.Get("v") != "4" {
 		t.Fatalf("unexpected pairing fragment: %q", pairingURL.Fragment)
 	}
 	sessionID := parameters.Get("s")
@@ -509,12 +656,17 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	}, &acceptedKey); err != nil {
 		t.Fatalf("register group key: %v", err)
 	}
+	var state map[string]json.RawMessage
+	statePath := fmt.Sprintf("/api/groups/%s/state?deviceId=%s&protocolVersion=4", groupID, deviceID)
+	if err := api.do(ctx, http.MethodGet, statePath, accessToken, nil, &state); err != nil {
+		t.Fatalf("advertise version 4 support: %v", err)
+	}
 	secret, err := decode(authSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mac := hmac.New(sha256.New, secret)
-	fmt.Fprintf(mac, "v3\n%s\n%s\n%s\n%d\n%s", sessionID, pairingID, groupID, acceptedKey.Timestamp, publicKey)
+	fmt.Fprintf(mac, "v4\n%s\n%s\n%s\n%d\n%s", sessionID, pairingID, groupID, acceptedKey.Timestamp, publicKey)
 	proof := encode(mac.Sum(nil))
 
 	var result struct {
@@ -536,11 +688,15 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if !result.Joined || result.ExpiresAt <= time.Now().UnixMilli() {
 		t.Fatalf("unexpected join result: %+v", result)
 	}
-	key, err := deriveGroupKey(groupPrivateKey, creatorPublicKey, sessionID, groupID, acceptedKey.Timestamp)
+	key, err := deriveGroupKey(groupPrivateKey, creatorPublicKey, 4, sessionID, groupID, acceptedKey.Timestamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return joinedDeviceGroup{GroupID: groupID, DeviceID: deviceID, AccessToken: accessToken, Timestamp: acceptedKey.Timestamp, Key: key}
+	return joinedDeviceGroup{
+		GroupID: groupID, DeviceID: deviceID, AccessToken: accessToken,
+		Timestamp: acceptedKey.Timestamp, Key: key, PrivateKey: groupPrivateKey,
+		CreatorPublicKey: creatorPublicKey,
+	}
 }
 
 func signRawP256(t *testing.T, key *ecdsa.PrivateKey, transcript string) string {
@@ -582,7 +738,7 @@ func fetchAndDecryptEvents(t *testing.T, ctx context.Context, api *API, sessionI
 		if envelope.KeyTimestamp != group.Timestamp {
 			t.Fatalf("event key timestamp = %d, want %d", envelope.KeyTimestamp, group.Timestamp)
 		}
-		if err := decryptJSON(group.Key, eventAAD(sessionID, group.GroupID, envelope.EventID, envelope.KeyTimestamp), envelope.Nonce, envelope.Ciphertext, &events[index]); err != nil {
+		if err := decryptJSON(group.Key, eventAAD(4, sessionID, group.GroupID, envelope.EventID, envelope.KeyTimestamp), envelope.Nonce, envelope.Ciphertext, &events[index]); err != nil {
 			t.Fatalf("decrypt event %q: %v", envelope.EventID, err)
 		}
 	}

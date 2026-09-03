@@ -34,7 +34,7 @@ export async function detachDeviceGroup(identity, groupId) {
   cursorRequest.onsuccess = () => {
     const cursor = cursorRequest.result;
     if (cursor === null) return;
-    if (cursor.value.protocolVersion === 3 && cursor.value.groupId === groupId) cursor.delete();
+    if ((cursor.value.protocolVersion === 3 || cursor.value.protocolVersion === 4) && cursor.value.groupId === groupId) cursor.delete();
     cursor.continue();
   };
   await complete(transaction);

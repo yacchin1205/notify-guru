@@ -382,11 +382,11 @@ final class AppModel: ObservableObject {
         } catch { show(error); return false }
     }
 
-    func sendFeedback(sessionID: String, message: String) async -> Bool {
+    func sendFeedback(sessionID: String, message: String, photo: PreparedPhoto? = nil) async -> Bool {
         do {
             let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty, text.count <= 20_000 else {
-                throw ProtocolError.invalidResponse("message must contain between 1 and 20000 characters")
+            guard text.utf8.count <= 20_000, !text.isEmpty || photo != nil else {
+                throw ProtocolError.invalidResponse("a message or photo is required, and the message must not exceed 20000 bytes")
             }
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -395,14 +395,33 @@ final class AppModel: ObservableObject {
                 throw ProtocolError.invalidResponse("session feedback key is unavailable")
             }
             try populateSessionKeys(&current.sessions[index], group: group)
+            guard current.sessions[index].protocolVersion == 4 || photo == nil else {
+                throw ProtocolError.invalidResponse("this session does not support photo attachments")
+            }
             let responseID = try CryptoEngine.randomID()
+            var attachment: EncryptedAttachment?
+            if let photo {
+                let attachmentID = try CryptoEngine.randomID()
+                attachment = try CryptoEngine.encryptAttachment(
+                    groupKey: key, creatorPublicKey: current.sessions[index].creatorPublicKey,
+                    sessionID: current.sessions[index].sessionID, groupID: current.sessions[index].groupID,
+                    responseID: responseID, attachmentID: attachmentID,
+                    jpeg: photo.jpeg, width: photo.width, height: photo.height
+                )
+                let reservation = try await api.reserveAttachment(
+                    session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
+                    responseID: responseID, attachment: attachment!
+                )
+                try await api.uploadAttachment(session: current.sessions[index], attachment: attachment!, reservation: reservation)
+            }
             let payload = try CryptoEngine.encryptFeedback(
                 session: current.sessions[index], timestamp: key.timestamp, responseID: responseID,
-                message: text, createdAt: RFC3339.string(from: Date())
+                message: text.isEmpty ? nil : text, attachment: attachment?.manifest,
+                createdAt: RFC3339.string(from: Date())
             )
             current.sessions[index].expiresAt = try await api.postResponse(
                 session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
-                responseID: responseID, itemID: nil, payload: payload
+                responseID: responseID, itemID: nil, attachmentID: attachment?.manifest.id, payload: payload
             )
             try persist(current)
             return true
@@ -562,7 +581,7 @@ final class AppModel: ObservableObject {
         }
         let expiresAt = try await api.join(pairing, identity: current.identity, key: key)
         var record = SessionRecord(
-            protocolVersion: 3, sessionID: pairing.sessionID, groupID: group.groupID,
+            protocolVersion: pairing.protocolVersion, sessionID: pairing.sessionID, groupID: group.groupID,
             creatorPublicKey: pairing.creatorPublicKey, keys: [:], cursor: 0,
             title: "Session \(pairing.sessionID.prefix(8))", status: "Connected", notifications: [],
             request: nil, requestKeyTimestamp: nil, color: pairing.color,
@@ -656,7 +675,7 @@ final class AppModel: ObservableObject {
         guard let group = current.identity.group, let state = groupState else { return }
         for remote in state.sessions where !current.sessions.contains(where: { $0.sessionID == remote.sessionID }) {
             var record = SessionRecord(
-                protocolVersion: 3, sessionID: remote.sessionID, groupID: group.groupID,
+                protocolVersion: remote.protocolVersion, sessionID: remote.sessionID, groupID: group.groupID,
                 creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
                 title: "Session \(remote.sessionID.prefix(8))", status: "Connected", notifications: [],
                 request: nil, requestKeyTimestamp: nil, color: nil,
@@ -670,7 +689,8 @@ final class AppModel: ObservableObject {
     private func populateSessionKeys(_ session: inout SessionRecord, group: DeviceGroup) throws {
         for key in group.keys.values where session.keys[String(key.timestamp)] == nil {
             session.keys[String(key.timestamp)] = try CryptoEngine.deriveSessionKey(
-                key: key, creatorPublicKey: session.creatorPublicKey, sessionID: session.sessionID, groupID: group.groupID
+                key: key, creatorPublicKey: session.creatorPublicKey, sessionID: session.sessionID,
+                groupID: group.groupID, protocolVersion: session.protocolVersion
             )
         }
     }
@@ -808,7 +828,7 @@ final class AppModel: ObservableObject {
     private func startSessionHistoryUITest() {
         let now = Self.currentTimeMilliseconds()
         let session = SessionRecord(
-            protocolVersion: 3, sessionID: "ui-test-session", groupID: "ui-test-group",
+            protocolVersion: 4, sessionID: "ui-test-session", groupID: "ui-test-group",
             creatorPublicKey: "unused", keys: ["42": Data(repeating: 7, count: 32)], cursor: 3,
             title: "UI improvement test", status: "Working",
             notifications: [
@@ -830,7 +850,11 @@ final class AppModel: ObservableObject {
             expiresAt: now + 86_400_000
         )
         var uiTestSessions = [session]
-        if ProcessInfo.processInfo.arguments.contains("-ui-test-ipad-layout") {
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-photo-message") {
+            uiTestSessions[0].notifications = []
+            uiTestSessions[0].request = nil
+            uiTestSessions[0].requestKeyTimestamp = nil
+        } else if ProcessInfo.processInfo.arguments.contains("-ui-test-ipad-layout") {
             uiTestSessions[0].notifications = []
             uiTestSessions[0].request = nil
             uiTestSessions[0].requestKeyTimestamp = nil

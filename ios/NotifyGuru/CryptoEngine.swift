@@ -77,16 +77,16 @@ enum CryptoEngine {
         return key
     }
 
-    static func deriveSessionKey(key: GroupKey, creatorPublicKey: String, sessionID: String, groupID: String) throws -> Data {
+    static func deriveSessionKey(key: GroupKey, creatorPublicKey: String, sessionID: String, groupID: String, protocolVersion: Int = 3) throws -> Data {
         let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: key.privateKey)
         let publicKey = try P256.KeyAgreement.PublicKey(x963Representation: Base64URL.decode(creatorPublicKey))
         let secret = try privateKey.sharedSecretFromKeyAgreement(with: publicKey)
-        let info = Data("notify.guru/session/v3\n\(sessionID)\n\(groupID)\n\(key.timestamp)".utf8)
+        let info = Data("notify.guru/session/v\(protocolVersion)\n\(sessionID)\n\(groupID)\n\(key.timestamp)".utf8)
         return symmetricData(secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(), sharedInfo: info, outputByteCount: 32))
     }
 
-    static func pairingProof(authSecret: String, sessionID: String, pairingID: String, groupID: String, timestamp: Int64, groupPublicKey: String) throws -> String {
-        let transcript = "v3\n\(sessionID)\n\(pairingID)\n\(groupID)\n\(timestamp)\n\(groupPublicKey)"
+    static func pairingProof(authSecret: String, protocolVersion: Int, sessionID: String, pairingID: String, groupID: String, timestamp: Int64, groupPublicKey: String) throws -> String {
+        let transcript = "v\(protocolVersion)\n\(sessionID)\n\(pairingID)\n\(groupID)\n\(timestamp)\n\(groupPublicKey)"
         let authentication = HMAC<SHA256>.authenticationCode(
             for: Data(transcript.utf8), using: SymmetricKey(data: try Base64URL.decode(authSecret))
         )
@@ -101,8 +101,12 @@ enum CryptoEngine {
         ["notify.guru/group-create/v2", groupID, identity.deviceID, accessHash, try encryptionPublicKey(for: identity)].joined(separator: "\n")
     }
 
-    static func deviceRequestTranscript(requestID: String, identity: DeviceIdentity, accessHash: String) throws -> String {
-        ["notify.guru/device-request/v1", requestID, identity.deviceID, accessHash, try encryptionPublicKey(for: identity)].joined(separator: "\n")
+    static func deviceRequestTranscript(requestID: String, identity: DeviceIdentity, accessHash: String, protocolVersion: Int = 3) throws -> String {
+        let fields = [
+            protocolVersion == 4 ? "notify.guru/device-request/v2" : "notify.guru/device-request/v1",
+            requestID, identity.deviceID, accessHash, try encryptionPublicKey(for: identity),
+        ] + (protocolVersion == 4 ? ["3,4"] : [])
+        return fields.joined(separator: "\n")
     }
 
     static func deviceRequestReadTranscript(requestID: String, deviceID: String) -> String {
@@ -165,7 +169,7 @@ enum CryptoEngine {
         guard let key = session.keys[String(envelope.keyTimestamp)] else {
             throw ProtocolError.crypto("session key is unavailable for event timestamp")
         }
-        let aad = Data("notify.guru/v3/event/\(session.sessionID)/\(session.groupID)/\(envelope.keyTimestamp)/\(envelope.eventID)".utf8)
+        let aad = Data("notify.guru/v\(session.protocolVersion)/event/\(session.sessionID)/\(session.groupID)/\(envelope.keyTimestamp)/\(envelope.eventID)".utf8)
         return try EventDecoder.decode(try open(payload: envelope.ciphertext, nonce: envelope.nonce, key: key, aad: aad))
     }
 
@@ -188,14 +192,14 @@ enum CryptoEngine {
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
-    static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String, createdAt: String) throws -> EncryptedPayload {
+    static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String?, attachment: AttachmentManifest?, createdAt: String) throws -> EncryptedPayload {
         guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("feedback key is unavailable") }
-        let response = FeedbackPayload(id: responseID, type: "feedback", message: message, createdAt: createdAt)
+        let response = FeedbackPayload(id: responseID, type: "feedback", message: message, attachment: attachment, createdAt: createdAt)
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
     private static func encryptResponsePayload<T: Encodable>(_ response: T, session: SessionRecord, timestamp: Int64, responseID: String, key: Data) throws -> EncryptedPayload {
-        let aad = Data("notify.guru/v3/response/\(session.sessionID)/\(session.groupID)/\(timestamp)/\(responseID)".utf8)
+        let aad = Data("notify.guru/v\(session.protocolVersion)/response/\(session.sessionID)/\(session.groupID)/\(timestamp)/\(responseID)".utf8)
         let nonceData = try randomData(count: 12)
         let sealed = try AES.GCM.seal(
             JSONEncoder().encode(response), using: SymmetricKey(data: key),
@@ -206,6 +210,34 @@ enum CryptoEngine {
 
     static func randomToken() throws -> String { Base64URL.encode(try randomData(count: 32)) }
     static func randomID() throws -> String { Base64URL.encode(try randomData(count: 18)) }
+
+    static func encryptAttachment(
+        groupKey: GroupKey,
+        creatorPublicKey: String,
+        sessionID: String,
+        groupID: String,
+        responseID: String,
+        attachmentID: String,
+        jpeg: Data,
+        width: Int,
+        height: Int
+    ) throws -> EncryptedAttachment {
+        let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: groupKey.privateKey)
+        let publicKey = try P256.KeyAgreement.PublicKey(x963Representation: Base64URL.decode(creatorPublicKey))
+        let secret = try privateKey.sharedSecretFromKeyAgreement(with: publicKey)
+        let info = Data("notify.guru/attachment/v4\n\(sessionID)\n\(groupID)\n\(groupKey.timestamp)\n\(responseID)\n\(attachmentID)".utf8)
+        let key = secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(), sharedInfo: info, outputByteCount: 32)
+        let nonceData = try randomData(count: 12)
+        let aad = Data("notify.guru/v4/attachment/\(sessionID)/\(groupID)/\(groupKey.timestamp)/\(responseID)/\(attachmentID)".utf8)
+        let sealed = try AES.GCM.seal(jpeg, using: key, nonce: try AES.GCM.Nonce(data: nonceData), authenticating: aad)
+        let ciphertext = sealed.ciphertext + sealed.tag
+        let manifest = AttachmentManifest(
+            id: attachmentID, kind: "image", mediaType: "image/jpeg", byteLength: Int64(jpeg.count),
+            width: width, height: height, nonce: Base64URL.encode(nonceData),
+            ciphertextLength: Int64(ciphertext.count), ciphertextSha256: SHA256.hash(data: ciphertext).map { String(format: "%02x", $0) }.joined()
+        )
+        return EncryptedAttachment(manifest: manifest, ciphertext: ciphertext)
+    }
 
     private static func packageContext(groupID: String, publicKey: String, deviceID: String) -> String {
         "notify.guru/group-package/v2\n\(groupID)\n\(publicKey)\n\(deviceID)"
@@ -233,6 +265,23 @@ enum CryptoEngine {
 
 struct EncryptedPayload: Equatable { let nonce: String; let ciphertext: String }
 
+struct AttachmentManifest: Codable, Equatable {
+    let id: String
+    let kind: String
+    let mediaType: String
+    let byteLength: Int64
+    let width: Int
+    let height: Int
+    let nonce: String
+    let ciphertextLength: Int64
+    let ciphertextSha256: String
+}
+
+struct EncryptedAttachment: Equatable {
+    let manifest: AttachmentManifest
+    let ciphertext: Data
+}
+
 private struct ResponsePayload: Encodable {
     let id: String
     let type: String
@@ -252,7 +301,8 @@ private struct ResponsePayload: Encodable {
 private struct FeedbackPayload: Encodable {
     let id: String
     let type: String
-    let message: String
+    let message: String?
+    let attachment: AttachmentManifest?
     let createdAt: String
 }
 

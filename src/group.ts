@@ -32,6 +32,7 @@ interface MemberRow extends Record<string, SqlStorageValue> {
   encryption_public_key: string;
   request_id: string | null;
   added_at: number;
+  supports_v4: number;
 }
 
 interface KeyRow extends Record<string, SqlStorageValue> {
@@ -58,6 +59,7 @@ interface SessionRow extends Record<string, SqlStorageValue> {
   session_id: string;
   creator_public_key: string;
   expires_at: number;
+  protocol_version: number;
 }
 
 interface KeyPackage {
@@ -72,6 +74,7 @@ interface ClaimedRequest {
   deviceId: string;
   deviceAccessTokenHash: string;
   deviceEncryptionPublicKey: string;
+  protocolVersion: number;
 }
 
 export interface GroupCurrentState {
@@ -118,6 +121,14 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return meta === null ? null : this.current(meta);
   }
 
+  supportsProtocolVersion(protocolVersion: number): boolean {
+    return protocolVersion === 3 || protocolVersion === 4 && this.members().every((member) => member.supports_v4 === 1);
+  }
+
+  getKeyHistory(): Array<{ timestamp: number; publicKey: string }> {
+    return this.keys().map((key) => ({ timestamp: key.timestamp, publicKey: key.public_key }));
+  }
+
   getKeyRecipients(timestamp: number): { status: "ok"; deviceIds: string[] } | { status: "unavailable" } {
     const members = this.members().map((member) => member.device_id);
     const key = this.key(timestamp);
@@ -130,14 +141,15 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return this.keyMemberIds(timestamp).includes(deviceId) ? "authorized" : "unavailable";
   }
 
-  storeSession(sessionId: string, creatorPublicKey: string, expiresAt: number): void {
+  storeSession(sessionId: string, creatorPublicKey: string, expiresAt: number, protocolVersion = 3): void {
     this.state.storage.sql.exec(
-      `INSERT INTO group_sessions_v3 (session_id, creator_public_key, expires_at)
-       VALUES (?, ?, ?)
+      `INSERT INTO group_sessions_v3 (session_id, creator_public_key, expires_at, protocol_version)
+       VALUES (?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET expires_at = excluded.expires_at`,
       sessionId,
       creatorPublicKey,
       expiresAt,
+      protocolVersion,
     );
   }
 
@@ -152,7 +164,11 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     const meta = this.requiredMeta();
     if (request.method === "GET" && url.pathname === "/state") {
       const member = await this.requireMember(request);
-      return this.groupState(meta, member.device_id);
+      const protocolVersion = url.searchParams.get("protocolVersion") === "4" ? 4 : 3;
+      if (protocolVersion === 4 && member.supports_v4 !== 1) {
+        this.state.storage.sql.exec("UPDATE group_members_v3 SET supports_v4 = 1 WHERE device_id = ?", member.device_id);
+      }
+      return this.groupState(meta, member.device_id, protocolVersion);
     }
     if (request.method === "POST" && url.pathname === "/keys") {
       const member = await this.requireMember(request);
@@ -233,18 +249,23 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       return json({ approved: true, deviceId: requestMember.device_id, approvedByDeviceId: actor.device_id });
     }
     const claimed = await this.claimRequest(requestId, meta.group_id);
+    if (claimed.protocolVersion < 4 && this.hasActiveV4Sessions()) {
+      await this.devices.releaseDeviceRequestClaim(requestId, meta.group_id);
+      throw new HttpError(409, "protocol_upgrade_required", "This device group has version 4 sessions");
+    }
     if (this.member(claimed.deviceId) !== null) {
       throw new HttpError(409, "device_exists", "Device already belongs to the group");
     }
     this.state.storage.sql.exec(
       `INSERT INTO group_members_v3
-         (device_id, access_hash, encryption_public_key, request_id, added_at)
-       VALUES (?, ?, ?, ?, ?)`,
+         (device_id, access_hash, encryption_public_key, request_id, added_at, supports_v4)
+       VALUES (?, ?, ?, ?, ?, ?)`,
       claimed.deviceId,
       claimed.deviceAccessTokenHash,
       claimed.deviceEncryptionPublicKey,
       requestId,
       Date.now(),
+      claimed.protocolVersion >= 4 ? 1 : 0,
     );
     await this.completeRequest(requestId, meta.group_id);
     return json({ approved: true, deviceId: claimed.deviceId, approvedByDeviceId: actor.device_id });
@@ -332,7 +353,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return json({ removed: true });
   }
 
-  private groupState(meta: MetaRow, deviceId: string): Response {
+  private groupState(meta: MetaRow, deviceId: string, protocolVersion: number): Response {
     const members = this.members().map((member) => ({
       deviceId: member.device_id,
       encryptionPublicKey: member.encryption_public_key,
@@ -355,7 +376,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       nonce: item.nonce,
       ciphertext: item.ciphertext,
     }));
-    return json({ groupId: meta.group_id, members, keys, packages, sessions: this.sessionsJSON() });
+    return json({ groupId: meta.group_id, members, keys, packages, sessions: this.sessionsJSON(protocolVersion) });
   }
 
   private current(meta: MetaRow): GroupCurrentState {
@@ -372,16 +393,25 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     };
   }
 
-  private sessionsJSON(): Array<Record<string, unknown>> {
+  private sessionsJSON(protocolVersion: number): Array<Record<string, unknown>> {
     return Array.from(this.state.storage.sql.exec<SessionRow>(
-      `SELECT session_id, creator_public_key, expires_at
-       FROM group_sessions_v3 WHERE expires_at > ? ORDER BY expires_at`,
+      `SELECT session_id, creator_public_key, expires_at, protocol_version
+       FROM group_sessions_v3 WHERE expires_at > ? AND protocol_version <= ? ORDER BY expires_at`,
       Date.now(),
+      protocolVersion,
     )).map((row) => ({
       sessionId: row.session_id,
       creatorPublicKey: row.creator_public_key,
       expiresAt: row.expires_at,
+      ...(protocolVersion === 4 ? { protocolVersion: row.protocol_version } : {}),
     }));
+  }
+
+  private hasActiveV4Sessions(): boolean {
+    return Array.from(this.state.storage.sql.exec<{ found: number }>(
+      "SELECT 1 AS found FROM group_sessions_v3 WHERE expires_at > ? AND protocol_version = 4 LIMIT 1",
+      Date.now(),
+    )).length > 0;
   }
 
   private async requireMember(request: Request): Promise<MemberRow> {
@@ -412,14 +442,14 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
 
   private members(): MemberRow[] {
     return Array.from(this.state.storage.sql.exec<MemberRow>(
-      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at
+      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at, supports_v4
        FROM group_members_v3 ORDER BY added_at, device_id`,
     ));
   }
 
   private member(deviceId: string): MemberRow | null {
     const rows = Array.from(this.state.storage.sql.exec<MemberRow>(
-      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at
+      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at, supports_v4
        FROM group_members_v3 WHERE device_id = ?`,
       deviceId,
     ));
@@ -428,7 +458,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
 
   private memberByRequest(requestId: string): MemberRow | null {
     const rows = Array.from(this.state.storage.sql.exec<MemberRow>(
-      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at
+      `SELECT device_id, access_hash, encryption_public_key, request_id, added_at, supports_v4
        FROM group_members_v3 WHERE request_id = ?`,
       requestId,
     ));
@@ -525,7 +555,8 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
         access_hash TEXT NOT NULL,
         encryption_public_key TEXT NOT NULL,
         request_id TEXT UNIQUE,
-        added_at INTEGER NOT NULL
+        added_at INTEGER NOT NULL,
+        supports_v4 INTEGER NOT NULL DEFAULT 0 CHECK (supports_v4 IN (0, 1))
       );
       CREATE TABLE IF NOT EXISTS group_keys_v3 (
         timestamp INTEGER PRIMARY KEY,
@@ -549,9 +580,18 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       CREATE TABLE IF NOT EXISTS group_sessions_v3 (
         session_id TEXT PRIMARY KEY,
         creator_public_key TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
       );
     `);
+    const memberColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(group_members_v3)"));
+    if (!memberColumns.some((column) => column.name === "supports_v4")) {
+      this.state.storage.sql.exec("ALTER TABLE group_members_v3 ADD COLUMN supports_v4 INTEGER NOT NULL DEFAULT 0");
+    }
+    const sessionColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(group_sessions_v3)"));
+    if (!sessionColumns.some((column) => column.name === "protocol_version")) {
+      this.state.storage.sql.exec("ALTER TABLE group_sessions_v3 ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
+    }
   }
 }
 

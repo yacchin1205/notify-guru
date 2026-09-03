@@ -183,7 +183,8 @@ func (s *Server) notify(ctx context.Context, _ *mcp.CallToolRequest, input messa
 	if err != nil {
 		return nil, notifiedOutput{}, err
 	}
-	return nil, notifiedOutput{Delivered: true, ItemID: itemID, Responses: s.drainResponses(ctx, input.SessionID)}, nil
+	responses := s.drainResponses(ctx, input.SessionID)
+	return attachmentContent(responses), notifiedOutput{Delivered: true, ItemID: itemID, Responses: responses}, nil
 }
 
 type statusInput struct {
@@ -195,7 +196,8 @@ func (s *Server) status(ctx context.Context, _ *mcp.CallToolRequest, input statu
 	if err := s.store.SendStatus(ctx, input.SessionID, input.Status); err != nil {
 		return nil, deliveredOutput{}, err
 	}
-	return nil, deliveredOutput{Delivered: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
+	responses := s.drainResponses(ctx, input.SessionID)
+	return attachmentContent(responses), deliveredOutput{Delivered: true, Responses: responses}, nil
 }
 
 type colorInput struct {
@@ -207,7 +209,8 @@ func (s *Server) color(ctx context.Context, _ *mcp.CallToolRequest, input colorI
 	if err := s.store.SetColor(ctx, input.SessionID, input.Color); err != nil {
 		return nil, deliveredOutput{}, err
 	}
-	return nil, deliveredOutput{Delivered: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
+	responses := s.drainResponses(ctx, input.SessionID)
+	return attachmentContent(responses), deliveredOutput{Delivered: true, Responses: responses}, nil
 }
 
 type requestInput struct {
@@ -227,7 +230,8 @@ func (s *Server) request(ctx context.Context, _ *mcp.CallToolRequest, input requ
 	if err != nil {
 		return nil, requestOutput{}, err
 	}
-	return nil, requestOutput{RequestID: requestID, Choices: choices, Responses: s.drainResponses(ctx, input.SessionID)}, nil
+	responses := s.drainResponses(ctx, input.SessionID)
+	return attachmentContent(responses), requestOutput{RequestID: requestID, Choices: choices, Responses: responses}, nil
 }
 
 type closeRequestInput struct {
@@ -239,7 +243,8 @@ func (s *Server) closeRequest(ctx context.Context, _ *mcp.CallToolRequest, input
 	if err := s.store.CloseRequest(ctx, input.SessionID, input.RequestID); err != nil {
 		return nil, closeOutput{}, err
 	}
-	return nil, closeOutput{Closed: true, Responses: s.drainResponses(ctx, input.SessionID)}, nil
+	responses := s.drainResponses(ctx, input.SessionID)
+	return attachmentContent(responses), closeOutput{Closed: true, Responses: responses}, nil
 }
 
 type responsesOutput struct {
@@ -255,7 +260,7 @@ func (s *Server) waitResponses(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	if err != nil {
 		return nil, responsesOutput{}, err
 	}
-	return nil, responsesOutput{Responses: responses}, nil
+	return attachmentContent(responses), responsesOutput{Responses: responses}, nil
 }
 
 type closeOutput struct {
@@ -270,7 +275,29 @@ func (s *Server) close(ctx context.Context, _ *mcp.CallToolRequest, input sessio
 	if err := s.store.Close(ctx, input.SessionID); err != nil {
 		return nil, closeOutput{}, err
 	}
-	return nil, closeOutput{Closed: true, Responses: responses}, nil
+	return attachmentContent(responses), closeOutput{Closed: true, Responses: responses}, nil
+}
+
+func attachmentContent(responses []notify.Response) *mcp.CallToolResult {
+	var content []mcp.Content
+	for _, response := range responses {
+		if response.Attachment == nil {
+			continue
+		}
+		size := response.Attachment.ByteLength
+		content = append(content, &mcp.ResourceLink{
+			URI:         response.Attachment.URI,
+			Name:        response.Attachment.ID + ".jpg",
+			Title:       "Photo attached to response " + response.ID,
+			Description: "End-to-end encrypted attachment decrypted by notifyg into a local temporary file",
+			MIMEType:    response.Attachment.MediaType,
+			Size:        &size,
+		})
+	}
+	if len(content) == 0 {
+		return nil
+	}
+	return &mcp.CallToolResult{Content: content}
 }
 
 // drainResponses returns the responses received before this call so that a

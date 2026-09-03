@@ -18,6 +18,7 @@ import {
   stringField,
 } from "./http";
 import { APNsClient, APNsTransportError, type APNsAlertKind, type APNsEnvironment } from "./apns";
+import { randomIdentifier } from "./protocol";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
@@ -26,12 +27,15 @@ const PUSH_RETRY_BASE_MS = 30_000;
 const PUSH_RETRY_CAP_MS = 30 * 60 * 1000;
 const PUSH_ALARM_FALLBACK_MS = 15 * 60 * 1000;
 const NOTIFICATION_KIND = /^(none|status|notify|request)$/;
+const ATTACHMENT_MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
+const ATTACHMENT_UPLOAD_LIFETIME_MS = 10 * 60 * 1000;
 
 type ItemKind = "notify" | "request";
 
 interface SessionEnv {
   GROUPS: DurableObjectNamespace<DeviceGroup>;
   DEVICES: DurableObjectNamespace<DeviceRegistry>;
+  ATTACHMENTS: R2Bucket;
   APNS_KEY_ID?: string;
   APNS_TEAM_ID?: string;
   APNS_PRIVATE_KEY?: string;
@@ -42,6 +46,21 @@ interface MetaRow extends Record<string, SqlStorageValue> {
   manager_hash: string;
   creator_public_key: string;
   expires_at: number;
+  protocol_version: number;
+}
+
+interface AttachmentRow extends Record<string, SqlStorageValue> {
+  attachment_id: string;
+  response_id: string;
+  group_id: string;
+  device_id: string;
+  key_timestamp: number;
+  object_key: string;
+  upload_token_hash: string;
+  ciphertext_length: number;
+  ciphertext_sha256: string;
+  state: "reserved" | "uploaded" | "committed";
+  upload_expires_at: number;
 }
 
 interface GroupRow extends Record<string, SqlStorageValue> {
@@ -80,6 +99,7 @@ interface ResponseRow extends Record<string, SqlStorageValue> {
   nonce: string;
   ciphertext: string;
   created_at: number;
+  attachment_id: string | null;
 }
 
 interface PushJobRow extends Record<string, SqlStorageValue> {
@@ -96,6 +116,7 @@ export class Session extends DurableObject<SessionEnv> {
   private readonly apns: APNsClient;
   private readonly groups: DurableObjectNamespace<DeviceGroup>;
   private readonly devices: DurableObjectStub<DeviceRegistry>;
+  private readonly attachments: R2Bucket;
 
   constructor(
     state: DurableObjectState,
@@ -105,6 +126,7 @@ export class Session extends DurableObject<SessionEnv> {
     this.state = state;
     this.groups = env.GROUPS;
     this.devices = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    this.attachments = env.ATTACHMENTS;
     this.apns = new APNsClient({
       keyId: env.APNS_KEY_ID,
       teamId: env.APNS_TEAM_ID,
@@ -212,6 +234,16 @@ export class Session extends DurableObject<SessionEnv> {
     }
     if (request.method === "GET" && url.pathname === "/events") return this.events(request, url, meta);
     if (request.method === "PUT" && url.pathname === "/attention") return this.setAttention(request, meta);
+    if (request.method === "POST" && url.pathname === "/attachments") return this.reserveAttachment(request, meta);
+    const attachmentMatch = /^\/attachments\/([^/]+)$/.exec(url.pathname);
+    if (attachmentMatch !== null) {
+      const attachmentId = stringField({ attachmentId: attachmentMatch[1] }, "attachmentId", IDENTIFIER, 64);
+      if (request.method === "PUT") return this.uploadAttachment(request, meta, attachmentId);
+      if (request.method === "GET") {
+        await this.requireManager(request, meta);
+        return this.downloadAttachment(attachmentId);
+      }
+    }
     if (request.method === "POST" && url.pathname === "/responses") return this.addResponse(request, meta);
     if (request.method === "GET" && url.pathname === "/responses") {
       await this.requireManager(request, meta);
@@ -235,21 +267,26 @@ export class Session extends DurableObject<SessionEnv> {
       throw new HttpError(409, "session_exists", "Session already exists");
     }
     const body = await readObject(request);
-    expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"]);
+    expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
     const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
     const managerHash = stringField(body, "managerTokenHash", SHA256_HEX, 64);
     const creatorPublicKey = stringField(body, "creatorPublicKey", BASE64URL, 128);
+    const protocolVersion = body.protocolVersion === undefined ? 3 : integerField(body, "protocolVersion");
+    if (protocolVersion !== 3 && protocolVersion !== 4) {
+      throw new HttpError(400, "unsupported_protocol", "Protocol version is not supported");
+    }
     const pairing = pairingObject(body.pairing);
     const now = Date.now();
     const expiresAt = now + SESSION_LIFETIME_MS;
     this.createSchema();
     this.state.storage.sql.exec(
-      `INSERT INTO meta (singleton, session_id, manager_hash, creator_public_key, expires_at)
-       VALUES (1, ?, ?, ?, ?)`,
+      `INSERT INTO meta (singleton, session_id, manager_hash, creator_public_key, expires_at, protocol_version)
+       VALUES (1, ?, ?, ?, ?, ?)`,
       sessionId,
       managerHash,
       creatorPublicKey,
       expiresAt,
+      protocolVersion,
     );
     this.state.storage.sql.exec(
       "INSERT INTO pairings (id, token_hash, created_at) VALUES (?, ?, ?)",
@@ -298,6 +335,9 @@ export class Session extends DurableObject<SessionEnv> {
       throw new HttpError(401, "invalid_pairing_token", "Pairing token is invalid");
     }
     await this.authorizeGroupDevice(groupId, deviceId, deviceAccessToken);
+    if (!(await this.groupStub(groupId).supportsProtocolVersion(meta.protocol_version))) {
+      throw new HttpError(409, "protocol_upgrade_required", "Every device in the group must support this session protocol");
+    }
     const current = await this.groupCurrent(groupId);
     if (current.key === null || current.key.timestamp !== keyTimestamp || current.key.publicKey !== groupPublicKey) {
       throw new HttpError(409, "group_key_changed", "Device group key has changed");
@@ -328,6 +368,9 @@ export class Session extends DurableObject<SessionEnv> {
     ));
     const groups = await Promise.all(rows.map(async (row) => {
       const current = await this.groupCurrent(row.id);
+      const keys = meta.protocol_version === 4
+        ? (await this.groupStub(row.id).getKeyHistory()).filter((key) => key.timestamp >= row.initial_key_timestamp)
+        : undefined;
       return {
         sequence: row.sequence,
         groupId: row.id,
@@ -337,6 +380,7 @@ export class Session extends DurableObject<SessionEnv> {
         proof: row.join_proof,
         joinedAt: row.joined_at,
         key: current.key,
+        ...(keys === undefined ? {} : { keys }),
       };
     }));
     return json({ groups, expiresAt: meta.expires_at });
@@ -509,12 +553,139 @@ export class Session extends DurableObject<SessionEnv> {
     return json({ attention, expiresAt: meta.expires_at });
   }
 
+  private async reserveAttachment(request: Request, meta: MetaRow): Promise<Response> {
+    this.requireV4(meta);
+    const body = await readObject(request);
+    expectKeys(body, [
+      "attachmentId",
+      "responseId",
+      "groupId",
+      "deviceId",
+      "keyTimestamp",
+      "ciphertextLength",
+      "ciphertextSha256",
+    ]);
+    const attachmentId = stringField(body, "attachmentId", IDENTIFIER, 64);
+    const responseId = stringField(body, "responseId", IDENTIFIER, 64);
+    const groupId = stringField(body, "groupId", IDENTIFIER, 64);
+    const deviceId = stringField(body, "deviceId", IDENTIFIER, 64);
+    const keyTimestamp = integerField(body, "keyTimestamp");
+    const ciphertextLength = integerField(body, "ciphertextLength");
+    const ciphertextSha256 = stringField(body, "ciphertextSha256", SHA256_HEX, 64);
+    if (ciphertextLength === 0 || ciphertextLength > ATTACHMENT_MAX_CIPHERTEXT_BYTES) {
+      throw new HttpError(413, "attachment_too_large", "Attachment ciphertext exceeds the current service limit");
+    }
+    this.requireGroup(groupId);
+    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
+    await this.groupKeyDevice(groupId, keyTimestamp, deviceId);
+    if (this.responseExists(responseId)) {
+      throw new HttpError(409, "response_exists", "Response already exists");
+    }
+
+    const uploadToken = randomIdentifier();
+    const uploadTokenHash = await sha256Hex(uploadToken);
+    const uploadExpiresAt = Math.min(meta.expires_at, Date.now() + ATTACHMENT_UPLOAD_LIFETIME_MS);
+    const existing = this.attachment(attachmentId) ?? this.attachmentByResponse(responseId);
+    if (existing !== null) {
+      if (
+        existing.attachment_id !== attachmentId || existing.response_id !== responseId ||
+        existing.group_id !== groupId || existing.device_id !== deviceId ||
+        existing.key_timestamp !== keyTimestamp || existing.ciphertext_length !== ciphertextLength ||
+        existing.ciphertext_sha256 !== ciphertextSha256 || existing.state !== "reserved"
+      ) {
+        throw new HttpError(409, "attachment_exists", "Attachment or response ID is already reserved");
+      }
+      this.state.storage.sql.exec(
+        `UPDATE session_attachments_v4
+         SET upload_token_hash = ?, upload_expires_at = ? WHERE attachment_id = ?`,
+        uploadTokenHash,
+        uploadExpiresAt,
+        attachmentId,
+      );
+    } else {
+      this.state.storage.sql.exec(
+        `INSERT INTO session_attachments_v4
+           (attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
+            upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?)`,
+        attachmentId,
+        responseId,
+        groupId,
+        deviceId,
+        keyTimestamp,
+        `v4/${randomIdentifier()}`,
+        uploadTokenHash,
+        ciphertextLength,
+        ciphertextSha256,
+        uploadExpiresAt,
+        Date.now(),
+      );
+    }
+    return json({ attachmentId, uploadToken, maxCiphertextBytes: ATTACHMENT_MAX_CIPHERTEXT_BYTES, uploadExpiresAt }, 201);
+  }
+
+  private async uploadAttachment(request: Request, meta: MetaRow, attachmentId: string): Promise<Response> {
+    this.requireV4(meta);
+    const row = this.requiredAttachment(attachmentId);
+    const tokenHash = await sha256Hex(bearerToken(request));
+    if (!equalHex(row.upload_token_hash, tokenHash)) {
+      throw new HttpError(401, "invalid_upload_token", "Attachment upload token is invalid");
+    }
+    if (row.state !== "reserved") return json({ uploaded: true });
+    if (Date.now() >= row.upload_expires_at) {
+      throw new HttpError(410, "upload_expired", "Attachment upload reservation has expired");
+    }
+    if (request.headers.get("content-type")?.split(";", 1)[0] !== "application/octet-stream") {
+      throw new HttpError(415, "invalid_content_type", "Content-Type must be application/octet-stream");
+    }
+    const declaredLength = request.headers.get("content-length");
+    if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) !== row.ciphertext_length)) {
+      throw new HttpError(400, "attachment_length_mismatch", "Attachment ciphertext length does not match its reservation");
+    }
+    const ciphertext = await request.arrayBuffer();
+    if (ciphertext.byteLength !== row.ciphertext_length || ciphertext.byteLength > ATTACHMENT_MAX_CIPHERTEXT_BYTES) {
+      throw new HttpError(400, "attachment_length_mismatch", "Attachment ciphertext length does not match its reservation");
+    }
+    const digest = await sha256BytesHex(ciphertext);
+    if (!equalHex(digest, row.ciphertext_sha256)) {
+      throw new HttpError(400, "attachment_checksum_mismatch", "Attachment ciphertext checksum does not match its reservation");
+    }
+    await this.attachments.put(row.object_key, ciphertext, {
+      httpMetadata: { contentType: "application/octet-stream" },
+      sha256: row.ciphertext_sha256,
+    });
+    this.state.storage.sql.exec(
+      "UPDATE session_attachments_v4 SET state = 'uploaded' WHERE attachment_id = ?",
+      attachmentId,
+    );
+    return json({ uploaded: true });
+  }
+
+  private async downloadAttachment(attachmentId: string): Promise<Response> {
+    const row = this.requiredAttachment(attachmentId);
+    if (row.state !== "committed") {
+      throw new HttpError(409, "attachment_not_committed", "Attachment is not attached to a response");
+    }
+    const object = await this.attachments.get(row.object_key);
+    if (object === null) throw new HttpError(404, "attachment_not_found", "Attachment ciphertext was not found");
+    if (object.size !== row.ciphertext_length) {
+      throw new HttpError(500, "attachment_corrupt", "Stored attachment ciphertext has an unexpected length");
+    }
+    return new Response(object.body, {
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/octet-stream",
+        "content-length": String(row.ciphertext_length),
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+
   private async addResponse(request: Request, meta: MetaRow): Promise<Response> {
     const body = await readObject(request);
     const tracked = body.itemId !== undefined;
-    expectKeys(body, tracked
-      ? ["responseId", "itemId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"]
-      : ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"]);
+    const hasAttachment = body.attachmentId !== undefined;
+    expectKeys(body, ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"], ["itemId", "attachmentId"]);
     const responseId = stringField(body, "responseId", IDENTIFIER, 64);
     const itemId = tracked ? stringField(body, "itemId", IDENTIFIER, 64) : null;
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
@@ -522,11 +693,21 @@ export class Session extends DurableObject<SessionEnv> {
     const keyTimestamp = integerField(body, "keyTimestamp");
     const nonce = stringField(body, "nonce", BASE64URL, 32);
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
+    const attachmentId = hasAttachment ? stringField(body, "attachmentId", IDENTIFIER, 64) : null;
+    if (hasAttachment) this.requireV4(meta);
     this.requireGroup(groupId);
     await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
     await this.groupKeyDevice(groupId, keyTimestamp, deviceId);
     if (this.responseExists(responseId)) {
       throw new HttpError(409, "response_exists", "Response already exists");
+    }
+    const attachment = attachmentId === null ? null : this.requiredAttachment(attachmentId);
+    if (attachment !== null && (
+      attachment.state !== "uploaded" || attachment.response_id !== responseId ||
+      attachment.group_id !== groupId || attachment.device_id !== deviceId ||
+      attachment.key_timestamp !== keyTimestamp
+    )) {
+      throw new HttpError(409, "attachment_mismatch", "Uploaded attachment does not match the response envelope");
     }
     if (itemId !== null) this.requireDeliveredItem(itemId, groupId, deviceId);
     if (itemId !== null) await this.devices.deactivateSessionItem(meta.session_id, itemId);
@@ -534,8 +715,8 @@ export class Session extends DurableObject<SessionEnv> {
     this.state.storage.transactionSync(() => {
       this.state.storage.sql.exec(
         `INSERT INTO session_responses_v3
-           (response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         responseId,
         itemId,
         groupId,
@@ -543,7 +724,14 @@ export class Session extends DurableObject<SessionEnv> {
         nonce,
         ciphertext,
         now,
+        attachmentId,
       );
+      if (attachmentId !== null) {
+        this.state.storage.sql.exec(
+          "UPDATE session_attachments_v4 SET state = 'committed' WHERE attachment_id = ?",
+          attachmentId,
+        );
+      }
       if (itemId !== null) {
         this.state.storage.sql.exec(
           "UPDATE session_items_v1 SET invalidated_at = COALESCE(invalidated_at, ?) WHERE item_id = ?",
@@ -570,10 +758,11 @@ export class Session extends DurableObject<SessionEnv> {
     return json({ expiresAt: meta.expires_at }, 201);
   }
 
-  private responses(url: URL, meta: MetaRow): Response {
+  private async responses(url: URL, meta: MetaRow): Promise<Response> {
     const after = integerQuery(url, "after");
+    await this.releaseAcknowledgedAttachments(after);
     const responses = Array.from(this.state.storage.sql.exec<ResponseRow>(
-      `SELECT sequence, response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at
+      `SELECT sequence, response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_id
        FROM session_responses_v3 WHERE sequence > ? ORDER BY sequence LIMIT 100`,
       after,
     )).map((row) => ({
@@ -585,6 +774,7 @@ export class Session extends DurableObject<SessionEnv> {
       nonce: row.nonce,
       ciphertext: row.ciphertext,
       createdAt: row.created_at,
+      ...(row.attachment_id === null ? {} : { attachmentId: row.attachment_id }),
     }));
     return json({ responses, expiresAt: meta.expires_at });
   }
@@ -602,9 +792,62 @@ export class Session extends DurableObject<SessionEnv> {
     return meta;
   }
 
+  private requireV4(meta: MetaRow): void {
+    if (meta.protocol_version !== 4) {
+      throw new HttpError(409, "protocol_mismatch", "Attachments require a protocol version 4 session");
+    }
+  }
+
+  private attachment(attachmentId: string): AttachmentRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<AttachmentRow>(
+      `SELECT attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
+              upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at
+       FROM session_attachments_v4 WHERE attachment_id = ?`,
+      attachmentId,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private attachmentByResponse(responseId: string): AttachmentRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<AttachmentRow>(
+      `SELECT attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
+              upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at
+       FROM session_attachments_v4 WHERE response_id = ?`,
+      responseId,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private requiredAttachment(attachmentId: string): AttachmentRow {
+    const row = this.attachment(attachmentId);
+    if (row === null) throw new HttpError(404, "attachment_not_found", "Attachment was not found");
+    return row;
+  }
+
+  private async releaseAcknowledgedAttachments(after: number): Promise<void> {
+    if (after === 0) return;
+    const rows = Array.from(this.state.storage.sql.exec<{ attachment_id: string; object_key: string }>(
+      `SELECT a.attachment_id, a.object_key
+       FROM session_attachments_v4 a
+       JOIN session_responses_v3 r ON r.attachment_id = a.attachment_id
+       WHERE a.state = 'committed' AND r.sequence <= ?`,
+      after,
+    ));
+    if (rows.length === 0) return;
+    await this.attachments.delete(rows.map((row) => row.object_key));
+    this.state.storage.sql.exec(
+      `DELETE FROM session_attachments_v4
+       WHERE attachment_id IN (
+         SELECT attachment_id FROM session_responses_v3
+         WHERE attachment_id IS NOT NULL AND sequence <= ?
+       )`,
+      after,
+    );
+  }
+
   private metaRow(): MetaRow {
     const rows = Array.from(this.state.storage.sql.exec<MetaRow>(
-      "SELECT session_id, manager_hash, creator_public_key, expires_at FROM meta WHERE singleton = 1",
+      "SELECT session_id, manager_hash, creator_public_key, expires_at, protocol_version FROM meta WHERE singleton = 1",
     ));
     if (rows.length !== 1) throw new Error("Initialized session must contain exactly one meta row");
     return rows[0];
@@ -674,7 +917,7 @@ export class Session extends DurableObject<SessionEnv> {
   }
 
   private async putGroupSession(groupId: string, meta: MetaRow, expiresAt: number): Promise<void> {
-    await this.groupStub(groupId).storeSession(meta.session_id, meta.creator_public_key, expiresAt);
+    await this.groupStub(groupId).storeSession(meta.session_id, meta.creator_public_key, expiresAt, meta.protocol_version);
   }
 
   private async removeGroupSession(groupId: string, sessionId: string): Promise<void> {
@@ -781,6 +1024,10 @@ export class Session extends DurableObject<SessionEnv> {
 
   private async expireSession(sessionId: string): Promise<void> {
     await this.devices.deactivateSession(sessionId);
+    const objectKeys = Array.from(this.state.storage.sql.exec<{ object_key: string }>(
+      "SELECT object_key FROM session_attachments_v4",
+    )).map((row) => row.object_key);
+    if (objectKeys.length > 0) await this.attachments.delete(objectKeys);
   }
 
   private createSchema(): void {
@@ -790,7 +1037,8 @@ export class Session extends DurableObject<SessionEnv> {
         session_id TEXT NOT NULL,
         manager_hash TEXT NOT NULL,
         creator_public_key TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
       );
       CREATE TABLE IF NOT EXISTS pairings (
         id TEXT PRIMARY KEY,
@@ -830,6 +1078,21 @@ export class Session extends DurableObject<SessionEnv> {
         key_timestamp INTEGER NOT NULL,
         nonce TEXT NOT NULL,
         ciphertext TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        attachment_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS session_attachments_v4 (
+        attachment_id TEXT PRIMARY KEY,
+        response_id TEXT NOT NULL UNIQUE,
+        group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
+        device_id TEXT NOT NULL,
+        key_timestamp INTEGER NOT NULL,
+        object_key TEXT NOT NULL UNIQUE,
+        upload_token_hash TEXT NOT NULL,
+        ciphertext_length INTEGER NOT NULL,
+        ciphertext_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'uploaded', 'committed')),
+        upload_expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS push_jobs_v3 (
@@ -864,6 +1127,13 @@ export class Session extends DurableObject<SessionEnv> {
     const responseColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_responses_v3)"));
     if (!responseColumns.some((column) => column.name === "item_id")) {
       this.state.storage.sql.exec("ALTER TABLE session_responses_v3 ADD COLUMN item_id TEXT");
+    }
+    if (!responseColumns.some((column) => column.name === "attachment_id")) {
+      this.state.storage.sql.exec("ALTER TABLE session_responses_v3 ADD COLUMN attachment_id TEXT");
+    }
+    const metaColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(meta)"));
+    if (!metaColumns.some((column) => column.name === "protocol_version")) {
+      this.state.storage.sql.exec("ALTER TABLE meta ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
     }
     const pushColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(push_jobs_v3)"));
     if (!pushColumns.some((column) => column.name === "notification_kind")) {
@@ -936,4 +1206,9 @@ function pushRetryDelay(attempt: number, minimumDelayMs: number): number {
   crypto.getRandomValues(random);
   const jittered = exponential * (0.5 + random[0] / 2 ** 32);
   return minimumDelayMs + Math.floor(jittered);
+}
+
+async function sha256BytesHex(value: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", value);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

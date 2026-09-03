@@ -8,6 +8,7 @@ interface Env {
   GROUPS: DurableObjectNamespace<DeviceGroup>;
   DEVICES: DurableObjectNamespace<DeviceRegistry>;
   ASSETS: Fetcher;
+  ATTACHMENTS: R2Bucket;
 }
 
 export { DeviceGroup, DeviceRegistry, Session };
@@ -58,7 +59,7 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/api/sessions") {
         const body = await readObject(request);
-        expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"]);
+        expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
         const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
         return sessionStub(env, sessionId).fetch(
           forwardedRequest("/create", request, JSON.stringify(body)),

@@ -19,6 +19,12 @@
     "run_worker_first": true,
     "not_found_handling": "single-page-application"
   },
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS",
+      "bucket_name": "notify-guru-attachments"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

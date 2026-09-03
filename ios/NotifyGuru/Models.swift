@@ -58,13 +58,14 @@ struct KeyPackage: Codable, Equatable {
 }
 
 struct GroupSessionResult: Codable, Equatable {
+    let protocolVersion: Int
     let sessionID: String
     let creatorPublicKey: String
     let expiresAt: Int64
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "sessionId"
-        case creatorPublicKey, expiresAt
+        case protocolVersion, creatorPublicKey, expiresAt
     }
 }
 
@@ -118,6 +119,12 @@ struct SessionNotification: Codable, Equatable, Identifiable {
     let message: String
     var createdAt: Int64? = nil
     var serverItemID: String? = nil
+}
+
+struct PreparedPhoto: Equatable {
+    let jpeg: Data
+    let width: Int
+    let height: Int
 }
 
 struct SessionRecord: Equatable, Identifiable {

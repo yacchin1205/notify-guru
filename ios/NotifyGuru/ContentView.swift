@@ -1,4 +1,5 @@
 import CoreImage.CIFilterBuiltins
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -566,7 +567,7 @@ private struct SessionCard: View {
         }
         .sensoryFeedback(.success, trigger: attentionChanges)
         .sheet(isPresented: $showingFeedback) {
-            FeedbackView(sessionID: session.sessionID, isPresented: $showingFeedback)
+            FeedbackView(sessionID: session.sessionID, protocolVersion: session.protocolVersion, isPresented: $showingFeedback)
         }
     }
 
@@ -608,35 +609,176 @@ private struct RelativeTimeText: View {
 private struct FeedbackView: View {
     @EnvironmentObject private var model: AppModel
     let sessionID: String
+    let protocolVersion: Int
     @Binding var isPresented: Bool
     @State private var message = ""
     @State private var sending = false
+    @State private var showingCamera = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var preparingPhoto = false
+    @State private var photo: PreparedPhoto?
+    @State private var photoError: String?
 
     var body: some View {
         NavigationStack {
-            TextEditor(text: $message)
-                .padding()
-                .navigationTitle("Send a message")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { isPresented = false }
+            VStack(spacing: 16) {
+                TextEditor(text: $message)
+                    .frame(minHeight: 180)
+                    .accessibilityLabel("Message")
+                if protocolVersion == 4 {
+                    if let photo, let image = UIImage(data: photo.jpeg) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .accessibilityLabel("Selected photo preview")
+                            .accessibilityIdentifier("selected-photo-preview")
                     }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Send") {
-                            sending = true
-                            Task {
-                                if await model.sendFeedback(sessionID: sessionID, message: message) {
-                                    isPresented = false
-                                }
-                                sending = false
-                            }
+                    HStack {
+                        Button("Take Photo", systemImage: "camera") {
+                            selectedPhotoItem = nil
+                            showingCamera = true
                         }
-                        .disabled(sending || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(preparingPhoto || !UIImagePickerController.isSourceTypeAvailable(.camera))
+                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                            Label("Choose Photo", systemImage: "photo.on.rectangle")
+                        }
+                        .disabled(preparingPhoto)
+                    }
+                    if photo != nil {
+                        Button("Remove Photo", systemImage: "trash", role: .destructive) {
+                            selectedPhotoItem = nil
+                            photo = nil
+                            photoError = nil
+                        }
+                        .disabled(preparingPhoto)
+                    }
+                    if preparingPhoto { ProgressView("Preparing photo") }
+                    if let photoError {
+                        Text(photoError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("photo-preparation-error")
                     }
                 }
+            }
+            .padding()
+            .navigationTitle("Send a message")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { isPresented = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send") {
+                        sending = true
+                        Task {
+                            if await model.sendFeedback(sessionID: sessionID, message: message, photo: photo) {
+                                isPresented = false
+                            }
+                            sending = false
+                        }
+                    }
+                    .disabled(
+                        sending || preparingPhoto ||
+                        (message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photo == nil)
+                    )
+                }
+            }
+        }
+        .onChange(of: selectedPhotoItem) { _, item in
+            guard let item else { return }
+            preparingPhoto = true
+            photoError = nil
+            Task {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self),
+                          let image = UIImage(data: data),
+                          let prepared = normalizedPhoto(image) else {
+                        throw PhotoPreparationError.failed
+                    }
+                    photo = prepared
+                    selectedPhotoItem = nil
+                } catch {
+                    selectedPhotoItem = nil
+                    photoError = "The selected photo could not be prepared within the attachment limit."
+                }
+                preparingPhoto = false
+            }
+        }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraPicker { image in
+                if let image {
+                    photo = normalizedPhoto(image)
+                    photoError = photo == nil ? "The photo could not be prepared within the attachment limit." : nil
+                }
+                showingCamera = false
+            }
+            .ignoresSafeArea()
         }
     }
+}
+
+private enum PhotoPreparationError: Error {
+    case failed
+}
+
+private struct CameraPicker: UIViewControllerRepresentable {
+    let completion: (UIImage?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let controller = UIImagePickerController()
+        controller.sourceType = .camera
+        controller.cameraCaptureMode = .photo
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let completion: (UIImage?) -> Void
+        init(completion: @escaping (UIImage?) -> Void) { self.completion = completion }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { completion(nil) }
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            completion(info[.originalImage] as? UIImage)
+        }
+    }
+}
+
+private func normalizedPhoto(_ image: UIImage) -> PreparedPhoto? {
+    let sourceWidth = image.cgImage?.width ?? Int(image.size.width * image.scale)
+    let sourceHeight = image.cgImage?.height ?? Int(image.size.height * image.scale)
+    guard sourceWidth > 0, sourceHeight > 0 else { return nil }
+    let initialScale = min(1, 2048 / CGFloat(max(sourceWidth, sourceHeight)))
+    var width = max(1, Int((CGFloat(sourceWidth) * initialScale).rounded()))
+    var height = max(1, Int((CGFloat(sourceHeight) * initialScale).rounded()))
+    var quality: CGFloat = 0.82
+    for attempt in 0..<10 {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let rendered = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { _ in
+            image.draw(in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        guard let jpeg = rendered.jpegData(compressionQuality: quality) else { return nil }
+        if jpeg.count <= 1024 * 1024 || (attempt == 9 && jpeg.count <= 2 * 1024 * 1024 - 16) {
+            return PreparedPhoto(jpeg: jpeg, width: width, height: height)
+        }
+        if quality > 0.55 {
+            quality -= 0.09
+        } else {
+            width = max(1, Int((CGFloat(width) * 0.82).rounded()))
+            height = max(1, Int((CGFloat(height) * 0.82).rounded()))
+        }
+    }
+    return nil
 }
 
 private extension Color {

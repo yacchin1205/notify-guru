@@ -8,9 +8,11 @@ import {
   getGroupState,
   joinSession,
   postResponse,
+  reserveAttachment,
   registerDevice,
   registerGroupKey,
   removeDevice,
+  uploadAttachment,
 } from "./api.js";
 import {
   createDeviceIdentity,
@@ -22,6 +24,7 @@ import {
   deviceRequestReadTranscript,
   deviceRequestTranscript,
   encryptResponse,
+  encryptAttachment,
   groupCreateTranscript,
   groupDeviceApproveTranscript,
   groupDeviceRemoveTranscript,
@@ -110,10 +113,12 @@ async function initialize() {
 async function identityOrCreate() {
   const current = await getIdentity();
   if (current !== undefined) {
-    if (current.protocolVersion !== 3) {
+    if (current.protocolVersion !== 3 && current.protocolVersion !== 4) {
       throw new LegacyProtocolError("このブラウザに保存されているnotify.guruのデータを読み込めません。");
     }
+    current.protocolVersion = 4;
     delete current.deviceRequest;
+    await putIdentity(current);
     return current;
   }
   const created = await createDeviceIdentity();
@@ -150,7 +155,7 @@ async function beginDeviceRequest() {
   }
   if (identity.group !== null) {
     await syncGroup();
-    const sessions = (await listSessions()).filter((session) => session.protocolVersion === 3 && session.groupId === identity.group.groupId);
+    const sessions = (await listSessions()).filter((session) => (session.protocolVersion === 3 || session.protocolVersion === 4) && session.groupId === identity.group.groupId);
     if ((groupState.members.length > 1 || sessions.length > 0)
       && !window.confirm("このデバイスを現在のグループから除外し、表示中のセッションを削除して、別のグループへの追加を続けますか？")) return;
     const groupId = identity.group.groupId;
@@ -171,7 +176,8 @@ async function beginDeviceRequest() {
     deviceId: identity.deviceId,
     deviceAccessTokenHash: accessHash,
     deviceEncryptionPublicKey: identity.encryptionPublicKey,
-    deviceSignature: await signDevice(identity, deviceRequestTranscript(requestId, identity, accessHash)),
+    deviceSignature: await signDevice(identity, deviceRequestTranscript(requestId, identity, accessHash, 4)),
+    protocolVersion: 4,
   });
   pendingDeviceRequest = created;
   showDeviceRequest(created);
@@ -241,7 +247,7 @@ async function syncAll() {
       await ensureExactGroupKey();
       await inheritSessions();
       for (const session of await listSessions()) {
-        if (session.protocolVersion !== 3) throw new Error("Stored session uses an unsupported protocol");
+        if (session.protocolVersion !== 3 && session.protocolVersion !== 4) throw new Error("Stored session uses an unsupported protocol");
         if (session.groupId !== identity.group.groupId) continue;
         try {
           await syncSession(session);
@@ -329,7 +335,8 @@ async function currentLocalKey() {
 async function joinFromFragment() {
   const parameters = new URLSearchParams(location.hash.slice(1));
   requireFragmentFields(parameters, ["v", "s", "p", "t", "a", "k", "c"]);
-  if (parameters.get("v") !== "3") throw new Error("Unsupported pairing protocol version");
+  const protocolVersion = Number(parameters.get("v"));
+  if (protocolVersion !== 3 && protocolVersion !== 4) throw new Error("Unsupported pairing protocol version");
   if (identity.group === null) await createSoloGroup();
   await syncGroup();
   await ensureExactGroupKey();
@@ -338,7 +345,7 @@ async function joinFromFragment() {
   const groupKey = await currentLocalKey();
   const pairingId = parameters.get("p");
   const proof = await pairingProof(
-    parameters.get("a"), sessionId, pairingId, identity.group.groupId, groupKey.timestamp, groupKey.publicKey,
+    parameters.get("a"), protocolVersion, sessionId, pairingId, identity.group.groupId, groupKey.timestamp, groupKey.publicKey,
   );
   const expiresAt = await joinSession(sessionId, {
     pairingId,
@@ -350,7 +357,7 @@ async function joinFromFragment() {
     groupPublicKey: groupKey.publicKey,
     proof,
   });
-  await putSession(newSession(sessionId, identity.group.groupId, parameters.get("k"), expiresAt, colorValue(`#${parameters.get("c")}`)));
+  await putSession(newSession(protocolVersion, sessionId, identity.group.groupId, parameters.get("k"), expiresAt, colorValue(`#${parameters.get("c")}`)));
   history.replaceState(null, "", "/");
   messageElement.textContent = "セッションへ参加しました。";
 }
@@ -358,7 +365,7 @@ async function joinFromFragment() {
 async function inheritSessions() {
   for (const remote of groupState.sessions) {
     if (await getSession(remote.sessionId) === undefined) {
-      await putSession(newSession(remote.sessionId, groupState.groupId, remote.creatorPublicKey, remote.expiresAt));
+      await putSession(newSession(remote.protocolVersion, remote.sessionId, groupState.groupId, remote.creatorPublicKey, remote.expiresAt));
     }
   }
 }
@@ -371,11 +378,11 @@ async function syncSession(session) {
     if (groupKey === undefined) throw new Error(`Private key for event timestamp ${envelope.keyTimestamp} is unavailable`);
     let key = session.keys[String(envelope.keyTimestamp)];
     if (key === undefined) {
-      key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId);
+      key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId, session.protocolVersion);
       session.keys[String(envelope.keyTimestamp)] = key;
     }
     applyEvent(
-      session, await decryptEvent(key, session.sessionId, envelope), envelope.keyTimestamp, envelope.createdAt,
+      session, await decryptEvent(key, session.protocolVersion, session.sessionId, envelope), envelope.keyTimestamp, envelope.createdAt,
       envelope.itemId,
     );
     session.cursor = envelope.sequence;
@@ -407,7 +414,7 @@ async function sendRequestResponse(sessionId, type, optionId) {
     : itemId === null
       ? { id: responseId, type, requestId: session.request.requestId, createdAt: new Date().toISOString() }
       : { id: responseId, type, eventId: itemId, createdAt: new Date().toISOString() };
-  const encrypted = await encryptResponse(key, session.sessionId, session.groupId, timestamp, responseId, response);
+  const encrypted = await encryptResponse(key, session.protocolVersion, session.sessionId, session.groupId, timestamp, responseId, response);
   session.expiresAt = await postResponse(session, identity, {
     responseId,
     groupId: session.groupId,
@@ -433,7 +440,7 @@ async function dismissNotification(sessionId, notificationId) {
     const groupKey = await currentLocalKey();
     let key = session.keys[String(groupKey.timestamp)];
     if (key === undefined) {
-      key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId);
+      key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId, session.protocolVersion);
       session.keys[String(groupKey.timestamp)] = key;
     }
     const responseId = randomId();
@@ -444,7 +451,7 @@ async function dismissNotification(sessionId, notificationId) {
       createdAt: new Date().toISOString(),
     };
     const encrypted = await encryptResponse(
-      key, session.sessionId, session.groupId, groupKey.timestamp, responseId, response,
+      key, session.protocolVersion, session.sessionId, session.groupId, groupKey.timestamp, responseId, response,
     );
     session.expiresAt = await postResponse(session, identity, {
       responseId,
@@ -460,22 +467,55 @@ async function dismissNotification(sessionId, notificationId) {
   await render();
 }
 
-async function sendFeedback(sessionId, message) {
+async function sendFeedback(sessionId, message, imageFile) {
   const session = await getSession(sessionId);
   if (session === undefined) throw new Error("Session disappeared before feedback was sent");
   const text = message.trim();
-  if (text.length === 0 || text.length > 20_000) throw new Error("メッセージは1文字以上20000文字以内で入力してください");
+  if (new TextEncoder().encode(text).byteLength > 20_000) throw new Error("メッセージは20000バイト以内で入力してください");
+  if (session.protocolVersion === 3 && imageFile !== undefined) throw new Error("このセッションには写真を添付できません");
+  if (text.length === 0 && imageFile === undefined) throw new Error("メッセージまたは写真を指定してください");
   const groupKey = await currentLocalKey();
   let key = session.keys[String(groupKey.timestamp)];
   if (key === undefined) {
-    key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId);
+    key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId, session.protocolVersion);
     session.keys[String(groupKey.timestamp)] = key;
   }
   const responseId = randomId();
-  const response = { id: responseId, type: "feedback", message: text, createdAt: new Date().toISOString() };
-  const encrypted = await encryptResponse(key, session.sessionId, session.groupId, groupKey.timestamp, responseId, response);
+  let attachment;
+  if (imageFile !== undefined) {
+    const attachmentId = randomId();
+    const jpeg = await normalizedJPEG(imageFile);
+    const encryptedAttachment = await encryptAttachment(
+      groupKey, session.creatorPublicKey, session.sessionId, session.groupId, responseId, attachmentId, jpeg,
+    );
+    const reservation = await reserveAttachment(session, identity, {
+      attachmentId,
+      responseId,
+      groupId: session.groupId,
+      deviceId: identity.deviceId,
+      keyTimestamp: groupKey.timestamp,
+      ciphertextLength: encryptedAttachment.manifest.ciphertextLength,
+      ciphertextSha256: encryptedAttachment.manifest.ciphertextSha256,
+    });
+    if (encryptedAttachment.ciphertext.byteLength > reservation.maxCiphertextBytes) {
+      throw new Error("写真が現在の添付サイズ上限を超えています");
+    }
+    await uploadAttachment(session, attachmentId, reservation.uploadToken, encryptedAttachment.ciphertext);
+    attachment = encryptedAttachment.manifest;
+  }
+  const response = {
+    id: responseId,
+    type: "feedback",
+    ...(text.length === 0 ? {} : { message: text }),
+    ...(attachment === undefined ? {} : { attachment }),
+    createdAt: new Date().toISOString(),
+  };
+  const encrypted = await encryptResponse(
+    key, session.protocolVersion, session.sessionId, session.groupId, groupKey.timestamp, responseId, response,
+  );
   session.expiresAt = await postResponse(session, identity, {
     responseId,
+    ...(attachment === undefined ? {} : { attachmentId: attachment.id }),
     groupId: session.groupId,
     deviceId: identity.deviceId,
     keyTimestamp: groupKey.timestamp,
@@ -483,6 +523,42 @@ async function sendFeedback(sessionId, message) {
   });
   await putSession(session);
   messageElement.textContent = "メッセージを送信しました。";
+}
+
+async function normalizedJPEG(file) {
+  if (!file.type.startsWith("image/")) throw new Error("画像ファイルを選択してください");
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  try {
+    const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+    let width = Math.max(1, Math.round(bitmap.width * scale));
+    let height = Math.max(1, Math.round(bitmap.height * scale));
+    let quality = 0.82;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (context === null) throw new Error("写真を変換できません");
+      context.drawImage(bitmap, 0, 0, width, height);
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(
+        (value) => value === null ? reject(new Error("写真をJPEGへ変換できません")) : resolve(value),
+        "image/jpeg",
+        quality,
+      ));
+      if (blob.size <= 1024 * 1024 || (blob.size <= 2 * 1024 * 1024 - 16 && attempt === 9)) {
+        return { bytes: new Uint8Array(await blob.arrayBuffer()), width, height };
+      }
+      if (quality > 0.55) {
+        quality -= 0.09;
+      } else {
+        width = Math.max(1, Math.round(width * 0.82));
+        height = Math.max(1, Math.round(height * 0.82));
+      }
+    }
+    throw new Error("写真を添付サイズ上限まで縮小できません");
+  } finally {
+    bitmap.close();
+  }
 }
 
 function applyEvent(session, event, keyTimestamp, createdAt, serverItemId) {
@@ -690,25 +766,49 @@ async function render() {
     const feedbackToggle = card.querySelector(".feedback-toggle");
     const feedbackForm = card.querySelector(".feedback-form");
     const feedbackMessage = card.querySelector(".feedback-message");
+    const feedbackImage = card.querySelector(".feedback-image");
+    const feedbackPreview = card.querySelector(".feedback-preview");
+    const feedbackSubmit = feedbackForm.querySelector('button[type="submit"]');
+    let feedbackPreviewURL;
+    const updateFeedbackSubmit = () => {
+      feedbackSubmit.disabled = feedbackMessage.value.trim().length === 0 && feedbackImage.files.length === 0;
+    };
+    const updateFeedbackPreview = () => {
+      if (feedbackPreviewURL !== undefined) URL.revokeObjectURL(feedbackPreviewURL);
+      const file = feedbackImage.files[0];
+      feedbackPreviewURL = file === undefined ? undefined : URL.createObjectURL(file);
+      feedbackPreview.hidden = feedbackPreviewURL === undefined;
+      if (feedbackPreviewURL === undefined) feedbackPreview.removeAttribute("src");
+      else feedbackPreview.src = feedbackPreviewURL;
+    };
+    if (session.protocolVersion !== 4) feedbackImage.closest("label").hidden = true;
     feedbackToggle.addEventListener("click", () => {
       feedbackToggle.hidden = true;
       feedbackForm.hidden = false;
+      updateFeedbackSubmit();
       feedbackMessage.focus();
+    });
+    feedbackMessage.addEventListener("input", updateFeedbackSubmit);
+    feedbackImage.addEventListener("change", () => {
+      updateFeedbackPreview();
+      updateFeedbackSubmit();
     });
     card.querySelector(".feedback-cancel").addEventListener("click", () => {
       feedbackForm.reset();
+      updateFeedbackPreview();
+      updateFeedbackSubmit();
       feedbackForm.hidden = true;
       feedbackToggle.hidden = false;
     });
     feedbackForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      const submit = feedbackForm.querySelector('button[type="submit"]');
-      submit.disabled = true;
-      sendFeedback(session.sessionId, feedbackMessage.value).then(() => {
+      feedbackSubmit.disabled = true;
+      sendFeedback(session.sessionId, feedbackMessage.value, feedbackImage.files[0]).then(() => {
         feedbackForm.reset();
+        updateFeedbackPreview();
         feedbackForm.hidden = true;
         feedbackToggle.hidden = false;
-      }).catch(showError).finally(() => { submit.disabled = false; });
+      }).catch(showError).finally(updateFeedbackSubmit);
     });
     cardsElement.append(card);
   }
@@ -733,9 +833,9 @@ function updateRelativeTimes() {
   }
 }
 
-function newSession(sessionId, groupId, creatorPublicKey, expiresAt, color = null) {
+function newSession(protocolVersion, sessionId, groupId, creatorPublicKey, expiresAt, color = null) {
   return {
-    protocolVersion: 3, sessionId, groupId, creatorPublicKey, keys: {}, cursor: 0,
+    protocolVersion, sessionId, groupId, creatorPublicKey, keys: {}, cursor: 0,
     title: `Session ${sessionId.slice(0, 8)}`, status: "接続しました", notifications: [],
     request: null, requestKeyTimestamp: null, color, updatedAt: Date.now(), expiresAt,
   };
@@ -818,7 +918,10 @@ function validateGroupState(state) {
     }
   }
   for (const item of state.packages) requireExactKeys(item, ["timestamp", "deviceId", "ephemeralPublicKey", "nonce", "ciphertext"]);
-  for (const session of state.sessions) requireExactKeys(session, ["sessionId", "creatorPublicKey", "expiresAt"]);
+  for (const session of state.sessions) {
+    requireExactKeys(session, ["sessionId", "creatorPublicKey", "expiresAt", "protocolVersion"]);
+    if (session.protocolVersion !== 3 && session.protocolVersion !== 4) throw new Error("Unsupported session protocol version");
+  }
 }
 
 function validateEnvelope(envelope, session) {

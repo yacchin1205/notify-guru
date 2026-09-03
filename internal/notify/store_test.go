@@ -38,7 +38,7 @@ func TestJoinURLCarriesInitialColorInTheFragment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := api.JoinURL("session", Pairing{ID: "pairing", Token: "token", AuthSecret: "secret"}, "public", "#ffd6e0")
+	value := api.JoinURL("session", Pairing{ID: "pairing", Token: "token", AuthSecret: "secret"}, "public", "#ffd6e0", 4)
 	parsed, err := url.Parse(value)
 	if err != nil {
 		t.Fatal(err)

@@ -198,6 +198,23 @@ body.managing-devices #empty {
   resize: vertical;
 }
 
+.feedback-photo {
+  margin-top: 0.75rem;
+}
+
+.feedback-preview {
+  display: block;
+  width: min(100%, 24rem);
+  max-height: 18rem;
+  object-fit: contain;
+  border-radius: 0.75rem;
+}
+
+.feedback-image {
+  color: #f8fafc;
+  font: inherit;
+}
+
 .feedback-actions {
   display: flex;
   gap: 0.65rem;

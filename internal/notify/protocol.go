@@ -19,6 +19,7 @@ type Group struct {
 	Timestamp        int64
 	PublicKey        string
 	Keys             map[int64][]byte
+	PublicKeys       map[int64]string
 }
 
 type Choice struct {
@@ -27,25 +28,50 @@ type Choice struct {
 }
 
 type Response struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	ItemID    string    `json:"itemId,omitempty"`
-	RequestID string    `json:"requestId,omitempty"`
-	EventID   string    `json:"eventId,omitempty"`
-	OptionID  string    `json:"optionId,omitempty"`
-	Message   string    `json:"message,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	GroupID   string    `json:"groupId"`
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	ItemID     string              `json:"itemId,omitempty"`
+	RequestID  string              `json:"requestId,omitempty"`
+	EventID    string              `json:"eventId,omitempty"`
+	OptionID   string              `json:"optionId,omitempty"`
+	Message    string              `json:"message,omitempty"`
+	CreatedAt  time.Time           `json:"createdAt"`
+	GroupID    string              `json:"groupId"`
+	Attachment *ReceivedAttachment `json:"attachment,omitempty"`
+}
+
+type ReceivedAttachment struct {
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	MediaType  string `json:"mediaType"`
+	ByteLength int64  `json:"byteLength"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	Path       string `json:"path"`
+	URI        string `json:"uri"`
+}
+
+type attachmentManifest struct {
+	ID               string `json:"id"`
+	Kind             string `json:"kind"`
+	MediaType        string `json:"mediaType"`
+	ByteLength       int64  `json:"byteLength"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	Nonce            string `json:"nonce"`
+	CiphertextLength int64  `json:"ciphertextLength"`
+	CiphertextSHA256 string `json:"ciphertextSha256"`
 }
 
 type decryptedResponse struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	RequestID string    `json:"requestId,omitempty"`
-	EventID   string    `json:"eventId,omitempty"`
-	OptionID  string    `json:"optionId,omitempty"`
-	Message   string    `json:"message,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	RequestID  string              `json:"requestId,omitempty"`
+	EventID    string              `json:"eventId,omitempty"`
+	OptionID   string              `json:"optionId,omitempty"`
+	Message    string              `json:"message,omitempty"`
+	Attachment *attachmentManifest `json:"attachment,omitempty"`
+	CreatedAt  time.Time           `json:"createdAt"`
 }
 
 type event struct {
@@ -61,10 +87,14 @@ type event struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
-func eventAAD(sessionID, groupID, eventID string, timestamp int64) string {
-	return fmt.Sprintf("notify.guru/v3/event/%s/%s/%d/%s", sessionID, groupID, timestamp, eventID)
+func eventAAD(version int, sessionID, groupID, eventID string, timestamp int64) string {
+	return fmt.Sprintf("notify.guru/v%d/event/%s/%s/%d/%s", version, sessionID, groupID, timestamp, eventID)
 }
 
-func responseAAD(sessionID, groupID, responseID string, timestamp int64) string {
-	return fmt.Sprintf("notify.guru/v3/response/%s/%s/%d/%s", sessionID, groupID, timestamp, responseID)
+func responseAAD(version int, sessionID, groupID, responseID string, timestamp int64) string {
+	return fmt.Sprintf("notify.guru/v%d/response/%s/%s/%d/%s", version, sessionID, groupID, timestamp, responseID)
+}
+
+func attachmentAAD(sessionID, groupID, responseID, attachmentID string, timestamp int64) string {
+	return fmt.Sprintf("notify.guru/v4/attachment/%s/%s/%d/%s/%s", sessionID, groupID, timestamp, responseID, attachmentID)
 }

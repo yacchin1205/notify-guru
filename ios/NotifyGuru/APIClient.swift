@@ -72,7 +72,7 @@ struct APIClient {
 
     func groupState(identity: DeviceIdentity) async throws -> DeviceGroupStateResult {
         guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
-        let path = pathWithQuery("/api/groups/\(group.groupID)/state", ["deviceId": identity.deviceID])
+        let path = pathWithQuery("/api/groups/\(group.groupID)/state", ["deviceId": identity.deviceID, "protocolVersion": "4"])
         let data = try await request(method: "GET", path: path, token: identity.accessToken, body: nil, expectedStatus: 200)
         _ = try object(data, keys: ["groupId", "members", "keys", "packages", "sessions"])
         let result = try JSONDecoder().decode(DeviceGroupStateResult.self, from: data)
@@ -106,11 +106,12 @@ struct APIClient {
         let accessHash = CryptoEngine.hashToken(identity.accessToken)
         let signature = try CryptoEngine.signDevice(
             identity: identity,
-            transcript: CryptoEngine.deviceRequestTranscript(requestID: requestID, identity: identity, accessHash: accessHash)
+            transcript: CryptoEngine.deviceRequestTranscript(requestID: requestID, identity: identity, accessHash: accessHash, protocolVersion: 4)
         )
         let body: [String: Any] = [
             "requestId": requestID, "deviceId": identity.deviceID, "deviceAccessTokenHash": accessHash,
             "deviceEncryptionPublicKey": try CryptoEngine.encryptionPublicKey(for: identity), "deviceSignature": signature,
+            "protocolVersion": 4,
         ]
         let data = try await request(method: "POST", path: "/api/device-requests", token: nil, body: try encode(body), expectedStatus: 201)
         let fields = try object(data, keys: ["requestId", "expiresAt"])
@@ -183,7 +184,8 @@ struct APIClient {
     func join(_ pairing: PairingLink, identity: DeviceIdentity, key: GroupKey) async throws -> Int64 {
         guard let group = identity.group else { throw ProtocolError.invalidPairingLink("device group is not ready") }
         let proof = try CryptoEngine.pairingProof(
-            authSecret: pairing.authSecret, sessionID: pairing.sessionID, pairingID: pairing.pairingID,
+            authSecret: pairing.authSecret, protocolVersion: pairing.protocolVersion,
+            sessionID: pairing.sessionID, pairingID: pairing.pairingID,
             groupID: group.groupID, timestamp: key.timestamp, groupPublicKey: key.publicKey
         )
         let body = JoinRequest(
@@ -239,16 +241,68 @@ struct APIClient {
         }
     }
 
-    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, payload: EncryptedPayload) async throws -> Int64 {
+    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, attachmentID: String? = nil, payload: EncryptedPayload) async throws -> Int64 {
         let body = PostResponseRequest(
             responseID: responseID, itemID: itemID, groupID: record.groupID, deviceID: identity.deviceID,
-            keyTimestamp: timestamp, nonce: payload.nonce, ciphertext: payload.ciphertext
+            keyTimestamp: timestamp, nonce: payload.nonce, ciphertext: payload.ciphertext, attachmentID: attachmentID
         )
         let data = try await request(
             method: "POST", path: "/api/sessions/\(record.sessionID)/responses", token: identity.accessToken,
             body: try JSONEncoder().encode(body), expectedStatus: 201
         )
         return try integer(object(data, keys: ["expiresAt"]), "expiresAt")
+    }
+
+    func reserveAttachment(
+        session record: SessionRecord,
+        identity: DeviceIdentity,
+        timestamp: Int64,
+        responseID: String,
+        attachment: EncryptedAttachment
+    ) async throws -> AttachmentReservation {
+        let body: [String: Any] = [
+            "attachmentId": attachment.manifest.id,
+            "responseId": responseID,
+            "groupId": record.groupID,
+            "deviceId": identity.deviceID,
+            "keyTimestamp": timestamp,
+            "ciphertextLength": attachment.manifest.ciphertextLength,
+            "ciphertextSha256": attachment.manifest.ciphertextSha256,
+        ]
+        let data = try await request(
+            method: "POST", path: "/api/sessions/\(record.sessionID)/attachments", token: identity.accessToken,
+            body: try encode(body), expectedStatus: 201
+        )
+        let fields = try object(data, keys: ["attachmentId", "uploadToken", "maxCiphertextBytes", "uploadExpiresAt"])
+        guard try text(fields, "attachmentId") == attachment.manifest.id else {
+            throw ProtocolError.invalidResponse("attachment reservation ID mismatch")
+        }
+        return AttachmentReservation(
+            uploadToken: try text(fields, "uploadToken"),
+            maximumCiphertextBytes: try integer(fields, "maxCiphertextBytes"),
+            expiresAt: try integer(fields, "uploadExpiresAt")
+        )
+    }
+
+    func uploadAttachment(session record: SessionRecord, attachment: EncryptedAttachment, reservation: AttachmentReservation) async throws {
+        guard attachment.manifest.ciphertextLength <= reservation.maximumCiphertextBytes else {
+            throw ProtocolError.invalidResponse("attachment exceeds the current service limit")
+        }
+        guard let url = URL(string: "/api/sessions/\(record.sessionID)/attachments/\(attachment.manifest.id)", relativeTo: baseURL)?.absoluteURL else {
+            throw ProtocolError.invalidResponse("invalid attachment upload URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 20
+        request.httpBody = attachment.ciphertext
+        request.setValue("Bearer \(reservation.uploadToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await self.session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ProtocolError.invalidResponse("API did not return HTTP") }
+        guard data.count <= maximumResponseBytes else { throw ProtocolError.invalidResponse("body exceeds \(maximumResponseBytes) bytes") }
+        guard http.statusCode == 200 else { throw try apiError(status: http.statusCode, data: data) }
+        let fields = try object(data, keys: ["uploaded"])
+        guard fields["uploaded"] as? Bool == true else { throw ProtocolError.invalidResponse("attachment upload was not confirmed") }
     }
 
     private func pathWithQuery(_ path: String, _ values: [String: String]) -> String {
@@ -324,9 +378,15 @@ private struct JoinRequest: Encodable {
 
 private struct PostResponseRequest: Encodable {
     let responseID: String; let itemID: String?; let groupID: String; let deviceID: String; let keyTimestamp: Int64
-    let nonce: String; let ciphertext: String
+    let nonce: String; let ciphertext: String; let attachmentID: String?
     enum CodingKeys: String, CodingKey {
         case responseID = "responseId"; case itemID = "itemId"; case groupID = "groupId"; case deviceID = "deviceId"
-        case keyTimestamp, nonce, ciphertext
+        case keyTimestamp, nonce, ciphertext; case attachmentID = "attachmentId"
     }
+}
+
+struct AttachmentReservation: Equatable {
+    let uploadToken: String
+    let maximumCiphertextBytes: Int64
+    let expiresAt: Int64
 }

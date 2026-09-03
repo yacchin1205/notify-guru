@@ -37,6 +37,7 @@ interface DeviceRequestRow extends Record<string, SqlStorageValue> {
   expires_at: number;
   claimed_group_id: string | null;
   approved_group_id: string | null;
+  protocol_version: number;
 }
 
 export type DeviceRequestClaim =
@@ -48,6 +49,7 @@ export interface ClaimedDeviceRequest {
   deviceId: string;
   deviceAccessTokenHash: string;
   deviceEncryptionPublicKey: string;
+  protocolVersion: number;
 }
 
 export interface DevicePushTarget {
@@ -81,7 +83,8 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
         claimed_group_id TEXT,
         approved_group_id TEXT,
         created_at INTEGER NOT NULL,
-        approved_at INTEGER
+        approved_at INTEGER,
+        protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
       );
       CREATE TABLE IF NOT EXISTS device_active_items_v1 (
         device_id TEXT NOT NULL REFERENCES devices(id),
@@ -96,6 +99,10 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       CREATE INDEX IF NOT EXISTS device_active_items_v1_group_device
         ON device_active_items_v1(group_id, device_id);
     `);
+    const requestColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(device_requests)"));
+    if (!requestColumns.some((column) => column.name === "protocol_version")) {
+      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -151,6 +158,7 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       deviceId: row.device_id,
       deviceAccessTokenHash: row.access_hash,
       deviceEncryptionPublicKey: row.encryption_public_key,
+      protocolVersion: row.protocol_version,
     };
   }
 
@@ -165,6 +173,15 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       requestId,
     );
     return "approved";
+  }
+
+  releaseDeviceRequestClaim(requestId: string, groupId: string): void {
+    this.state.storage.sql.exec(
+      `UPDATE device_requests SET claimed_group_id = NULL
+       WHERE id = ? AND claimed_group_id = ? AND approved_group_id IS NULL`,
+      requestId,
+      groupId,
+    );
   }
 
   getPushTargets(deviceIds: string[]): DevicePushTarget[] {
@@ -283,19 +300,21 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       "deviceAccessTokenHash",
       "deviceEncryptionPublicKey",
       "deviceSignature",
-    ]);
+    ], ["protocolVersion"]);
     const requestId = stringField(body, "requestId", IDENTIFIER, 64);
     const deviceId = stringField(body, "deviceId", IDENTIFIER, 64);
     const accessHash = stringField(body, "deviceAccessTokenHash", SHA256_HEX, 64);
     const encryptionPublicKey = stringField(body, "deviceEncryptionPublicKey", PUBLIC_KEY, 128);
     const deviceSignature = stringField(body, "deviceSignature", SIGNATURE, 128);
+    const protocolVersion = body.protocolVersion === undefined ? 3 : integerProtocolVersion(body.protocolVersion);
     const device = this.requiredDevice(deviceId);
     const transcript = [
-      "notify.guru/device-request/v1",
+      protocolVersion === 4 ? "notify.guru/device-request/v2" : "notify.guru/device-request/v1",
       requestId,
       deviceId,
       accessHash,
       encryptionPublicKey,
+      ...(protocolVersion === 4 ? ["3,4"] : []),
     ].join("\n");
     if (!(await verifyP256Signature(device.signing_public_key, deviceSignature, transcript))) {
       throw new HttpError(401, "invalid_device_signature", "Device request signature is invalid");
@@ -303,14 +322,15 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
     const expiresAt = Date.now() + DEVICE_REQUEST_LIFETIME_MS;
     this.state.storage.sql.exec(
       `INSERT INTO device_requests
-         (id, device_id, access_hash, encryption_public_key, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (id, device_id, access_hash, encryption_public_key, expires_at, created_at, protocol_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       requestId,
       deviceId,
       accessHash,
       encryptionPublicKey,
       expiresAt,
       Date.now(),
+      protocolVersion,
     );
     return json({ requestId, expiresAt }, 201);
   }
@@ -380,12 +400,17 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
   private deviceRequestRow(requestId: string): DeviceRequestRow | null {
     const rows = Array.from(this.state.storage.sql.exec<DeviceRequestRow>(
       `SELECT id, device_id, access_hash, encryption_public_key, expires_at,
-              claimed_group_id, approved_group_id
+              claimed_group_id, approved_group_id, protocol_version
        FROM device_requests WHERE id = ?`,
       requestId,
     ));
     return rows.length === 0 ? null : rows[0];
   }
+}
+
+function integerProtocolVersion(value: unknown): number {
+  if (value !== 4) throw new HttpError(400, "unsupported_protocol", "Device request protocol version is not supported");
+  return value;
 }
 
 function identifier(value: string | null, name: string): string {

@@ -104,13 +104,31 @@
 
 ### `POST /api/sessions/:sessionId/responses`
 
-- 参加デバイスが暗号化済みの選択結果、dismiss、または任意メッセージを保存する。
+- 参加デバイスが暗号化済みの選択結果、dismiss、または本文と0〜1個の添付を持つ汎用メッセージを保存する。
+- v4の汎用メッセージは本文または添付の少なくとも一方を必要とする。v3の任意メッセージは従来どおり本文を必要とし、添付を持たない。
+- 添付を伴う場合は、先に予約および暗号文のアップロードを完了した同一のresponse ID、デバイスグループ、端末、鍵timestampだけを受理する。
 - 項目IDを伴う選択結果またはdismissを受理すると、その項目をすべての配送先で対応不要にする。
 - 受理した応答は集約、選択または解釈せず、セッションの失効時刻も延長しない。
 
+### `POST /api/sessions/:sessionId/attachments`
+
+- v4の参加デバイスが、ひとつの応答に結び付く暗号化済み添付のアップロードを予約する。
+- サーバは現在の暗号文上限と短命なアップロードtokenを返し、token自体は保存しない。
+- 添付の種別、media type、平文長および画像寸法は暗号化manifestに置き、この予約ではサーバへ明かさない。
+
+### `PUT /api/sessions/:sessionId/attachments/:attachmentId`
+
+- 予約時に発行されたtokenで、宣言した長さおよびSHA-256に一致する暗号文だけをprivate R2 bucketへ保存する。
+- 添付の平文、復号鍵および暗号化manifestは受け取らない。
+
+### `GET /api/sessions/:sessionId/attachments/:attachmentId`
+
+- 作成元プロセスだけが、応答へcommit済みの添付暗号文を取得する。
+- 作成元が応答cursorを進めた後の次回取得時にR2 objectを削除する。セッション失効時にも残存objectを削除する。
+
 ### `GET /api/sessions/:sessionId/responses`
 
-- 作成元プロセスが、デバイスから受理したすべての暗号化済み選択結果、dismiss、および任意メッセージを取得する。
+- 作成元プロセスが、デバイスから受理したすべての暗号化済み選択結果、dismiss、および汎用メッセージを取得する。
 - どの応答を採用するかは判断しない。
 
 ### `DELETE /api/sessions/:sessionId`

@@ -75,11 +75,11 @@ func NewAPI(rawURL string) (*API, error) {
 	return &API{baseURL: baseURL, client: &http.Client{Timeout: 20 * time.Second}}, nil
 }
 
-func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey, color string) string {
+func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey, color string, protocolVersion int) string {
 	joinURL := *a.baseURL
 	joinURL.Path = "/join"
 	fragment := url.Values{}
-	fragment.Set("v", "3")
+	fragment.Set("v", fmt.Sprint(protocolVersion))
 	fragment.Set("s", sessionID)
 	fragment.Set("p", pairing.ID)
 	fragment.Set("t", pairing.Token)
@@ -90,7 +90,7 @@ func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey, color
 	return joinURL.String()
 }
 
-func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicKey string, pairing Pairing) error {
+func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicKey string, pairing Pairing, protocolVersion int) error {
 	request := struct {
 		SessionID        string `json:"sessionId"`
 		ManagerTokenHash string `json:"managerTokenHash"`
@@ -99,7 +99,8 @@ func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicK
 			ID        string `json:"id"`
 			TokenHash string `json:"tokenHash"`
 		} `json:"pairing"`
-	}{SessionID: sessionID, ManagerTokenHash: managerHash, CreatorPublicKey: publicKey}
+		ProtocolVersion int `json:"protocolVersion"`
+	}{SessionID: sessionID, ManagerTokenHash: managerHash, CreatorPublicKey: publicKey, ProtocolVersion: protocolVersion}
 	request.Pairing.ID = pairing.ID
 	request.Pairing.TokenHash = tokenHash(pairing.Token)
 	return a.do(ctx, http.MethodPost, "/api/sessions", "", request, &struct {
@@ -133,6 +134,10 @@ type joinsResult struct {
 		Proof               string           `json:"proof"`
 		JoinedAt            int64            `json:"joinedAt"`
 		Key                 *currentGroupKey `json:"key"`
+		Keys                []struct {
+			Timestamp int64  `json:"timestamp"`
+			PublicKey string `json:"publicKey"`
+		} `json:"keys,omitempty"`
 	} `json:"groups"`
 	ExpiresAt int64 `json:"expiresAt"`
 }
@@ -158,18 +163,65 @@ func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, it
 	}{})
 }
 
+type responseEnvelope struct {
+	Sequence     int64  `json:"sequence"`
+	ResponseID   string `json:"responseId"`
+	ItemID       string `json:"itemId"`
+	GroupID      string `json:"groupId"`
+	KeyTimestamp int64  `json:"keyTimestamp"`
+	Nonce        string `json:"nonce"`
+	Ciphertext   string `json:"ciphertext"`
+	CreatedAt    int64  `json:"createdAt"`
+	AttachmentID string `json:"attachmentId"`
+}
+
 type responsesResult struct {
-	Responses []struct {
-		Sequence     int64  `json:"sequence"`
-		ResponseID   string `json:"responseId"`
-		ItemID       string `json:"itemId"`
-		GroupID      string `json:"groupId"`
-		KeyTimestamp int64  `json:"keyTimestamp"`
-		Nonce        string `json:"nonce"`
-		Ciphertext   string `json:"ciphertext"`
-		CreatedAt    int64  `json:"createdAt"`
-	} `json:"responses"`
-	ExpiresAt int64 `json:"expiresAt"`
+	Responses []responseEnvelope `json:"responses"`
+	ExpiresAt int64              `json:"expiresAt"`
+}
+
+func (a *API) attachment(ctx context.Context, sessionID, managerToken, attachmentID string, maximumBytes int64) ([]byte, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		a.baseURL.String()+"/api/sessions/"+sessionID+"/attachments/"+attachmentID,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+managerToken)
+	response, err := a.client.Do(request)
+	if err != nil {
+		return nil, &transientAPIError{err: err}
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		limited, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+		if readErr != nil {
+			return nil, &transientAPIError{err: readErr}
+		}
+		var apiError APIError
+		if err := decodeJSON(limited, &apiError); err != nil {
+			return nil, fmt.Errorf("decode attachment API error with status %d: %w", response.StatusCode, err)
+		}
+		apiError.Status = response.StatusCode
+		return nil, &apiError
+	}
+	if response.Header.Get("Content-Type") != "application/octet-stream" {
+		return nil, fmt.Errorf("attachment API returned an unexpected content type")
+	}
+	if maximumBytes <= 0 {
+		return nil, fmt.Errorf("invalid attachment size limit %d", maximumBytes)
+	}
+	content, err := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
+	if err != nil {
+		return nil, &transientAPIError{err: err}
+	}
+	if int64(len(content)) > maximumBytes {
+		return nil, fmt.Errorf("attachment exceeds its declared size")
+	}
+	return content, nil
 }
 
 func (a *API) responses(ctx context.Context, sessionID, managerToken string, after int64) (responsesResult, error) {

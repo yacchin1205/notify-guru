@@ -190,6 +190,110 @@ describe("devices and persistent groups", () => {
     )).toBe(2);
   });
 
+  it("stores version 4 attachment ciphertext in R2 and releases it after response acknowledgement", async () => {
+    const device = await newDevice();
+    const group = await createGroup(device);
+    const key = await registerKey(group.id, device, [device], true);
+    const session = await createJoinedSession(group, device, key, 4);
+    const attachmentId = randomId();
+    const responseId = randomId();
+    const ciphertext = new TextEncoder().encode("opaque encrypted jpeg bytes");
+    const reserved = await api(`/api/sessions/${session.id}/attachments`, {
+      method: "POST",
+      token: device.token,
+      body: {
+        attachmentId,
+        responseId,
+        groupId: group.id,
+        deviceId: device.id,
+        keyTimestamp: key.timestamp,
+        ciphertextLength: ciphertext.byteLength,
+        ciphertextSha256: await hash("opaque encrypted jpeg bytes"),
+      },
+    });
+    expect(reserved).toEqual({
+      status: 201,
+      json: {
+        attachmentId,
+        uploadToken: expect.any(String),
+        maxCiphertextBytes: 2 * 1024 * 1024,
+        uploadExpiresAt: expect.any(Number),
+      },
+    });
+
+    const uploaded = await SELF.fetch(`https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${reserved.json.uploadToken}`,
+        "content-type": "application/octet-stream",
+      },
+      body: ciphertext,
+    });
+    expect(uploaded.status).toBe(200);
+    expect(await uploaded.json()).toEqual({ uploaded: true });
+
+    const committed = await api(`/api/sessions/${session.id}/responses`, {
+      method: "POST",
+      token: device.token,
+      body: {
+        responseId,
+        attachmentId,
+        groupId: group.id,
+        deviceId: device.id,
+        keyTimestamp: key.timestamp,
+        nonce: "A".repeat(16),
+        ciphertext: randomToken(),
+      },
+    });
+    expect(committed.status).toBe(201);
+
+    const downloaded = await SELF.fetch(
+      `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
+      { headers: { authorization: `Bearer ${session.managerToken}` } },
+    );
+    expect(downloaded.status).toBe(200);
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(ciphertext);
+
+    const received = await api(`/api/sessions/${session.id}/responses?after=0`, { token: session.managerToken });
+    expect(received.json.responses).toEqual([
+      expect.objectContaining({ responseId, attachmentId }),
+    ]);
+    const sequence = received.json.responses[0].sequence;
+    expect((await api(`/api/sessions/${session.id}/responses?after=${sequence}`, {
+      token: session.managerToken,
+    })).status).toBe(200);
+    expect((await SELF.fetch(
+      `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
+      { headers: { authorization: `Bearer ${session.managerToken}` } },
+    )).status).toBe(404);
+  });
+
+  it("does not leave a claim behind when a version 3 device is rejected from a version 4 session group", async () => {
+    const first = await newDevice();
+    const second = await newDevice();
+    const group = await createGroup(first);
+    const key = await registerKey(group.id, first, [first], true);
+    await createJoinedSession(group, first, key, 4);
+    const request = await createDeviceRequest(second);
+    const transcript = [
+      "notify.guru/group-device-approve/v1", group.id, first.id, request.id,
+    ].join("\n");
+    const rejected = await api(
+      `/api/groups/${group.id}/device-requests/${request.id}/approve?deviceId=${first.id}`,
+      { method: "POST", token: first.token, body: { actorSignature: await sign(first.signingKey, transcript) } },
+    );
+    expect(rejected.status).toBe(409);
+    expect(rejected.json.error).toBe("protocol_upgrade_required");
+
+    const registry = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ claimed_group_id: string | null }>(
+        "SELECT claimed_group_id FROM device_requests WHERE id = ?",
+        request.id,
+      ))[0].claimed_group_id
+    )).toBeNull();
+  });
+
   it("reverses device approval and binds group keys to their members", async () => {
     const first = await newDevice();
     const second = await newDevice();
@@ -541,6 +645,7 @@ async function createJoinedSession(
   group: Group,
   device: Device,
   key: RegisteredKey,
+  protocolVersion = 3,
 ): Promise<JoinedSession> {
   const sessionId = randomId();
   const managerToken = randomToken();
@@ -552,9 +657,15 @@ async function createJoinedSession(
       sessionId,
       managerTokenHash: await hash(managerToken),
       creatorPublicKey: key.publicKey,
+      ...(protocolVersion === 3 ? {} : { protocolVersion }),
       pairing: { id: pairingId, tokenHash: await hash(pairingToken) },
     },
   })).status).toBe(201);
+  if (protocolVersion === 4) {
+    expect((await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
+      token: device.token,
+    })).status).toBe(200);
+  }
   expect((await api(`/api/sessions/${sessionId}/join`, {
     method: "POST",
     body: {

@@ -85,11 +85,17 @@ A typical MCP client configuration is:
 }
 ```
 
-The server exposes tools to create and pair sessions, wait for a device group, send notifications and status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, and free-form messages, and close sessions.
+The server exposes tools to create and pair sessions, wait for a device group, send notifications and status updates, change card colors, ask and close multiple-choice questions, receive choices, dismissals, free-form messages, and photos, and close sessions.
 
 A session identifies the agent, so one MCP process runs one session: `session_create` returns the session already running instead of starting another, and omits the pairing fields once a device group has joined. Add a device group with `session_pairing_create`; start a separate session by closing the running one first.
 
 Nothing pushes a response to the agent, so every send also hands over the responses received before it: `status`, `notify`, `session_color`, `request`, and `request_close` return them alongside their own result. Each response is handed over once, whether by a send or by `responses_wait`.
+
+Protocol version 4 lets the PWA, iOS app, or macOS app send feedback containing text, one JPEG photo, or both. On iOS, a photo can be taken with the camera or selected through the system photo picker; the picker gives the app only the item the person chooses rather than requiring full-library access. On macOS, an image can be pasted from the clipboard with Command-V or the explicit Paste button. The app reads the clipboard only in response to that action. The native clients fix orientation, limit the long edge to 2048 pixels, and normally compress toward 1 MiB. The current service policy rejects attachment ciphertext over 2 MiB; that value is returned by the reservation API and is not encoded as a permanent protocol limit.
+
+Photos use a separate ECDH/HKDF context and full-file AES-256-GCM encryption. A private R2 bucket receives only the ciphertext; the encrypted response carries the media type, dimensions, nonce, plaintext length, ciphertext length, and checksum. `notifyg` checks the manifest, checksum, GCM tag, and JPEG dimensions before writing plaintext. MCP returns the verified photo as a `file:` resource link.
+
+Verified plaintext is written below the operating system's temporary directory, with a `0700` directory and `0600` file where those modes apply. It is removed when the local session is closed or replaced. This is ordinary temporary-file cleanup, not secure erasure: a crash can leave the file until the operating system cleans its temporary storage.
 
 `session_create` and `session_pairing_create` return `qr_image_url` and `pairing_url`. They do not return a terminal QR code: an MCP result is rendered by an agent before a person sees it, and neither `notifyg` nor the agent can check that block characters survived that rendering intact. Ask the person to open `qr_image_url` in a browser.
 
@@ -101,6 +107,7 @@ The image URL is reachable only from the same machine as the `notifyg` process. 
 - Local QR images use an opaque, independently generated loopback URL. The URL contains no pairing data and expires after 10 minutes, but anyone who can view the image can use the underlying one-shot pairing secret.
 - Session management keys exist only in the CLI process memory and are not recoverable.
 - The relay can observe metadata such as timestamps, identifiers, and ciphertext sizes.
+- Attachment objects in R2 are ciphertext only. They are removed after `notifyg` has advanced past the response and polls again, or when the session expires; an uploaded attachment that is never committed can remain until session expiry.
 - Compromise of the served web application, the browser profile, or the CLI process is outside the end-to-end encryption guarantee.
 - Each app installation or browser profile belongs to at most one device group. Adding or removing a device rotates the group's key generation; removal cannot revoke ciphertext already received by that device.
 

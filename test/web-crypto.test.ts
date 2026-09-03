@@ -4,6 +4,7 @@ import {
   createGroupKey,
   createKeyPackage,
   deviceCreateTranscript,
+  encryptAttachment,
   groupKeyRegisterTranscript,
   groupCreateTranscript,
   openKeyPackage,
@@ -68,10 +69,54 @@ describe("web device-group cryptography", () => {
       "device_b", "ephemeral-b", "nonce-b", "cipher-b",
     ].join("\n"));
   });
+
+  it("encrypts a version 4 attachment under its own ECDH and AAD context", async () => {
+    const creator = await crypto.subtle.generateKey(
+      { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"],
+    ) as CryptoKeyPair;
+    const creatorPublic = new Uint8Array(await crypto.subtle.exportKey("raw", creator.publicKey));
+    const groupKey = { ...await createGroupKey(), timestamp: 42 };
+    const jpeg = { bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), width: 1, height: 1 };
+    const encrypted = await encryptAttachment(
+      groupKey, base64url(creatorPublic), "session", "group", "response", "attachment", jpeg,
+    );
+    const groupPublic = await crypto.subtle.importKey(
+      "raw", fromBase64url(groupKey.publicKey), { name: "ECDH", namedCurve: "P-256" }, false, [],
+    );
+    const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: groupPublic }, creator.privateKey, 256);
+    const material = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    const key = await crypto.subtle.deriveKey({
+      name: "HKDF", hash: "SHA-256", salt: new Uint8Array(),
+      info: new TextEncoder().encode("notify.guru/attachment/v4\nsession\ngroup\n" + groupKey.timestamp + "\nresponse\nattachment"),
+    }, material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plaintext = await crypto.subtle.decrypt({
+      name: "AES-GCM", iv: fromBase64url(encrypted.manifest.nonce),
+      additionalData: new TextEncoder().encode(
+        "notify.guru/v4/attachment/session/group/" + groupKey.timestamp + "/response/attachment",
+      ),
+    }, key, encrypted.ciphertext);
+    expect(new Uint8Array(plaintext)).toEqual(jpeg.bytes);
+    expect(encrypted.manifest.ciphertextLength).toBe(jpeg.bytes.byteLength + 16);
+    await expect(crypto.subtle.decrypt({
+      name: "AES-GCM", iv: fromBase64url(encrypted.manifest.nonce),
+      additionalData: new TextEncoder().encode(
+        "notify.guru/v4/attachment/session/group/" + groupKey.timestamp + "/response/other",
+      ),
+    }, key, encrypted.ciphertext)).rejects.toThrow();
+  });
 });
 
 async function registeredIdentity(deviceId: string) {
   const identity = await createDeviceIdentity();
   identity.deviceId = deviceId;
   return identity;
+}
+
+function base64url(value: Uint8Array): string {
+  return btoa(String.fromCharCode(...value)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function fromBase64url(value: string): Uint8Array {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
 }

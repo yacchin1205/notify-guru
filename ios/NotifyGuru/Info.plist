@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>notify.guru uses the camera only to scan a one-shot session pairing QR code.</string>
+	<string>notify.guru uses the camera to scan pairing QR codes and attach a photo to an encrypted message.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

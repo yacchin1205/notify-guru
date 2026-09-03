@@ -4,9 +4,14 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,6 +27,9 @@ var pastelPalette = []string{
 
 var eventRetryDelays = [...]time.Duration{5 * time.Second, 30 * time.Second}
 
+const maximumAttachmentCiphertextBytes = 2 * 1024 * 1024
+const maximumAttachmentDimension = 2048
+
 type Store struct {
 	api      *API
 	mu       sync.RWMutex
@@ -29,17 +37,19 @@ type Store struct {
 }
 
 type managedSession struct {
-	mu             sync.Mutex
-	id             string
-	title          string
-	color          string
-	managerToken   string
-	privateKey     *ecdh.PrivateKey
-	publicKey      string
-	pairings       map[string]Pairing
-	groups         map[string]*Group
-	openRequests   map[string]struct{}
-	responseCursor int64
+	mu              sync.Mutex
+	id              string
+	title           string
+	color           string
+	managerToken    string
+	privateKey      *ecdh.PrivateKey
+	publicKey       string
+	pairings        map[string]Pairing
+	groups          map[string]*Group
+	openRequests    map[string]struct{}
+	responseCursor  int64
+	protocolVersion int
+	tempDir         string
 }
 
 func NewStore(api *API) *Store {
@@ -71,24 +81,26 @@ func (s *Store) Create(ctx context.Context, title, color string) (sessionID, pai
 		return "", "", err
 	}
 	publicKey := encode(privateKey.PublicKey().Bytes())
-	if err := s.api.createSession(ctx, sessionID, tokenHash(managerToken), publicKey, pairing); err != nil {
+	const protocolVersion = 4
+	if err := s.api.createSession(ctx, sessionID, tokenHash(managerToken), publicKey, pairing, protocolVersion); err != nil {
 		return "", "", err
 	}
 	session := &managedSession{
-		id:           sessionID,
-		title:        title,
-		color:        color,
-		managerToken: managerToken,
-		privateKey:   privateKey,
-		publicKey:    publicKey,
-		pairings:     map[string]Pairing{pairing.ID: pairing},
-		groups:       make(map[string]*Group),
-		openRequests: make(map[string]struct{}),
+		id:              sessionID,
+		title:           title,
+		color:           color,
+		managerToken:    managerToken,
+		privateKey:      privateKey,
+		publicKey:       publicKey,
+		pairings:        map[string]Pairing{pairing.ID: pairing},
+		groups:          make(map[string]*Group),
+		openRequests:    make(map[string]struct{}),
+		protocolVersion: protocolVersion,
 	}
 	s.mu.Lock()
 	s.sessions[sessionID] = session
 	s.mu.Unlock()
-	return sessionID, s.api.JoinURL(sessionID, pairing, publicKey, color), nil
+	return sessionID, s.api.JoinURL(sessionID, pairing, publicKey, color, protocolVersion), nil
 }
 
 // SessionState describes the session this process manages. PairingURL is empty
@@ -117,6 +129,9 @@ func (s *Store) EnsureSession(ctx context.Context, title, color string) (Session
 			return SessionState{}, err
 		}
 		s.mu.Lock()
+		if session, exists := s.sessions[existing]; exists && session.tempDir != "" {
+			_ = os.RemoveAll(session.tempDir)
+		}
 		delete(s.sessions, existing)
 		s.mu.Unlock()
 	}
@@ -154,7 +169,7 @@ func (s *Store) reuse(ctx context.Context, sessionID string) (SessionState, erro
 		return state, nil
 	}
 	if unused.ID != "" {
-		state.PairingURL = s.api.JoinURL(sessionID, unused, session.publicKey, session.color)
+		state.PairingURL = s.api.JoinURL(sessionID, unused, session.publicKey, session.color, session.protocolVersion)
 		return state, nil
 	}
 	pairingURL, err := s.AddPairing(ctx, sessionID)
@@ -200,7 +215,7 @@ func (s *Store) AddPairing(ctx context.Context, sessionID string) (string, error
 		return "", err
 	}
 	session.pairings[pairing.ID] = pairing
-	return s.api.JoinURL(session.id, pairing, session.publicKey, session.color), nil
+	return s.api.JoinURL(session.id, pairing, session.publicKey, session.color, session.protocolVersion), nil
 }
 
 func (s *Store) RefreshGroups(ctx context.Context, sessionID string) (int, error) {
@@ -225,8 +240,9 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 			if !known {
 				return 0, fmt.Errorf("join references unknown pairing %q", joined.PairingID)
 			}
-			if err := verifyPairingProofV3(
+			if err := verifyPairingProof(
 				pairing.AuthSecret,
+				session.protocolVersion,
 				session.id,
 				joined.PairingID,
 				joined.GroupID,
@@ -239,6 +255,7 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 			key, err := deriveGroupKey(
 				session.privateKey,
 				joined.InitialPublicKey,
+				session.protocolVersion,
 				session.id,
 				joined.GroupID,
 				joined.InitialKeyTimestamp,
@@ -254,12 +271,36 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 				Timestamp:        joined.InitialKeyTimestamp,
 				PublicKey:        joined.InitialPublicKey,
 				Keys:             map[int64][]byte{joined.InitialKeyTimestamp: key},
+				PublicKeys:       map[int64]string{joined.InitialKeyTimestamp: joined.InitialPublicKey},
 			}
 			session.groups[joined.GroupID] = group
 		} else if group.PairingID != joined.PairingID ||
 			group.InitialTimestamp != joined.InitialKeyTimestamp ||
 			group.InitialPublicKey != joined.InitialPublicKey {
 			return 0, fmt.Errorf("server changed authenticated initial state for device group %q", joined.GroupID)
+		}
+		for _, historical := range joined.Keys {
+			if historical.Timestamp < group.InitialTimestamp {
+				return 0, fmt.Errorf("device group %q returned a key older than its authenticated initial key", joined.GroupID)
+			}
+			if knownPublic, known := group.PublicKeys[historical.Timestamp]; known && knownPublic != historical.PublicKey {
+				return 0, fmt.Errorf("server changed public key at timestamp %d for device group %q", historical.Timestamp, joined.GroupID)
+			}
+			if _, known := group.Keys[historical.Timestamp]; !known {
+				key, err := deriveGroupKey(
+					session.privateKey,
+					historical.PublicKey,
+					session.protocolVersion,
+					session.id,
+					joined.GroupID,
+					historical.Timestamp,
+				)
+				if err != nil {
+					return 0, err
+				}
+				group.Keys[historical.Timestamp] = key
+			}
+			group.PublicKeys[historical.Timestamp] = historical.PublicKey
 		}
 		if joined.Key == nil {
 			group.Timestamp = 0
@@ -272,14 +313,16 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 			}
 			group.Timestamp = joined.Key.Timestamp
 			group.PublicKey = joined.Key.PublicKey
+			group.PublicKeys[joined.Key.Timestamp] = joined.Key.PublicKey
 			_ = existing
 			continue
 		}
-		key, err := deriveGroupKey(session.privateKey, joined.Key.PublicKey, session.id, joined.GroupID, joined.Key.Timestamp)
+		key, err := deriveGroupKey(session.privateKey, joined.Key.PublicKey, session.protocolVersion, session.id, joined.GroupID, joined.Key.Timestamp)
 		if err != nil {
 			return 0, err
 		}
 		group.Keys[joined.Key.Timestamp] = key
+		group.PublicKeys[joined.Key.Timestamp] = joined.Key.PublicKey
 		group.Timestamp = joined.Key.Timestamp
 		group.PublicKey = joined.Key.PublicKey
 	}
@@ -400,7 +443,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		var decrypted decryptedResponse
 		if err := decryptJSON(
 			key,
-			responseAAD(session.id, group.ID, envelope.ResponseID, envelope.KeyTimestamp),
+			responseAAD(session.protocolVersion, session.id, group.ID, envelope.ResponseID, envelope.KeyTimestamp),
 			envelope.Nonce,
 			envelope.Ciphertext,
 			&decrypted,
@@ -415,7 +458,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		}
 		switch decrypted.Type {
 		case "response":
-			if decrypted.RequestID == "" || decrypted.EventID != "" || decrypted.OptionID == "" || decrypted.Message != "" {
+			if decrypted.RequestID == "" || decrypted.EventID != "" || decrypted.OptionID == "" || decrypted.Message != "" || decrypted.Attachment != nil || envelope.AttachmentID != "" {
 				return nil, fmt.Errorf("response %q has invalid response fields", decrypted.ID)
 			}
 			if envelope.ItemID != "" && decrypted.RequestID != envelope.ItemID {
@@ -424,15 +467,21 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		case "dismiss":
 			legacyDismiss := envelope.ItemID == "" && decrypted.RequestID != "" && decrypted.EventID == ""
 			trackedDismiss := envelope.ItemID != "" && decrypted.EventID != "" && decrypted.RequestID == ""
-			if (!legacyDismiss && !trackedDismiss) || decrypted.OptionID != "" || decrypted.Message != "" {
+			if (!legacyDismiss && !trackedDismiss) || decrypted.OptionID != "" || decrypted.Message != "" || decrypted.Attachment != nil || envelope.AttachmentID != "" {
 				return nil, fmt.Errorf("response %q has invalid dismiss fields", decrypted.ID)
 			}
 			if envelope.ItemID != "" && decrypted.EventID != envelope.ItemID {
 				return nil, fmt.Errorf("response %q target does not match its plaintext item ID", decrypted.ID)
 			}
 		case "feedback":
-			if decrypted.Message == "" || decrypted.RequestID != "" || decrypted.EventID != "" || decrypted.OptionID != "" || envelope.ItemID != "" {
+			if decrypted.RequestID != "" || decrypted.EventID != "" || decrypted.OptionID != "" || envelope.ItemID != "" {
 				return nil, fmt.Errorf("response %q has invalid feedback fields", decrypted.ID)
+			}
+			if session.protocolVersion == 3 && (decrypted.Message == "" || decrypted.Attachment != nil || envelope.AttachmentID != "") {
+				return nil, fmt.Errorf("response %q has invalid version 3 feedback fields", decrypted.ID)
+			}
+			if session.protocolVersion == 4 && decrypted.Message == "" && decrypted.Attachment == nil {
+				return nil, fmt.Errorf("response %q has neither a message nor an attachment", decrypted.ID)
 			}
 		default:
 			return nil, fmt.Errorf("response %q has unsupported type %q", decrypted.ID, decrypted.Type)
@@ -448,10 +497,173 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 			CreatedAt: decrypted.CreatedAt,
 			GroupID:   group.ID,
 		}
+		if decrypted.Attachment != nil {
+			attachment, err := s.receiveAttachment(ctx, session, group, envelope, decrypted.Attachment)
+			if err != nil {
+				return nil, fmt.Errorf("receive attachment for response %q: %w", decrypted.ID, err)
+			}
+			response.Attachment = attachment
+		} else if envelope.AttachmentID != "" {
+			return nil, fmt.Errorf("response %q has an attachment only in its relay envelope", decrypted.ID)
+		}
 		responses = append(responses, response)
-		session.responseCursor = envelope.Sequence
+	}
+	if len(result.Responses) > 0 {
+		session.responseCursor = result.Responses[len(result.Responses)-1].Sequence
 	}
 	return responses, nil
+}
+
+func (s *Store) receiveAttachment(
+	ctx context.Context,
+	session *managedSession,
+	group *Group,
+	envelope responseEnvelope,
+	manifest *attachmentManifest,
+) (*ReceivedAttachment, error) {
+	if session.protocolVersion != 4 || envelope.AttachmentID == "" || manifest.ID != envelope.AttachmentID {
+		return nil, fmt.Errorf("attachment ID does not match its version 4 response envelope")
+	}
+	if manifest.Kind != "image" || manifest.MediaType != "image/jpeg" {
+		return nil, fmt.Errorf("unsupported attachment kind or media type")
+	}
+	if manifest.ByteLength <= 0 || manifest.CiphertextLength <= 16 || manifest.CiphertextLength > maximumAttachmentCiphertextBytes {
+		return nil, fmt.Errorf("attachment has an invalid length")
+	}
+	if manifest.CiphertextLength != manifest.ByteLength+16 {
+		return nil, fmt.Errorf("attachment ciphertext length does not include exactly one AES-GCM tag")
+	}
+	if manifest.Width <= 0 || manifest.Height <= 0 || manifest.Width > maximumAttachmentDimension || manifest.Height > maximumAttachmentDimension {
+		return nil, fmt.Errorf("attachment has invalid image dimensions")
+	}
+	if len(manifest.CiphertextSHA256) != 64 {
+		return nil, fmt.Errorf("attachment has an invalid ciphertext checksum")
+	}
+	publicKey, exists := group.PublicKeys[envelope.KeyTimestamp]
+	if !exists {
+		return nil, fmt.Errorf("attachment references unknown public key timestamp %d", envelope.KeyTimestamp)
+	}
+	ciphertext, err := s.api.attachment(
+		ctx,
+		session.id,
+		session.managerToken,
+		manifest.ID,
+		manifest.CiphertextLength,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(ciphertext)) != manifest.CiphertextLength {
+		return nil, fmt.Errorf("attachment ciphertext length does not match its manifest")
+	}
+	digest := sha256.Sum256(ciphertext)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), manifest.CiphertextSHA256) {
+		return nil, fmt.Errorf("attachment ciphertext checksum does not match its manifest")
+	}
+	key, err := deriveAttachmentKey(
+		session.privateKey,
+		publicKey,
+		session.id,
+		group.ID,
+		envelope.ResponseID,
+		manifest.ID,
+		envelope.KeyTimestamp,
+	)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := decryptAttachment(
+		key,
+		attachmentAAD(session.id, group.ID, envelope.ResponseID, manifest.ID, envelope.KeyTimestamp),
+		manifest.Nonce,
+		ciphertext,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(plaintext)) != manifest.ByteLength {
+		return nil, fmt.Errorf("attachment plaintext length does not match its manifest")
+	}
+	width, height, err := jpegDimensions(plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("inspect JPEG structure: %w", err)
+	}
+	if width != manifest.Width || height != manifest.Height {
+		return nil, fmt.Errorf("JPEG dimensions do not match the attachment manifest")
+	}
+	if session.tempDir == "" {
+		session.tempDir, err = os.MkdirTemp("", "notifyg-attachments-")
+		if err != nil {
+			return nil, fmt.Errorf("create attachment temporary directory: %w", err)
+		}
+		if err := os.Chmod(session.tempDir, 0o700); err != nil {
+			return nil, fmt.Errorf("protect attachment temporary directory: %w", err)
+		}
+	}
+	path := filepath.Join(session.tempDir, manifest.ID+".jpg")
+	if err := os.WriteFile(path, plaintext, 0o600); err != nil {
+		return nil, fmt.Errorf("write attachment temporary file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("protect attachment temporary file: %w", err)
+	}
+	uri := (&url.URL{Scheme: "file", Path: path}).String()
+	return &ReceivedAttachment{
+		ID: manifest.ID, Kind: manifest.Kind, MediaType: manifest.MediaType,
+		ByteLength: manifest.ByteLength, Width: manifest.Width, Height: manifest.Height,
+		Path: path, URI: uri,
+	}, nil
+}
+
+func jpegDimensions(data []byte) (int, int, error) {
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return 0, 0, fmt.Errorf("missing JPEG start marker")
+	}
+	for offset := 2; offset < len(data); {
+		for offset < len(data) && data[offset] == 0xff {
+			offset++
+		}
+		if offset >= len(data) {
+			break
+		}
+		marker := data[offset]
+		offset++
+		if marker == 0x00 || marker == 0xd8 || marker == 0xd9 || marker == 0x01 || marker >= 0xd0 && marker <= 0xd7 {
+			continue
+		}
+		if offset+2 > len(data) {
+			return 0, 0, fmt.Errorf("truncated JPEG segment length")
+		}
+		length := int(data[offset])<<8 | int(data[offset+1])
+		if length < 2 || offset+length > len(data) {
+			return 0, 0, fmt.Errorf("invalid JPEG segment length")
+		}
+		if isJPEGStartOfFrame(marker) {
+			if length < 8 {
+				return 0, 0, fmt.Errorf("truncated JPEG frame header")
+			}
+			height := int(data[offset+3])<<8 | int(data[offset+4])
+			width := int(data[offset+5])<<8 | int(data[offset+6])
+			if width == 0 || height == 0 {
+				return 0, 0, fmt.Errorf("empty JPEG dimensions")
+			}
+			return width, height, nil
+		}
+		if marker == 0xda {
+			return 0, 0, fmt.Errorf("JPEG scan begins before a frame header")
+		}
+		offset += length
+	}
+	return 0, 0, fmt.Errorf("JPEG frame header was not found")
+}
+
+func isJPEGStartOfFrame(marker byte) bool {
+	switch marker {
+	case 0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) WaitForGroups(ctx context.Context, sessionID string, timeout time.Duration) (int, error) {
@@ -510,6 +722,9 @@ func (s *Store) Close(ctx context.Context, sessionID string) error {
 	session, err := s.session(sessionID)
 	if err != nil {
 		return err
+	}
+	if session.tempDir != "" {
+		_ = os.RemoveAll(session.tempDir)
 	}
 	session.mu.Lock()
 	err = s.api.closeSession(ctx, session.id, session.managerToken)
@@ -600,7 +815,7 @@ func (s *Store) sendToGroupOnce(ctx context.Context, session *managedSession, gr
 	}
 	nonce, ciphertext, err := encryptJSON(
 		key,
-		eventAAD(session.id, group.ID, envelopeID, group.Timestamp),
+		eventAAD(session.protocolVersion, session.id, group.ID, envelopeID, group.Timestamp),
 		value,
 	)
 	if err != nil {

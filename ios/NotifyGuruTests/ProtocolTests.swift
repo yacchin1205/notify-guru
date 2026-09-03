@@ -12,14 +12,19 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(SessionGridLayout.columnCount(idiom: .pad, size: CGSize(width: 1_180, height: 820)), 3)
     }
 
-    func testPairingLinkRequiresExactV3Fragment() throws {
+    func testPairingLinkRequiresExactV3OrV4Fragment() throws {
         let token = Base64URL.encode(Data(repeating: 1, count: 32))
         let secret = Base64URL.encode(Data(repeating: 2, count: 32))
         let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
         let publicKey = Base64URL.encode(privateKey.publicKey.x963Representation)
         let link = try PairingLink("https://notify.guru/join#v=3&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0")
         XCTAssertEqual(link.sessionID, "session_identifier")
+        XCTAssertEqual(link.protocolVersion, 3)
         XCTAssertEqual(link.color, "#ffd6e0")
+        XCTAssertEqual(
+            try PairingLink("https://notify.guru/join#v=4&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0").protocolVersion,
+            4
+        )
         XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0"))
     }
 
@@ -43,6 +48,35 @@ final class ProtocolTests: XCTestCase {
             sharedInfo: Data("notify.guru/session/v3\nsession-id\ngroup-id\n1789999000001".utf8), outputByteCount: 32
         )
         XCTAssertEqual(derived, peer.withUnsafeBytes { Data($0) })
+    }
+
+    func testV4AttachmentUsesASeparateContextBoundKey() throws {
+        let creator = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 3, count: 32))
+        let groupPrivate = try P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 4, count: 32))
+        let groupKey = GroupKey(timestamp: 42, publicKey: Base64URL.encode(groupPrivate.publicKey.x963Representation), privateKey: groupPrivate.rawRepresentation)
+        let jpeg = Data([0xff, 0xd8, 0xff, 0xd9])
+        let encrypted = try CryptoEngine.encryptAttachment(
+            groupKey: groupKey, creatorPublicKey: Base64URL.encode(creator.publicKey.x963Representation),
+            sessionID: "session", groupID: "group", responseID: "response", attachmentID: "attachment",
+            jpeg: jpeg, width: 1, height: 1
+        )
+        let secret = try creator.sharedSecretFromKeyAgreement(with: groupPrivate.publicKey)
+        let key = secret.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: Data(),
+            sharedInfo: Data("notify.guru/attachment/v4\nsession\ngroup\n42\nresponse\nattachment".utf8), outputByteCount: 32
+        )
+        let box = try AES.GCM.SealedBox(
+            nonce: AES.GCM.Nonce(data: Base64URL.decode(encrypted.manifest.nonce)),
+            ciphertext: encrypted.ciphertext.dropLast(16), tag: encrypted.ciphertext.suffix(16)
+        )
+        XCTAssertEqual(
+            try AES.GCM.open(
+                box, using: key,
+                authenticating: Data("notify.guru/v4/attachment/session/group/42/response/attachment".utf8)
+            ),
+            jpeg
+        )
+        XCTAssertEqual(encrypted.manifest.ciphertextLength, Int64(jpeg.count + 16))
     }
 
     func testGroupKeyPackageRoundTrip() throws {

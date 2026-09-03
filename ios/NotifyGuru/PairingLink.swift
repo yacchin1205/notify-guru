@@ -1,6 +1,7 @@
 import Foundation
 
 struct PairingLink: Equatable {
+    let protocolVersion: Int
     let sessionID: String
     let pairingID: String
     let pairingToken: String
@@ -23,7 +24,7 @@ struct PairingLink: Equatable {
         }
         let expected = Set(["v", "s", "p", "t", "a", "k", "c"])
         guard items.count == expected.count, Set(items.map(\.name)) == expected else {
-            throw ProtocolError.invalidPairingLink("fragment fields do not match protocol version 3")
+            throw ProtocolError.invalidPairingLink("fragment fields do not match the protocol")
         }
         var fields: [String: String] = [:]
         for item in items {
@@ -32,7 +33,7 @@ struct PairingLink: Equatable {
             }
             fields[item.name] = itemValue
         }
-        guard fields["v"] == "3" else {
+        guard let protocolVersion = Int(fields["v"]!), protocolVersion == 3 || protocolVersion == 4 else {
             throw ProtocolError.invalidPairingLink("unsupported protocol version")
         }
         let sessionID = fields["s"]!
@@ -55,6 +56,7 @@ struct PairingLink: Equatable {
         guard color.range(of: #"^[0-9a-fA-F]{6}$"#, options: .regularExpression) != nil else {
             throw ProtocolError.invalidPairingLink("session color must contain six hexadecimal digits")
         }
+        self.protocolVersion = protocolVersion
         self.sessionID = sessionID
         self.pairingID = pairingID
         self.pairingToken = pairingToken

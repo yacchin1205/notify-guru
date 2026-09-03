@@ -277,7 +277,11 @@ func writeResponse(output io.Writer, response notify.Response) {
 	timestamp := response.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
 	switch response.Type {
 	case "feedback":
-		fmt.Fprintf(output, "feedback message=%q group=%s at=%s\n", response.Message, response.GroupID, timestamp)
+		attachment := ""
+		if response.Attachment != nil {
+			attachment = " attachment=" + response.Attachment.Path
+		}
+		fmt.Fprintf(output, "feedback message=%q%s group=%s at=%s\n", response.Message, attachment, response.GroupID, timestamp)
 	case "dismiss":
 		if response.ItemID != "" {
 			fmt.Fprintf(output, "dismiss item=%s group=%s at=%s\n", response.ItemID, response.GroupID, timestamp)

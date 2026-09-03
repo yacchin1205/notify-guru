@@ -39,7 +39,7 @@ export async function createDeviceGroup(body) {
 
 export async function getGroupState(identity) {
   const groupId = identity.group.groupId;
-  const result = await request(`/api/groups/${groupId}/state?deviceId=${identity.deviceId}`, { token: identity.accessToken });
+  const result = await request(`/api/groups/${groupId}/state?deviceId=${identity.deviceId}&protocolVersion=4`, { token: identity.accessToken });
   requireExactKeys(result, ["groupId", "members", "keys", "packages", "sessions"]);
   if (stringValue(result.groupId, "groupId") !== groupId) throw new Error("Group state ID mismatch");
   for (const field of ["members", "keys", "packages", "sessions"]) {
@@ -104,6 +104,34 @@ export async function postResponse(session, identity, body) {
   });
   requireExactKeys(result, ["expiresAt"]);
   return integerValue(result.expiresAt, "expiresAt");
+}
+
+export async function reserveAttachment(session, identity, body) {
+  const result = await request(`/api/sessions/${session.sessionId}/attachments`, {
+    method: "POST", token: identity.accessToken, body,
+  });
+  requireExactKeys(result, ["attachmentId", "uploadToken", "maxCiphertextBytes", "uploadExpiresAt"]);
+  return {
+    attachmentId: stringValue(result.attachmentId, "attachmentId"),
+    uploadToken: stringValue(result.uploadToken, "uploadToken"),
+    maxCiphertextBytes: integerValue(result.maxCiphertextBytes, "maxCiphertextBytes"),
+    uploadExpiresAt: integerValue(result.uploadExpiresAt, "uploadExpiresAt"),
+  };
+}
+
+export async function uploadAttachment(session, attachmentId, uploadToken, ciphertext) {
+  const response = await fetch(`/api/sessions/${session.sessionId}/attachments/${attachmentId}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${uploadToken}`, "content-type": "application/octet-stream" },
+    body: ciphertext,
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    requireExactKeys(result, ["error", "message"]);
+    throw new ApiError(response.status, stringValue(result.error, "error"), stringValue(result.message, "message"));
+  }
+  requireExactKeys(result, ["uploaded"]);
+  if (result.uploaded !== true) throw new Error("Attachment upload was not confirmed");
 }
 
 async function request(path, options = {}) {

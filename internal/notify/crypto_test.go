@@ -19,18 +19,18 @@ func TestV3GroupKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	creatorKey, err := deriveGroupKey(creator, encode(group.PublicKey().Bytes()), "session-id", "group-id", 1_789_999_000_001)
+	creatorKey, err := deriveGroupKey(creator, encode(group.PublicKey().Bytes()), 3, "session-id", "group-id", 1_789_999_000_001)
 	if err != nil {
 		t.Fatal(err)
 	}
-	groupKey, err := deriveGroupKey(group, encode(creator.PublicKey().Bytes()), "session-id", "group-id", 1_789_999_000_001)
+	groupKey, err := deriveGroupKey(group, encode(creator.PublicKey().Bytes()), 3, "session-id", "group-id", 1_789_999_000_001)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(creatorKey, groupKey) {
 		t.Fatal("ECDH peers derived different session keys")
 	}
-	if _, err := deriveGroupKey(group, encode(creator.PublicKey().Bytes()), "session-id", "group-id", 1_789_999_000_002); err != nil {
+	if _, err := deriveGroupKey(group, encode(creator.PublicKey().Bytes()), 3, "session-id", "group-id", 1_789_999_000_002); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -44,11 +44,11 @@ func TestECDHEncryptionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	creatorKey, err := deriveGroupKey(creator, encode(deviceGroup.PublicKey().Bytes()), "session-id", "group-id", 42)
+	creatorKey, err := deriveGroupKey(creator, encode(deviceGroup.PublicKey().Bytes()), 3, "session-id", "group-id", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deviceGroupKey, err := deriveGroupKey(deviceGroup, encode(creator.PublicKey().Bytes()), "session-id", "group-id", 42)
+	deviceGroupKey, err := deriveGroupKey(deviceGroup, encode(creator.PublicKey().Bytes()), 3, "session-id", "group-id", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +81,50 @@ func TestV3PairingProofAuthentication(t *testing.T) {
 	mac := hmac.New(sha256.New, secret)
 	fmt.Fprint(mac, "v3\nsession\npairing\ngroup\n42\npublic-key")
 	proof := encode(mac.Sum(nil))
-	if err := verifyPairingProofV3(authSecret, "session", "pairing", "group", 42, "public-key", proof); err != nil {
+	if err := verifyPairingProof(authSecret, 3, "session", "pairing", "group", 42, "public-key", proof); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyPairingProofV3(authSecret, "session", "pairing", "group", 43, "public-key", proof); err == nil {
+	if err := verifyPairingProof(authSecret, 3, "session", "pairing", "group", 43, "public-key", proof); err == nil {
 		t.Fatal("proof was accepted for another key timestamp")
+	}
+}
+
+func TestV4AttachmentKeyAndAADAreContextBound(t *testing.T) {
+	creator, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{8}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorKey, err := deriveAttachmentKey(creator, encode(group.PublicKey().Bytes()), "session", "group", "response", "attachment", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupKey, err := deriveAttachmentKey(group, encode(creator.PublicKey().Bytes()), "session", "group", "response", "attachment", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(creatorKey, groupKey) {
+		t.Fatal("ECDH peers derived different attachment keys")
+	}
+	aead, err := newAEAD(groupKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes.Repeat([]byte{9}, aead.NonceSize())
+	plaintext := []byte{0xff, 0xd8, 0xff, 0xd9}
+	aad := attachmentAAD("session", "group", "response", "attachment", 42)
+	ciphertext := aead.Seal(nil, nonce, plaintext, []byte(aad))
+	got, err := decryptAttachment(creatorKey, aad, encode(nonce), ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("decrypted attachment = %x, want %x", got, plaintext)
+	}
+	if _, err := decryptAttachment(creatorKey, attachmentAAD("session", "group", "response", "other", 42), encode(nonce), ciphertext); err == nil {
+		t.Fatal("attachment decrypted under another attachment ID")
 	}
 }

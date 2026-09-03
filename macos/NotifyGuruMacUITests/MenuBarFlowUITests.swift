@@ -46,6 +46,66 @@ final class MenuBarFlowUITests: XCTestCase {
         attachScreenshot(named: "04-all-cleared", app: app)
     }
 
+    func testV4MessageAcceptsClipboardImage() {
+        let fixture = NSImage(size: NSSize(width: 320, height: 180))
+        fixture.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 320, height: 180)).fill()
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 120, y: 50, width: 80, height: 80)).fill()
+        fixture.unlockFocus()
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(NSPasteboard.general.writeObjects([fixture]))
+
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-photo-message"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru, no unresolved items"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        let compose = app.buttons["Send a Message"]
+        XCTAssertTrue(compose.isHittable)
+        compose.click()
+
+        let message = app.textFields["mac-message-editor"]
+        let send = app.buttons["Send"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Paste Image"].exists)
+        XCTAssertFalse(send.isEnabled)
+        attachScreenshot(named: "30-message-empty-with-paste-image", app: app)
+
+        message.click()
+        app.typeKey("v", modifierFlags: .command)
+        let preview = app.images["mac-selected-photo-preview"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertTrue(app.buttons["Remove Image"].exists)
+        attachScreenshot(named: "31-clipboard-image-ready", app: app)
+
+        app.buttons["Remove Image"].click()
+        XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
+        XCTAssertFalse(send.isEnabled)
+
+        app.buttons["Paste Image"].click()
+        XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.isEnabled)
+        attachScreenshot(named: "32-paste-button-image-ready", app: app)
+
+        app.buttons["Remove Image"].click()
+        XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("ordinary text paste", forType: .string)
+        message.click()
+        app.typeKey("v", modifierFlags: .command)
+        XCTAssertEqual(message.value as? String, "ordinary text paste")
+
+        app.buttons["Cancel"].click()
+        XCTAssertTrue(app.buttons["Send a Message"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "33-image-composer-cancelled", app: app)
+    }
+
     func testSessionSyncErrorStaysOnTheCard() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-session-history", "-ui-test-session-sync-error"]
@@ -212,6 +272,10 @@ final class MenuBarFlowUITests: XCTestCase {
         let secret = String(repeating: "A", count: 43)
         let publicKey = String(repeating: "A", count: 87)
         return "https://notify.guru/join#v=3&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
+    }
+
+    private func absence(of element: XCUIElement) -> XCTestExpectation {
+        XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
     }
 
     private func attachScreenshot(named name: String, app: XCUIApplication) {

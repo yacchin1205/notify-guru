@@ -200,7 +200,7 @@ above:
 |---|---|---|
 | `response` | They picked an option | `optionId`, `requestId` |
 | `dismiss` | They cleared the item without choosing | `requestId`, or `eventId` for a dismissed `notify` |
-| `feedback` | They wrote to you unprompted | `message` |
+| `feedback` | They wrote to you unprompted | `message`, an optional photo attachment, or both |
 
 Every response also carries `id`, `groupId`, and `createdAt`. A `dismiss` is not
 an answer: it means they declined to choose, so do not read one as consent.
@@ -235,7 +235,7 @@ the mechanism. The accurate picture:
   the session, group, and key generation. Private keys never leave the
   `notifyg` process or the device.
 - The join payload travels in the **URL fragment**
-  (`https://notify.guru/join#a=…&c=…&k=…&p=…&s=…&t=…&v=3`), which browsers do not
+  (`https://notify.guru/join#a=…&c=…&k=…&p=…&s=…&t=…&v=4`), which browsers do not
   send to a server. The auth secret never reaches the relay at all: it only keys
   the HMAC proof that authenticates the joining group's key. The pairing token
   is presented once when the device joins and checked against a stored
@@ -243,6 +243,10 @@ the mechanism. The accurate picture:
 - Each ciphertext is bound by its additional data to the session, device group,
   key generation, and envelope ID, so the relay cannot replay an event into
   another session or group without decryption failing.
+- A photo attachment is encrypted as one AES-256-GCM ciphertext with a separate
+  ECDH/HKDF context bound to its response and attachment IDs. The private R2
+  bucket receives ciphertext only; media type, dimensions, nonce, and plaintext
+  length remain inside the encrypted response manifest.
 - OS notifications carry no content: `notify` shows "A new notification is
   available.", `request` shows "Your input is requested.", `status` shows
   nothing, or "Status updated." on a device watching the session. Push exists
@@ -271,6 +275,10 @@ gets lost:
   by a device already in that group.
 - Whatever runs on a device where keys already live can read them. A compromised
   `notifyg` process, browser profile, or device is outside the guarantee.
+- `notifyg` writes a verified photo to an OS temporary directory before giving
+  MCP a local `file:` resource link. It uses restrictive directory/file modes
+  and removes the directory when the session closes, but does not promise secure
+  erasure; an abrupt process exit can leave plaintext for normal OS cleanup.
 - Removing a device rotates the group key generation but cannot un-deliver
   ciphertext that device already received.
 

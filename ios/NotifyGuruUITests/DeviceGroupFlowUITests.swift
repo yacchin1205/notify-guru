@@ -254,6 +254,50 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "16-attention-off-again", app: app)
     }
 
+    func testV4FeedbackOffersAnOptionalPhotoAndRequiresContent() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        app.buttons["Send a message"].tap()
+
+        let editor = app.textViews["Message"]
+        let takePhoto = app.buttons["Take Photo"]
+        let choosePhoto = app.buttons["Choose Photo"]
+        let send = app.buttons["Send"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(takePhoto.exists)
+        XCTAssertTrue(choosePhoto.exists)
+        XCTAssertFalse(send.isEnabled)
+        attachScreenshot(named: "50-v4-feedback-empty-with-photo-actions", app: app)
+
+        choosePhoto.tap()
+        let photoThumbnail = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(photoThumbnail.waitForExistence(timeout: 5))
+        attachScreenshot(named: "51-v4-feedback-photo-library", app: app)
+
+        let onboardingClose = app.buttons.matching(
+            NSPredicate(format: "label == %@ OR label == %@", "Close", "閉じる")
+        ).firstMatch
+        if onboardingClose.exists { onboardingClose.tap() }
+        photoThumbnail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let preview = app.images["selected-photo-preview"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertTrue(app.buttons["Remove Photo"].exists)
+        attachScreenshot(named: "52-v4-feedback-library-photo-ready", app: app)
+
+        app.buttons["Remove Photo"].tap()
+        XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
+        XCTAssertFalse(send.isEnabled)
+
+        editor.tap()
+        editor.typeText("A message with an optional photo")
+        XCTAssertTrue(send.isEnabled)
+        attachScreenshot(named: "53-v4-feedback-message-ready", app: app)
+    }
+
     private func absence(of element: XCUIElement) -> XCTestExpectation {
         XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
     }
