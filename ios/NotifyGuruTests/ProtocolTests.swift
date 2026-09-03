@@ -28,10 +28,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0"))
     }
 
-    func testDeviceRequestLinkContainsOnlyOpaqueRequestID() throws {
-        let link = try DeviceRequestLink("https://notify.guru/device#v=2&r=request_identifier")
+    func testDeviceRequestLinkAuthenticatesTheRequestAndApproval() throws {
+        let secret = Base64URL.encode(Data(repeating: 9, count: 32))
+        let requestHash = String(repeating: "a", count: 64)
+        let link = try DeviceRequestLink("https://notify.guru/device#v=3&r=request_identifier&a=\(secret)&h=\(requestHash)")
         XCTAssertEqual(link.requestID, "request_identifier")
-        XCTAssertThrowsError(try DeviceRequestLink("https://notify.guru/device#v=2&r=request_identifier&g=group"))
+        XCTAssertEqual(link.authSecret, secret)
+        XCTAssertEqual(link.requestHash, requestHash)
+        XCTAssertThrowsError(try DeviceRequestLink("https://notify.guru/device#v=3&r=request_identifier&a=\(secret)&h=\(requestHash)&g=group"))
     }
 
     func testTimestampSessionKeyMatchesECDHPeer() throws {
@@ -94,8 +98,222 @@ final class ProtocolTests: XCTestCase {
         )
         XCTAssertEqual(
             try CryptoEngine.openKeyPackage(identity: identity, groupID: "group-identifier", record: record, package: received),
-            GroupKey(timestamp: timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey)
+            GroupKey(timestamp: timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey, transitionHash: "")
         )
+    }
+
+    func testV4TransitionChainRejectsInjectionModificationAndRollback() throws {
+        var identity = try fixedIdentity()
+        let member = TransitionMember(
+            deviceID: identity.deviceID,
+            signingPublicKey: try CryptoEngine.signingPublicKey(for: identity),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity)
+        )
+        let firstKey = CryptoEngine.createGroupKey()
+        let firstPackage = try CryptoEngine.createKeyPackage(
+            groupID: "group-identifier", key: firstKey, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let first = try CryptoEngine.createGroupTransition(
+            groupID: "group-identifier", identity: identity, groupKey: firstKey,
+            previous: nil, members: [member], packages: [firstPackage], recreated: true, now: 10
+        )
+        identity.group = DeviceGroup(
+            groupID: "group-identifier",
+            keys: [String(first.timestamp): GroupKey(
+                timestamp: first.timestamp, publicKey: firstKey.publicKey,
+                privateKey: firstKey.privateKey, transitionHash: first.transitionHash
+            )],
+            rootTransitionHash: first.transitionHash, headTransitionHash: first.transitionHash
+        )
+        let secondKey = CryptoEngine.createGroupKey()
+        let secondPackage = try CryptoEngine.createKeyPackage(
+            groupID: "group-identifier", key: secondKey, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let second = try CryptoEngine.createGroupTransition(
+            groupID: "group-identifier", identity: identity, groupKey: secondKey,
+            previous: first, members: [member], packages: [secondPackage], recreated: false, now: 11
+        )
+        XCTAssertEqual(
+            try CryptoEngine.validateGroupTransitions(
+                groupID: "group-identifier", transitions: [first, second], trustedHash: first.transitionHash
+            ),
+            second
+        )
+
+        let forgedContinuity = try CryptoEngine.signDevice(identity: identity, transcript: "relay forgery")
+        let injectedDraft = GroupKeyRecord(
+            transitionID: second.transitionID, previousHash: second.previousHash, transitionHash: "",
+            timestamp: second.timestamp, actorDeviceID: second.actorDeviceID, publicKey: second.publicKey,
+            recreated: second.recreated, members: second.members, packageDigests: second.packageDigests,
+            actorSignature: second.actorSignature, continuitySignature: forgedContinuity
+        )
+        let injected = GroupKeyRecord(
+            transitionID: injectedDraft.transitionID, previousHash: injectedDraft.previousHash,
+            transitionHash: CryptoEngine.groupTransitionHash(
+                groupID: "group-identifier", transition: injectedDraft,
+                actorSignature: injectedDraft.actorSignature, continuitySignature: injectedDraft.continuitySignature
+            ),
+            timestamp: injectedDraft.timestamp, actorDeviceID: injectedDraft.actorDeviceID,
+            publicKey: injectedDraft.publicKey, recreated: injectedDraft.recreated,
+            members: injectedDraft.members, packageDigests: injectedDraft.packageDigests,
+            actorSignature: injectedDraft.actorSignature, continuitySignature: injectedDraft.continuitySignature
+        )
+        XCTAssertThrowsError(try CryptoEngine.validateGroupTransitions(
+            groupID: "group-identifier", transitions: [first, injected], trustedHash: first.transitionHash
+        ))
+
+        let changed = GroupKeyRecord(
+            transitionID: second.transitionID, previousHash: second.previousHash,
+            transitionHash: second.transitionHash, timestamp: second.timestamp,
+            actorDeviceID: second.actorDeviceID, publicKey: second.publicKey, recreated: second.recreated,
+            members: [TransitionMember(
+                deviceID: member.deviceID, signingPublicKey: member.signingPublicKey,
+                encryptionPublicKey: CryptoEngine.createGroupKey().publicKey
+            )],
+            packageDigests: second.packageDigests, actorSignature: second.actorSignature,
+            continuitySignature: second.continuitySignature
+        )
+        XCTAssertThrowsError(try CryptoEngine.validateGroupTransitions(
+            groupID: "group-identifier", transitions: [first, changed], trustedHash: first.transitionHash
+        ))
+        XCTAssertThrowsError(try CryptoEngine.validateGroupTransitions(
+            groupID: "group-identifier", transitions: [first], trustedHash: second.transitionHash
+        ))
+    }
+
+    func testV4DeviceApprovalProofBindsAcceptedTransition() throws {
+        let secret = Base64URL.encode(Data(repeating: 4, count: 32))
+        let proof = try CryptoEngine.deviceApprovalProof(
+            authSecret: secret, requestID: "request", groupID: "group",
+            transitionHash: String(repeating: "a", count: 64)
+        )
+        XCTAssertTrue(try CryptoEngine.verifyDeviceApprovalProof(
+            authSecret: secret, requestID: "request", groupID: "group",
+            transitionHash: String(repeating: "a", count: 64), proof: proof
+        ))
+        XCTAssertFalse(try CryptoEngine.verifyDeviceApprovalProof(
+            authSecret: secret, requestID: "request", groupID: "group",
+            transitionHash: String(repeating: "b", count: 64), proof: proof
+        ))
+    }
+
+    func testV4SessionDescriptorAuthenticatesCreatorKey() throws {
+        var identity = try fixedIdentity()
+        let member = TransitionMember(
+            deviceID: identity.deviceID, signingPublicKey: try CryptoEngine.signingPublicKey(for: identity),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity)
+        )
+        let draft = CryptoEngine.createGroupKey()
+        let package = try CryptoEngine.createKeyPackage(
+            groupID: "group", key: draft, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let transition = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: identity, groupKey: draft, previous: nil,
+            members: [member], packages: [package], recreated: true, now: 10
+        )
+        let key = GroupKey(
+            timestamp: transition.timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey,
+            transitionHash: transition.transitionHash
+        )
+        identity.group = DeviceGroup(groupID: "group", keys: [String(key.timestamp): key])
+        let descriptor = try CryptoEngine.createSessionDescriptor(
+            identity: identity, key: key, sessionID: "session", groupID: "group",
+            creatorPublicKey: draft.publicKey
+        )
+        let remote = GroupSessionResult(
+            protocolVersion: 4, sessionID: descriptor.sessionID, groupID: "group",
+            creatorPublicKey: descriptor.creatorPublicKey,
+            expiresAt: 100, keyTimestamp: descriptor.keyTimestamp, transitionHash: descriptor.transitionHash,
+            actorDeviceID: descriptor.actorDeviceID, actorSignature: descriptor.actorSignature,
+            continuitySignature: descriptor.continuitySignature
+        )
+        XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(remote, groupID: "group", transitions: [transition]))
+        XCTAssertNoThrow(try CryptoEngine.authenticateInheritedSession(remote, groupID: "group", transitions: [transition]))
+        let tampered = GroupSessionResult(
+            protocolVersion: 4, sessionID: remote.sessionID, groupID: remote.groupID,
+            creatorPublicKey: CryptoEngine.createGroupKey().publicKey, expiresAt: remote.expiresAt,
+            keyTimestamp: remote.keyTimestamp, transitionHash: remote.transitionHash,
+            actorDeviceID: remote.actorDeviceID, actorSignature: remote.actorSignature,
+            continuitySignature: remote.continuitySignature
+        )
+        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(tampered, groupID: "group", transitions: [transition]))
+        XCTAssertThrowsError(try CryptoEngine.authenticateInheritedSession(tampered, groupID: "group", transitions: [transition]))
+        let wrongGroup = GroupSessionResult(
+            protocolVersion: 4, sessionID: remote.sessionID, groupID: "other-group",
+            creatorPublicKey: remote.creatorPublicKey, expiresAt: remote.expiresAt,
+            keyTimestamp: remote.keyTimestamp, transitionHash: remote.transitionHash,
+            actorDeviceID: remote.actorDeviceID, actorSignature: remote.actorSignature,
+            continuitySignature: remote.continuitySignature
+        )
+        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(wrongGroup, groupID: "group", transitions: [transition]))
+        XCTAssertThrowsError(try CryptoEngine.authenticateInheritedSession(wrongGroup, groupID: "group", transitions: [transition]))
+        var missingGroup = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(remote)) as? [String: Any]
+        )
+        missingGroup.removeValue(forKey: "groupId")
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            GroupSessionResult.self,
+            from: JSONSerialization.data(withJSONObject: missingGroup)
+        ))
+        let downgraded = GroupSessionResult(
+            protocolVersion: 3, sessionID: remote.sessionID, groupID: remote.groupID,
+            creatorPublicKey: remote.creatorPublicKey,
+            expiresAt: remote.expiresAt, keyTimestamp: remote.keyTimestamp,
+            transitionHash: remote.transitionHash, actorDeviceID: remote.actorDeviceID,
+            actorSignature: remote.actorSignature, continuitySignature: remote.continuitySignature
+        )
+        XCTAssertThrowsError(try CryptoEngine.authenticateInheritedSession(downgraded, groupID: "group", transitions: [transition]))
+        XCTAssertEqual(
+            try CryptoEngine.authenticatedInheritedSessions(
+                [downgraded, remote], groupID: "group", transitions: [transition]
+            ),
+            [remote]
+        )
+        XCTAssertThrowsError(try CryptoEngine.authenticatedInheritedSessions(
+            [downgraded, tampered], groupID: "group", transitions: [transition]
+        ))
+    }
+
+    func testV4TransitionRejectsRecreatedSelfRemoval() throws {
+        var leaving = try fixedIdentity()
+        var remaining = try CryptoEngine.createIdentity()
+        remaining.deviceID = "remaining-device"
+        let members = try [leaving, remaining].map { identity in
+            TransitionMember(
+                deviceID: identity.deviceID, signingPublicKey: try CryptoEngine.signingPublicKey(for: identity),
+                encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity)
+            )
+        }
+        let firstKey = CryptoEngine.createGroupKey()
+        let firstPackages = try members.map { member in
+            try CryptoEngine.createKeyPackage(
+                groupID: "group", key: firstKey, deviceID: member.deviceID,
+                encryptionPublicKey: member.encryptionPublicKey
+            )
+        }
+        let first = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: leaving, groupKey: firstKey, previous: nil,
+            members: members, packages: firstPackages, recreated: true, now: 10
+        )
+        leaving.group = DeviceGroup(groupID: "group", keys: [String(first.timestamp): GroupKey(
+            timestamp: first.timestamp, publicKey: firstKey.publicKey, privateKey: firstKey.privateKey,
+            transitionHash: first.transitionHash
+        )])
+        let attackerKey = CryptoEngine.createGroupKey()
+        let remainingPackage = try CryptoEngine.createKeyPackage(
+            groupID: "group", key: attackerKey, deviceID: members[1].deviceID,
+            encryptionPublicKey: members[1].encryptionPublicKey
+        )
+        let forged = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: leaving, groupKey: attackerKey, previous: first,
+            members: [members[1]], packages: [remainingPackage], recreated: true, now: 11
+        )
+        XCTAssertThrowsError(try CryptoEngine.validateGroupTransitions(
+            groupID: "group", transitions: [first, forged], trustedHash: first.transitionHash
+        ))
     }
 
     func testGroupKeyManagementTranscriptIsCanonical() throws {
@@ -127,7 +345,6 @@ final class ProtocolTests: XCTestCase {
         )
         XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 20)
         XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
-        XCTAssertFalse(GroupKeyPolicy.nextKeyIsRecreated(state))
     }
 
     func testGroupKeySelectionUsesLatestSafeKey() {
@@ -139,9 +356,8 @@ final class ProtocolTests: XCTestCase {
                 GroupKeyRecord(timestamp: 30, publicKey: "abc", recreated: false, members: ["a", "b", "c"]),
             ]
         )
-        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 20)
+        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 30)
         XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
-        XCTAssertTrue(GroupKeyPolicy.nextKeyIsRecreated(state))
     }
 
     func testGroupKeySelectionRecreatesAfterRemovalEvenWhenOlderKeyIsUsable() {
@@ -152,9 +368,8 @@ final class ProtocolTests: XCTestCase {
                 GroupKeyRecord(timestamp: 20, publicKey: "ab", recreated: false, members: ["a", "b"]),
             ]
         )
-        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 10)
+        XCTAssertEqual(GroupKeyPolicy.selectUsableKey(state)?.timestamp, 20)
         XCTAssertFalse(GroupKeyPolicy.latestKeyMatchesMembers(state))
-        XCTAssertTrue(GroupKeyPolicy.nextKeyIsRecreated(state))
     }
 
     func testEventDecoderRejectsUnknownFields() throws {
@@ -182,7 +397,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testVaultRoundTripAndExpiry() throws {
-        let vault = Vault(version: 3, identity: try fixedIdentity(), sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)])
+        let vault = Vault(version: 4, identity: try fixedIdentity(), sessions: [session(id: "expired", expiresAt: 1_000), session(id: "current", expiresAt: 1_001)])
         XCTAssertEqual(try JSONDecoder().decode(Vault.self, from: JSONEncoder().encode(vault)), vault)
         XCTAssertEqual(AppModel.pruningExpiredSessions(from: vault, nowMilliseconds: 1_000).sessions.map(\.sessionID), ["current"])
     }
@@ -302,7 +517,7 @@ final class ProtocolTests: XCTestCase {
     func testDetachingGroupRemovesOnlyItsV3Sessions() throws {
         var identity = try fixedIdentity()
         identity.group = DeviceGroup(groupID: "current-group", keys: [:])
-        let vault = Vault(version: 3, identity: identity, sessions: [session(id: "current", groupID: "current-group"), session(id: "other", groupID: "other-group")])
+        let vault = Vault(version: 4, identity: identity, sessions: [session(id: "current", groupID: "current-group"), session(id: "other", groupID: "other-group")])
         let detached = AppModel.detachingFromDeviceGroup(vault, groupID: "current-group")
         XCTAssertNil(detached.identity.group)
         XCTAssertEqual(detached.sessions.map(\.sessionID), ["other"])

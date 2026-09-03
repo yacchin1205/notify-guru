@@ -79,6 +79,8 @@ struct PairingLink: Equatable {
 
 struct DeviceRequestLink: Equatable {
     let requestID: String
+    let authSecret: String
+    let requestHash: String
 
     init(_ value: String) throws {
         guard let components = URLComponents(string: value),
@@ -91,7 +93,7 @@ struct DeviceRequestLink: Equatable {
               let items = parsed.queryItems else {
             throw ProtocolError.invalidPairingLink("expected an https://notify.guru/device URL")
         }
-        let expected = Set(["v", "r"])
+        let expected = Set(["v", "r", "a", "h"])
         guard items.count == expected.count, Set(items.map(\.name)) == expected else {
             throw ProtocolError.invalidPairingLink("the add-to-group link has an invalid format")
         }
@@ -102,10 +104,18 @@ struct DeviceRequestLink: Equatable {
             }
             fields[item.name] = itemValue
         }
-        guard fields["v"] == "2" else {
+        guard fields["v"] == "3" else {
             throw ProtocolError.invalidPairingLink("this add-to-group link cannot be used by this app")
         }
         try PairingLink.requireIdentifier(fields["r"]!, name: "link identifier")
+        guard (try? Base64URL.decode(fields["a"]!))?.count == 32 else {
+            throw ProtocolError.invalidPairingLink("device approval secret must contain 32 bytes")
+        }
+        guard fields["h"]!.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw ProtocolError.invalidPairingLink("device request hash must contain 64 hexadecimal digits")
+        }
         requestID = fields["r"]!
+        authSecret = fields["a"]!
+        requestHash = fields["h"]!
     }
 }

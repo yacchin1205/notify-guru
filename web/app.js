@@ -3,38 +3,44 @@ import {
   approveDeviceRequest,
   createDeviceGroup,
   createDeviceRequest,
+  getDeviceRequestForApproval,
   getDeviceRequest,
   getEvents,
   getGroupState,
   joinSession,
   postResponse,
   reserveAttachment,
-  registerDevice,
   registerGroupKey,
+  registerDevice,
   removeDevice,
   uploadAttachment,
 } from "./api.js";
 import {
+  authenticatedInheritedSessions,
   createDeviceIdentity,
+  createGroupTransition,
+  createSessionDescriptor,
   createGroupKey,
   createKeyPackage,
   decryptEvent,
   deriveSessionKey,
+  deviceApprovalProof,
   deviceCreateTranscript,
+  deviceRequestBindingHash,
   deviceRequestReadTranscript,
   deviceRequestTranscript,
   encryptResponse,
   encryptAttachment,
   groupCreateTranscript,
-  groupDeviceApproveTranscript,
-  groupDeviceRemoveTranscript,
-  groupKeyRegisterTranscript,
   hashToken,
   openKeyPackage,
   pairingProof,
   randomId,
   randomToken,
   signDevice,
+  validateGroupTransitions,
+  verifyDeviceApprovalProof,
+  verifyKeyPackageDigest,
 } from "./crypto.js";
 import {
   deleteSession,
@@ -47,7 +53,6 @@ import {
   resetLocalData,
 } from "./db.js";
 import { expiredSessionIDs } from "./expiry.js";
-import { latestGroupKeyMatchesMembers, nextGroupKeyIsRecreated, selectUsableGroupKey } from "./group-key-policy.js";
 import { qrMatrix } from "./qr.js";
 import { relativeTime } from "./relative-time.js";
 
@@ -117,6 +122,9 @@ async function identityOrCreate() {
       throw new LegacyProtocolError("このブラウザに保存されているnotify.guruのデータを読み込めません。");
     }
     current.protocolVersion = 4;
+    if (current.group !== null && (current.group.rootTransitionHash === undefined || current.group.headTransitionHash === undefined)) {
+      throw new LegacyProtocolError("このブラウザのデバイスグループは、安全なv4鍵履歴を持っていません。ローカルデータを消去して再設定してください。");
+    }
     delete current.deviceRequest;
     await putIdentity(current);
     return current;
@@ -136,14 +144,32 @@ async function createSoloGroup() {
   if (identity.group !== null || pendingDeviceRequest !== null) throw new Error("Device already has an active destination");
   const groupId = randomId();
   const accessHash = await hashToken(identity.accessToken);
+  const groupKey = await createGroupKey();
+  const member = {
+    deviceId: identity.deviceId,
+    signingPublicKey: identity.signingPublicKey,
+    encryptionPublicKey: identity.encryptionPublicKey,
+  };
+  const packages = [await createKeyPackage(groupId, groupKey, member)];
+  const transition = await createGroupTransition(groupId, identity, groupKey, null, [member], packages, true);
   await createDeviceGroup({
     groupId,
     deviceId: identity.deviceId,
     deviceAccessTokenHash: accessHash,
     deviceEncryptionPublicKey: identity.encryptionPublicKey,
     deviceSignature: await signDevice(identity, groupCreateTranscript(groupId, identity, accessHash)),
+    protocolVersion: 4,
+    transition,
+    packages,
   });
-  identity.group = { groupId, keys: {} };
+  identity.group = {
+    groupId,
+    rootTransitionHash: transition.transitionHash,
+    headTransitionHash: transition.transitionHash,
+    keys: {
+      [String(transition.timestamp)]: { ...groupKey, timestamp: transition.timestamp, transitionHash: transition.transitionHash },
+    },
+  };
   await putIdentity(identity);
   await syncGroup();
 }
@@ -159,17 +185,24 @@ async function beginDeviceRequest() {
     if ((groupState.members.length > 1 || sessions.length > 0)
       && !window.confirm("このデバイスを現在のグループから除外し、表示中のセッションを削除して、別のグループへの追加を続けますか？")) return;
     const groupId = identity.group.groupId;
-    await removeDevice(identity, identity.deviceId, {
-      actorSignature: await signDevice(
-        identity,
-        groupDeviceRemoveTranscript(identity.group.groupId, identity.deviceId, identity.deviceId),
-      ),
-    });
+    if (groupState.members.length === 1) {
+      await removeDevice(identity, identity.deviceId, {
+        actorSignature: await signDevice(identity, groupAbandonTranscript(
+          identity.group.groupId, identity.deviceId, identity.group.headTransitionHash,
+        )),
+        headTransitionHash: identity.group.headTransitionHash,
+      });
+    } else {
+      const remaining = groupState.members.filter((member) => member.deviceId !== identity.deviceId);
+      const update = await createSelfRemovalTransition(remaining);
+      await removeDevice(identity, identity.deviceId, { transition: update.transition, packages: update.packages });
+    }
     identity.group = null;
     await detachDeviceGroup(identity, groupId);
     groupState = undefined;
   }
   const requestId = randomId();
+  const authSecret = randomToken();
   const accessHash = await hashToken(identity.accessToken);
   const created = await createDeviceRequest({
     requestId,
@@ -179,32 +212,69 @@ async function beginDeviceRequest() {
     deviceSignature: await signDevice(identity, deviceRequestTranscript(requestId, identity, accessHash, 4)),
     protocolVersion: 4,
   });
-  pendingDeviceRequest = created;
-  showDeviceRequest(created);
+  const expectedRequestHash = await deviceRequestBindingHash({
+    requestId,
+    deviceId: identity.deviceId,
+    signingPublicKey: identity.signingPublicKey,
+    accessHash,
+    encryptionPublicKey: identity.encryptionPublicKey,
+    protocolVersion: 4,
+  });
+  if (created.requestHash !== expectedRequestHash) throw new Error("Relay changed the device request binding");
+  pendingDeviceRequest = { ...created, authSecret };
+  showDeviceRequest(pendingDeviceRequest);
   setDeviceManagement(false);
 }
 
 function showDeviceRequest(deviceRequest) {
   const link = new URL("/device", location.origin);
-  link.hash = new URLSearchParams({ v: "2", r: deviceRequest.requestId }).toString();
+  link.hash = new URLSearchParams({
+    v: "3", r: deviceRequest.requestId, a: deviceRequest.authSecret, h: deviceRequest.requestHash,
+  }).toString();
   requestURL = link.toString();
   renderQR(requestURL);
   waitingElement.hidden = false;
   waitingStatusElement.textContent = "追加先のグループに所属しているデバイスでこのQRコードを読み取ってください。";
 }
 
-async function approveScannedRequest(requestId) {
+async function approveScannedRequest(scannedRequest) {
   if (identity.group === null || pendingDeviceRequest !== null) {
     throw new Error("このデバイスでは、別のデバイスをグループに追加できません");
   }
   await syncGroup();
   await ensureExactGroupKey();
-  await approveDeviceRequest(identity, requestId, {
-    actorSignature: await signDevice(
-      identity,
-      groupDeviceApproveTranscript(identity.group.groupId, identity.deviceId, requestId),
-    ),
+  const requested = await getDeviceRequestForApproval(identity, scannedRequest.requestId);
+  if (await deviceRequestBindingHash(requested) !== scannedRequest.requestHash) {
+    throw new Error("追加用リンクと端末要求の内容が一致しません");
+  }
+  if (requested.protocolVersion !== 4) throw new Error("この端末要求は安全なv4追加方式に対応していません");
+  if (groupState.members.some((member) => member.deviceId === requested.deviceId)) {
+    throw new Error("この端末はすでにグループへ追加されています");
+  }
+  const members = [...groupState.members, {
+    deviceId: requested.deviceId,
+    signingPublicKey: requested.signingPublicKey,
+    encryptionPublicKey: requested.encryptionPublicKey,
+  }];
+  const update = await createMembershipTransition(members, false);
+  const approvalProof = await deviceApprovalProof(
+    scannedRequest.authSecret,
+    scannedRequest.requestId,
+    identity.group.groupId,
+    update.transition.transitionHash,
+  );
+  await approveDeviceRequest(identity, scannedRequest.requestId, {
+    transition: update.transition,
+    packages: update.packages,
+    approvalProof,
   });
+  identity.group.keys[String(update.transition.timestamp)] = {
+    ...update.groupKey,
+    timestamp: update.transition.timestamp,
+    transitionHash: update.transition.transitionHash,
+  };
+  identity.group.headTransitionHash = update.transition.transitionHash;
+  await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
   history.replaceState(null, "", "/");
@@ -213,6 +283,7 @@ async function approveScannedRequest(requestId) {
 
 async function pollDeviceRequest() {
   if (pendingDeviceRequest === null) return;
+  const pending = pendingDeviceRequest;
   const requestId = pendingDeviceRequest.requestId;
   const signature = await signDevice(identity, deviceRequestReadTranscript(requestId, identity.deviceId));
   const state = await getDeviceRequest(identity, requestId, signature);
@@ -229,7 +300,18 @@ async function pollDeviceRequest() {
     messageElement.textContent = "グループへの追加が時間切れになったため、このデバイスは単独利用に戻りました。";
     return;
   }
-  identity.group = { groupId: state.groupId, keys: {} };
+  if (!await verifyDeviceApprovalProof(
+    pending.authSecret,
+    requestId,
+    state.groupId,
+    state.transitionHash,
+    state.approvalProof,
+  )) throw new Error("Device approval proof is invalid");
+  identity.group = {
+    groupId: state.groupId,
+    pendingTransitionHash: state.transitionHash,
+    keys: {},
+  };
   await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
@@ -280,55 +362,62 @@ async function syncGroup() {
   if (identity.group === null) throw new Error("Device group is unavailable");
   const state = await getGroupState(identity);
   validateGroupState(state);
+  const trustedHash = identity.group.headTransitionHash ?? identity.group.pendingTransitionHash;
+  if (trustedHash === undefined) throw new Error("Device group has no authenticated transition anchor");
+  const head = await validateGroupTransitions(state.groupId, state.keys, trustedHash);
+  if (!sameTransitionMembers(head.members, state.members)) throw new Error("Relay changed the active group member set");
   for (const keyPackage of state.packages) {
     const localKey = identity.group.keys[String(keyPackage.timestamp)];
     const keyRecord = state.keys.find((key) => key.timestamp === keyPackage.timestamp);
     if (keyRecord === undefined) throw new Error("Key package refers to an unknown group key");
+    await verifyKeyPackageDigest(keyPackage, keyRecord);
     if (localKey === undefined) {
-      identity.group.keys[String(keyPackage.timestamp)] = await openKeyPackage(identity, state.groupId, keyRecord, keyPackage);
-    } else if (localKey.publicKey !== keyRecord.publicKey) {
+      identity.group.keys[String(keyPackage.timestamp)] = {
+        ...await openKeyPackage(identity, state.groupId, keyRecord, keyPackage),
+        transitionHash: keyRecord.transitionHash,
+      };
+    } else if (localKey.publicKey !== keyRecord.publicKey || localKey.transitionHash !== keyRecord.transitionHash) {
       throw new Error("Stored group key conflicts with server metadata");
     }
   }
+  identity.group.rootTransitionHash ??= state.keys[0].transitionHash;
+  identity.group.headTransitionHash = head.transitionHash;
+  delete identity.group.pendingTransitionHash;
   groupState = state;
   await putIdentity(identity);
 }
 
 async function ensureExactGroupKey() {
   if (identity.group === null || groupState === undefined) throw new Error("Device group is not synchronized");
-  const active = groupState.members.map((member) => member.deviceId).sort();
-  if (latestGroupKeyMatchesMembers(groupState)) return;
-  const recreated = nextGroupKeyIsRecreated(groupState);
-  const groupKey = await createGroupKey();
-  const packages = [];
-  for (const member of groupState.members) packages.push(await createKeyPackage(groupState.groupId, groupKey, member));
+  const head = groupState.keys.at(-1);
+  if (head === undefined || !sameTransitionMembers(head.members, groupState.members)) {
+    throw new Error("Device group key does not match its authenticated members");
+  }
+  if (!transitionNeedsRecreation(groupState.keys)) return;
+  const update = await createMembershipTransition(groupState.members, true);
   try {
-    const registration = {
-      publicKey: groupKey.publicKey,
-      recreated,
-      members: active,
-      packages,
+    await registerGroupKey(identity, { transition: update.transition, packages: update.packages });
+    identity.group.keys[String(update.transition.timestamp)] = {
+      ...update.groupKey,
+      timestamp: update.transition.timestamp,
+      transitionHash: update.transition.transitionHash,
     };
-    const timestamp = await registerGroupKey(identity, {
-      ...registration,
-      actorSignature: await signDevice(
-        identity,
-        groupKeyRegisterTranscript(identity.group.groupId, identity.deviceId, registration),
-      ),
-    });
-    identity.group.keys[String(timestamp)] = { ...groupKey, timestamp };
+    identity.group.headTransitionHash = update.transition.transitionHash;
     await putIdentity(identity);
   } catch (error) {
-    if (!(error instanceof ApiError) || !["member_set_changed", "key_timestamp_conflict"].includes(error.code)) throw error;
+    if (!(error instanceof ApiError && (error.code === "group_transition_changed" || error.code === "key_timestamp_conflict"))) {
+      throw error;
+    }
   }
   await syncGroup();
 }
 
 async function currentLocalKey() {
-  const keyRecord = selectUsableGroupKey(groupState);
+  const keyRecord = groupState?.keys.at(-1) ?? null;
   if (keyRecord === null) throw new Error("No usable group key is registered");
   const key = identity.group.keys[String(keyRecord.timestamp)];
   if (key === undefined || key.publicKey !== keyRecord.publicKey) throw new Error("Current group private key is unavailable");
+  if (key.transitionHash !== keyRecord.transitionHash) throw new Error("Current group key transition is not authenticated");
   return key;
 }
 
@@ -345,8 +434,15 @@ async function joinFromFragment() {
   const groupKey = await currentLocalKey();
   const pairingId = parameters.get("p");
   const proof = await pairingProof(
-    parameters.get("a"), protocolVersion, sessionId, pairingId, identity.group.groupId, groupKey.timestamp, groupKey.publicKey,
+    parameters.get("a"), protocolVersion, sessionId, pairingId, identity.group.groupId,
+    groupKey.timestamp, groupKey.publicKey, groupKey.transitionHash,
   );
+  const creatorPublicKey = parameters.get("k");
+  const sessionDescriptor = protocolVersion === 4
+    ? await createSessionDescriptor(
+      identity, groupKey, sessionId, identity.group.groupId, creatorPublicKey,
+    )
+    : undefined;
   const expiresAt = await joinSession(sessionId, {
     pairingId,
     pairingToken: parameters.get("t"),
@@ -355,18 +451,20 @@ async function joinFromFragment() {
     deviceAccessToken: identity.accessToken,
     keyTimestamp: groupKey.timestamp,
     groupPublicKey: groupKey.publicKey,
+    transitionHash: groupKey.transitionHash,
     proof,
+    ...(sessionDescriptor === undefined ? {} : { sessionDescriptor }),
   });
-  await putSession(newSession(protocolVersion, sessionId, identity.group.groupId, parameters.get("k"), expiresAt, colorValue(`#${parameters.get("c")}`)));
+  await putSession(newSession(protocolVersion, sessionId, identity.group.groupId, creatorPublicKey, expiresAt, colorValue(`#${parameters.get("c")}`)));
   history.replaceState(null, "", "/");
   messageElement.textContent = "セッションへ参加しました。";
 }
 
 async function inheritSessions() {
-  for (const remote of groupState.sessions) {
-    if (await getSession(remote.sessionId) === undefined) {
-      await putSession(newSession(remote.protocolVersion, remote.sessionId, groupState.groupId, remote.creatorPublicKey, remote.expiresAt));
-    }
+  const localSessionIds = new Set((await listSessions()).map((session) => session.sessionId));
+  const candidates = groupState.sessions.filter((remote) => !localSessionIds.has(remote.sessionId));
+  for (const remote of await authenticatedInheritedSessions(candidates, groupState.groupId, groupState.keys)) {
+    await putSession(newSession(remote.protocolVersion, remote.sessionId, groupState.groupId, remote.creatorPublicKey, remote.expiresAt));
   }
 }
 
@@ -404,9 +502,13 @@ async function dismissRequest(sessionId) {
 async function sendRequestResponse(sessionId, type, optionId) {
   const session = await getSession(sessionId);
   if (session === undefined || session.request === null) throw new Error("Request disappeared before response");
-  const timestamp = session.requestKeyTimestamp;
-  const key = session.keys[String(timestamp)];
-  if (key === undefined) throw new Error("Response encryption key is unavailable");
+  const groupKey = await currentLocalKey();
+  const timestamp = groupKey.timestamp;
+  let key = session.keys[String(timestamp)];
+  if (key === undefined) {
+    key = await deriveSessionKey(groupKey, session.creatorPublicKey, session.sessionId, session.groupId, session.protocolVersion);
+    session.keys[String(timestamp)] = key;
+  }
   const responseId = randomId();
   const itemId = session.request.serverItemId;
   const response = type === "response"
@@ -628,12 +730,16 @@ function reconcileActiveItems(session, activeItemIds) {
 
 async function removeGroupDevice(deviceId) {
   if (!window.confirm("このデバイスをグループから除外しますか？")) return;
-  await removeDevice(identity, deviceId, {
-    actorSignature: await signDevice(
-      identity,
-      groupDeviceRemoveTranscript(identity.group.groupId, identity.deviceId, deviceId),
-    ),
-  });
+  const remaining = groupState.members.filter((member) => member.deviceId !== deviceId);
+  const update = await createMembershipTransition(remaining, true);
+  await removeDevice(identity, deviceId, { transition: update.transition, packages: update.packages });
+  identity.group.keys[String(update.transition.timestamp)] = {
+    ...update.groupKey,
+    timestamp: update.transition.timestamp,
+    transitionHash: update.transition.transitionHash,
+  };
+  identity.group.headTransitionHash = update.transition.transitionHash;
+  await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
   await renderGroup();
@@ -643,12 +749,9 @@ async function leaveCurrentGroup() {
   if (groupState === undefined || groupState.members.length <= 1) throw new Error("単独利用中のデバイスはグループから除外できません");
   if (!window.confirm("このデバイスをグループから除外しますか？このデバイスに表示されているセッションも削除されます。")) return;
   const groupId = identity.group.groupId;
-  await removeDevice(identity, identity.deviceId, {
-    actorSignature: await signDevice(
-      identity,
-      groupDeviceRemoveTranscript(identity.group.groupId, identity.deviceId, identity.deviceId),
-    ),
-  });
+  const remaining = groupState.members.filter((member) => member.deviceId !== identity.deviceId);
+  const update = await createSelfRemovalTransition(remaining);
+  await removeDevice(identity, identity.deviceId, { transition: update.transition, packages: update.packages });
   identity.group = null;
   await detachDeviceGroup(identity, groupId);
   groupState = undefined;
@@ -679,7 +782,7 @@ async function renderGroup() {
   const sharing = groupState.members.length > 1;
   deviceSummaryTitleElement.textContent = sharing ? `${groupState.members.length}台で通知を共有中` : "共有なし";
   groupStatusElement.textContent = sharing ? `${groupState.members.length}台で通知を共有しています。` : "現在はこのデバイスだけで通知を受け取ります。";
-  const current = selectUsableGroupKey(groupState);
+  const current = groupState.keys.at(-1) ?? null;
   groupKeyTimeElement.textContent = current === null ? "利用可能な鍵なし" : `鍵 ${new Date(current.timestamp).toLocaleString()}`;
   leaveButton.hidden = !sharing;
   groupDevicesElement.replaceChildren();
@@ -904,22 +1007,43 @@ function colorValue(value) {
 function parseDeviceRequestFragment() {
   if (location.pathname !== "/device" || location.hash.length <= 1) return null;
   const parameters = new URLSearchParams(location.hash.slice(1));
-  requireFragmentFields(parameters, ["v", "r"]);
-  if (parameters.get("v") !== "2") throw new Error("このグループ追加用リンクは使用できません");
-  return parameters.get("r");
+  requireFragmentFields(parameters, ["v", "r", "a", "h"]);
+  if (parameters.get("v") !== "3") throw new Error("このグループ追加用リンクは使用できません");
+  const requestId = parameters.get("r");
+  const authSecret = parameters.get("a");
+  const requestHash = parameters.get("h");
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(requestId)
+    || !/^[A-Za-z0-9_-]{43}$/.test(authSecret)
+    || !/^[a-f0-9]{64}$/.test(requestHash)) {
+    throw new Error("グループ追加用リンクが不正です");
+  }
+  return { requestId, authSecret, requestHash };
 }
 
 function validateGroupState(state) {
-  for (const member of state.members) requireExactKeys(member, ["deviceId", "encryptionPublicKey", "addedAt"]);
+  for (const member of state.members) {
+    requireExactKeys(member, ["deviceId", "signingPublicKey", "encryptionPublicKey", "addedAt"]);
+  }
   for (const key of state.keys) {
-    requireExactKeys(key, ["timestamp", "publicKey", "recreated", "members"]);
-    if (!Number.isSafeInteger(key.timestamp) || !Array.isArray(key.members) || typeof key.recreated !== "boolean") {
+    requireExactKeys(key, [
+      "transitionId", "previousHash", "transitionHash", "timestamp", "actorDeviceId", "publicKey",
+      "recreated", "members", "packageDigests", "actorSignature", "continuitySignature",
+    ]);
+    if (!Number.isSafeInteger(key.timestamp) || key.timestamp <= 0 || !Array.isArray(key.members)
+      || !Array.isArray(key.packageDigests) || typeof key.recreated !== "boolean") {
       throw new Error("Invalid group key metadata");
     }
+    for (const member of key.members) {
+      requireExactKeys(member, ["deviceId", "signingPublicKey", "encryptionPublicKey"]);
+    }
+    for (const digest of key.packageDigests) requireExactKeys(digest, ["deviceId", "sha256"]);
   }
   for (const item of state.packages) requireExactKeys(item, ["timestamp", "deviceId", "ephemeralPublicKey", "nonce", "ciphertext"]);
   for (const session of state.sessions) {
-    requireExactKeys(session, ["sessionId", "creatorPublicKey", "expiresAt", "protocolVersion"]);
+    requireExactKeys(session, [
+      "sessionId", "groupId", "creatorPublicKey", "expiresAt", "protocolVersion", "keyTimestamp", "transitionHash",
+      "actorDeviceId", "actorSignature", "continuitySignature",
+    ]);
     if (session.protocolVersion !== 3 && session.protocolVersion !== 4) throw new Error("Unsupported session protocol version");
   }
 }
@@ -945,6 +1069,61 @@ function requireExactKeys(value, keys) {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error("Object fields do not match the protocol");
+}
+
+async function createMembershipTransition(members, recreated) {
+  if (identity.group === null || groupState === undefined) throw new Error("Device group is not synchronized");
+  const previous = groupState.keys.at(-1);
+  if (previous === undefined || previous.transitionHash !== identity.group.headTransitionHash) {
+    throw new Error("Device group transition head is not synchronized");
+  }
+  const groupKey = await createGroupKey();
+  const packages = await Promise.all(members.map((member) => createKeyPackage(
+    identity.group.groupId, groupKey, member,
+  )));
+  const transition = await createGroupTransition(
+    identity.group.groupId, identity, groupKey, previous, members, packages, recreated,
+  );
+  return { groupKey, packages, transition };
+}
+
+async function createSelfRemovalTransition(members) {
+  if (identity.group === null || groupState === undefined) throw new Error("Device group is not synchronized");
+  const previous = groupState.keys.at(-1);
+  if (previous === undefined || previous.transitionHash !== identity.group.headTransitionHash) {
+    throw new Error("Device group transition head is not synchronized");
+  }
+  const groupKey = await currentLocalKey();
+  const packages = await Promise.all(members.map((member) => createKeyPackage(
+    identity.group.groupId, groupKey, member,
+  )));
+  const transition = await createGroupTransition(
+    identity.group.groupId, identity, groupKey, previous, members, packages, false,
+  );
+  return { groupKey, packages, transition };
+}
+
+function transitionNeedsRecreation(transitions) {
+  if (transitions.length < 2) return false;
+  const previous = transitions.at(-2);
+  const head = transitions.at(-1);
+  if (head.recreated) return false;
+  const current = new Set(head.members.map((member) => member.deviceId));
+  return previous.members.some((member) => !current.has(member.deviceId));
+}
+
+function sameTransitionMembers(left, right) {
+  const normalize = (members) => [...members]
+    .sort((a, b) => a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0)
+    .map((member) => `${member.deviceId}\n${member.signingPublicKey}\n${member.encryptionPublicKey}`);
+  const leftValues = normalize(left);
+  const rightValues = normalize(right);
+  return leftValues.length === rightValues.length
+    && leftValues.every((value, index) => value === rightValues[index]);
+}
+
+function groupAbandonTranscript(groupId, actorDeviceId, headTransitionHash) {
+  return ["notify.guru/group-abandon/v1", groupId, actorDeviceId, headTransitionHash].join("\n");
 }
 
 function stringValue(value, field) {

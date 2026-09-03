@@ -192,8 +192,7 @@ describe("devices and persistent groups", () => {
 
   it("stores version 4 attachment ciphertext in R2 and releases it after response acknowledgement", async () => {
     const device = await newDevice();
-    const group = await createGroup(device);
-    const key = await registerKey(group.id, device, [device], true);
+    const { group, key } = await createV4Group(device);
     const session = await createJoinedSession(group, device, key, 4);
     const attachmentId = randomId();
     const responseId = randomId();
@@ -268,19 +267,100 @@ describe("devices and persistent groups", () => {
     )).status).toBe(404);
   });
 
+  it("pauses v4 events after self-removal until a remaining device signs a fresh key", async () => {
+    const first = await newDevice();
+    const second = await newDevice();
+    const initial = await createV4Group(first);
+    const session = await createJoinedSession(initial.group, first, initial.key, 4);
+    const request = await createV4DeviceRequest(second);
+    const addition = await createSignedV4Transition(
+      initial.group.id, first, initial.transition, [first, second],
+      initial.continuityKey, false,
+    );
+    const approved = await api(
+      `/api/groups/${initial.group.id}/device-requests/${request.id}/approve?deviceId=${first.id}`,
+      {
+        method: "POST", token: first.token,
+        body: { transition: addition.transition, packages: addition.packages, approvalProof: randomToken() },
+      },
+    );
+    expect(approved.status).toBe(200);
+
+    const invalidMarker = await createSignedV4Transition(
+      initial.group.id, second, addition.transition, [first], addition.continuityKey, false,
+    );
+    const rejected = await api(`/api/groups/${initial.group.id}/devices/${second.id}?deviceId=${second.id}`, {
+      method: "DELETE", token: second.token,
+      body: { transition: invalidMarker.transition, packages: invalidMarker.packages },
+    });
+    expect(rejected.status).toBe(400);
+    expect(rejected.json.error).toBe("invalid_self_removal");
+
+    const marker = await createSignedV4Transition(
+      initial.group.id, second, addition.transition, [first],
+      addition.continuityKey, false, addition.continuityKey,
+    );
+    const removed = await api(`/api/groups/${initial.group.id}/devices/${second.id}?deviceId=${second.id}`, {
+      method: "DELETE", token: second.token,
+      body: { transition: marker.transition, packages: marker.packages },
+    });
+    expect(removed).toEqual({
+      status: 200,
+      json: { removed: true, transitionHash: marker.transition.transitionHash },
+    });
+    const paused = await postEvent(session, marker.transition.timestamp);
+    expect(paused.status).toBe(409);
+    expect(paused.json.error).toBe("group_key_unavailable");
+
+    const recovery = await createSignedV4Transition(
+      initial.group.id, first, marker.transition, [first], addition.continuityKey, true,
+    );
+    const recovered = await api(`/api/groups/${initial.group.id}/keys?deviceId=${first.id}`, {
+      method: "POST", token: first.token,
+      body: { transition: recovery.transition, packages: recovery.packages },
+    });
+    expect(recovered).toEqual({
+      status: 201,
+      json: { timestamp: recovery.transition.timestamp, transitionHash: recovery.transition.transitionHash },
+    });
+    expect((await postEvent(session, recovery.transition.timestamp)).status).toBe(201);
+    const responseAt = (keyTimestamp: number) => api(`/api/sessions/${session.id}/responses`, {
+      method: "POST", token: first.token,
+      body: {
+        responseId: randomId(), groupId: initial.group.id, deviceId: first.id, keyTimestamp,
+        nonce: "A".repeat(16), ciphertext: randomToken(),
+      },
+    });
+    const staleResponse = await responseAt(addition.transition.timestamp);
+    expect(staleResponse.status).toBe(403);
+    expect(staleResponse.json.error).toBe("key_not_available");
+    expect((await responseAt(recovery.transition.timestamp)).status).toBe(201);
+    expect((await api(`/api/groups/${initial.group.id}/state?deviceId=${second.id}&protocolVersion=4`, {
+      token: second.token,
+    })).status).toBe(403);
+  });
+
   it("does not leave a claim behind when a version 3 device is rejected from a version 4 session group", async () => {
     const first = await newDevice();
     const second = await newDevice();
-    const group = await createGroup(first);
-    const key = await registerKey(group.id, first, [first], true);
+    const { group, key } = await createV4Group(first);
     await createJoinedSession(group, first, key, 4);
     const request = await createDeviceRequest(second);
-    const transcript = [
-      "notify.guru/group-device-approve/v1", group.id, first.id, request.id,
-    ].join("\n");
+    const packageValue = keyPackage(second.id);
     const rejected = await api(
       `/api/groups/${group.id}/device-requests/${request.id}/approve?deviceId=${first.id}`,
-      { method: "POST", token: first.token, body: { actorSignature: await sign(first.signingKey, transcript) } },
+      {
+        method: "POST", token: first.token, body: {
+          transition: {
+            transitionId: randomId(), previousHash: key.transitionHash, transitionHash: "a".repeat(64),
+            timestamp: key.timestamp + 1, actorDeviceId: first.id, publicKey: key.publicKey, recreated: false,
+            members: [{ deviceId: second.id, signingPublicKey: "A".repeat(87), encryptionPublicKey: second.encryptionPublicKey }],
+            packageDigests: [{ deviceId: second.id, sha256: "b".repeat(64) }],
+            actorSignature: randomToken(), continuitySignature: randomToken(),
+          },
+          packages: [packageValue], approvalProof: randomToken(),
+        },
+      },
     );
     expect(rejected.status).toBe(409);
     expect(rejected.json.error).toBe("protocol_upgrade_required");
@@ -484,6 +564,30 @@ describe("devices and persistent groups", () => {
     expect(missingPackage.json.error).toBe("invalid_field");
   });
 
+  it("returns only sessions that a newly added device can authenticate", async () => {
+    const device = await newDevice();
+    const { group, key } = await createV4Group(device);
+    const legacy = await createJoinedSession(group, device, key, 3);
+    const current = await createJoinedSession(group, device, key, 4);
+
+    const legacyState = await api(`/api/groups/${group.id}/state?deviceId=${device.id}`, {
+      token: device.token,
+    });
+    expect(legacyState.status).toBe(200);
+    expect(legacyState.json.sessions.map((session: { sessionId: string }) => session.sessionId)).toEqual([
+      legacy.id,
+    ]);
+
+    const currentState = await api(
+      `/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`,
+      { token: device.token },
+    );
+    expect(currentState.status).toBe(200);
+    expect(currentState.json.sessions).toEqual([
+      expect.objectContaining({ sessionId: current.id, groupId: group.id, protocolVersion: 4 }),
+    ]);
+  });
+
   it("does not expose Durable Object RPC methods as HTTP routes", async () => {
     const device = await newDevice();
     const group = await createGroup(device);
@@ -498,6 +602,7 @@ interface Device {
   id: string;
   token: string;
   signingKey: CryptoKeyPair;
+  signingPublicKey: string;
   encryptionPublicKey: string;
 }
 
@@ -508,6 +613,8 @@ interface Group {
 interface RegisteredKey {
   timestamp: number;
   publicKey: string;
+  transitionHash?: string;
+  continuityKey?: CryptoKeyPair;
 }
 
 interface JoinedSession {
@@ -538,6 +645,7 @@ async function newDevice(): Promise<Device> {
     id: created.json.deviceId,
     token: randomToken(),
     signingKey,
+    signingPublicKey,
     encryptionPublicKey: await publicKey(encryptionKey),
   };
 }
@@ -572,6 +680,101 @@ async function createGroup(device: Device): Promise<Group> {
   });
   expect(created).toEqual({ status: 201, json: { created: true, groupId: id } });
   return { id };
+}
+
+async function createV4Group(device: Device) {
+  const id = randomId();
+  const accessHash = await hash(device.token);
+  const groupSigningKey = await generateSigningKey();
+  const groupPublicKey = await publicKey(groupSigningKey);
+  const packageValue = keyPackage(device.id);
+  const transition = {
+    transitionId: randomId(), previousHash: "0".repeat(64), timestamp: Date.now(),
+    actorDeviceId: device.id, publicKey: groupPublicKey, recreated: true,
+    members: [{
+      deviceId: device.id, signingPublicKey: device.signingPublicKey,
+      encryptionPublicKey: device.encryptionPublicKey,
+    }],
+    packageDigests: [{ deviceId: device.id, sha256: await keyPackageDigest(packageValue) }],
+  };
+  const transitionTranscript = groupTransitionTranscript(id, transition);
+  const actorSignature = await sign(device.signingKey, transitionTranscript);
+  const continuitySignature = await sign(groupSigningKey, transitionTranscript);
+  const transitionHash = await hash(["notify.guru/group-transition-hash/v2", transitionTranscript].join("\n"));
+  const signedTransition = { ...transition, actorSignature, continuitySignature, transitionHash };
+  const transcript = [
+    "notify.guru/group-create/v2", id, device.id, accessHash, device.encryptionPublicKey,
+  ].join("\n");
+  const created = await api("/api/groups", {
+    method: "POST",
+    body: {
+      groupId: id, deviceId: device.id, deviceAccessTokenHash: accessHash,
+      deviceEncryptionPublicKey: device.encryptionPublicKey,
+      deviceSignature: await sign(device.signingKey, transcript), protocolVersion: 4,
+      transition: signedTransition, packages: [packageValue],
+    },
+  });
+  expect(created).toEqual({ status: 201, json: { created: true, groupId: id } });
+  return {
+    group: { id },
+    key: { timestamp: transition.timestamp, publicKey: groupPublicKey, transitionHash, continuityKey: groupSigningKey },
+    transition: signedTransition,
+    continuityKey: groupSigningKey,
+  };
+}
+
+async function createV4DeviceRequest(device: Device): Promise<{ id: string }> {
+  const id = randomId();
+  const accessHash = await hash(device.token);
+  const transcript = [
+    "notify.guru/device-request/v2", id, device.id, accessHash,
+    device.encryptionPublicKey, "3,4",
+  ].join("\n");
+  const created = await api("/api/device-requests", {
+    method: "POST",
+    body: {
+      requestId: id, deviceId: device.id, deviceAccessTokenHash: accessHash,
+      deviceEncryptionPublicKey: device.encryptionPublicKey,
+      deviceSignature: await sign(device.signingKey, transcript), protocolVersion: 4,
+    },
+  });
+  expect(created.status).toBe(201);
+  expect(created.json.requestHash).toMatch(/^[a-f0-9]{64}$/);
+  return { id };
+}
+
+async function createSignedV4Transition(
+  groupId: string,
+  actor: Device,
+  previous: any,
+  members: Device[],
+  previousContinuityKey: CryptoKeyPair,
+  recreated: boolean,
+  nextContinuityKey?: CryptoKeyPair,
+) {
+  const continuityKey = nextContinuityKey ?? await generateSigningKey();
+  const packages = members.map((member) => keyPackage(member.id));
+  const transition = {
+    transitionId: randomId(), previousHash: previous.transitionHash,
+    timestamp: previous.timestamp + 1, actorDeviceId: actor.id,
+    publicKey: await publicKey(continuityKey), recreated,
+    members: members.map((member) => ({
+      deviceId: member.id, signingPublicKey: member.signingPublicKey,
+      encryptionPublicKey: member.encryptionPublicKey,
+    })),
+    packageDigests: await Promise.all(packages.map(async (item) => ({
+      deviceId: item.deviceId, sha256: await keyPackageDigest(item),
+    }))),
+  };
+  const transcript = groupTransitionTranscript(groupId, transition);
+  const actorSignature = await sign(actor.signingKey, transcript);
+  const continuitySignature = await sign(previousContinuityKey, transcript);
+  const transitionHash = await hash(["notify.guru/group-transition-hash/v2", transcript].join("\n"));
+  return {
+    transition: { ...transition, actorSignature, continuitySignature, transitionHash },
+    packages,
+    continuityKey,
+  };
 }
 
 async function createDeviceRequest(device: Device): Promise<{ id: string; expiresAt: number }> {
@@ -662,10 +865,15 @@ async function createJoinedSession(
     },
   })).status).toBe(201);
   if (protocolVersion === 4) {
+    expect(key.continuityKey).toBeDefined();
     expect((await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
       token: device.token,
     })).status).toBe(200);
   }
+  const descriptorTranscript = [
+    "notify.guru/session-descriptor/v1", sessionId, group.id, "4", key.publicKey,
+    String(key.timestamp), key.transitionHash, device.id,
+  ].join("\n");
   expect((await api(`/api/sessions/${sessionId}/join`, {
     method: "POST",
     body: {
@@ -676,6 +884,15 @@ async function createJoinedSession(
       deviceAccessToken: device.token,
       keyTimestamp: key.timestamp,
       groupPublicKey: key.publicKey,
+      ...(protocolVersion === 4 ? {
+        transitionHash: key.transitionHash,
+        sessionDescriptor: {
+          sessionId, groupId: group.id, protocolVersion: 4, creatorPublicKey: key.publicKey,
+          keyTimestamp: key.timestamp, transitionHash: key.transitionHash, actorDeviceId: device.id,
+          actorSignature: await sign(device.signingKey, descriptorTranscript),
+          continuitySignature: await sign(key.continuityKey!, descriptorTranscript),
+        },
+      } : {}),
       proof: randomToken(),
     },
   })).status).toBe(201);
@@ -795,6 +1012,35 @@ function keyPackage(deviceId: string) {
     nonce: "A".repeat(16),
     ciphertext: randomToken(),
   };
+}
+
+async function keyPackageDigest(value: ReturnType<typeof keyPackage>): Promise<string> {
+  return hash([
+    "notify.guru/group-key-package/v1", value.deviceId, value.ephemeralPublicKey,
+    value.nonce, value.ciphertext,
+  ].join("\n"));
+}
+
+function groupTransitionTranscript(
+  groupId: string,
+  transition: {
+    transitionId: string; previousHash: string; timestamp: number; actorDeviceId: string;
+    publicKey: string; recreated: boolean;
+    members: Array<{ deviceId: string; signingPublicKey: string; encryptionPublicKey: string }>;
+    packageDigests: Array<{ deviceId: string; sha256: string }>;
+  },
+): string {
+  const members = [...transition.members].sort((a, b) => a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0);
+  const digests = [...transition.packageDigests].sort((a, b) => a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0);
+  const lines = [
+    "notify.guru/group-transition/v1", groupId, transition.transitionId, transition.previousHash,
+    String(transition.timestamp), transition.actorDeviceId, transition.publicKey,
+    transition.recreated ? "1" : "0", String(members.length),
+  ];
+  for (const member of members) lines.push(member.deviceId, member.signingPublicKey, member.encryptionPublicKey);
+  lines.push(String(digests.length));
+  for (const digest of digests) lines.push(digest.deviceId, digest.sha256);
+  return lines.join("\n");
 }
 
 function groupKeyTranscript(

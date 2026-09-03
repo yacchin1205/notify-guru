@@ -119,27 +119,57 @@ func (a *API) addPairing(ctx context.Context, sessionID, managerToken string, pa
 }
 
 type currentGroupKey struct {
-	Timestamp int64    `json:"timestamp"`
-	PublicKey string   `json:"publicKey"`
-	Members   []string `json:"members"`
+	Timestamp      int64    `json:"timestamp"`
+	PublicKey      string   `json:"publicKey"`
+	Members        []string `json:"members"`
+	TransitionHash string   `json:"transitionHash,omitempty"`
+}
+
+type transitionMember struct {
+	DeviceID            string `json:"deviceId"`
+	SigningPublicKey    string `json:"signingPublicKey"`
+	EncryptionPublicKey string `json:"encryptionPublicKey"`
+}
+
+type transitionPackageDigest struct {
+	DeviceID string `json:"deviceId"`
+	SHA256   string `json:"sha256"`
+}
+
+type signedGroupTransition struct {
+	TransitionID        string                    `json:"transitionId"`
+	PreviousHash        string                    `json:"previousHash"`
+	TransitionHash      string                    `json:"transitionHash"`
+	Timestamp           int64                     `json:"timestamp"`
+	ActorDeviceID       string                    `json:"actorDeviceId"`
+	PublicKey           string                    `json:"publicKey"`
+	Recreated           bool                      `json:"recreated"`
+	Members             []transitionMember        `json:"members"`
+	PackageDigests      []transitionPackageDigest `json:"packageDigests"`
+	ActorSignature      string                    `json:"actorSignature"`
+	ContinuitySignature string                    `json:"continuitySignature"`
+}
+
+type joinedGroup struct {
+	Sequence              int64            `json:"sequence"`
+	GroupID               string           `json:"groupId"`
+	PairingID             string           `json:"pairingId"`
+	InitialKeyTimestamp   int64            `json:"initialKeyTimestamp"`
+	InitialPublicKey      string           `json:"initialPublicKey"`
+	InitialTransitionHash string           `json:"initialTransitionHash,omitempty"`
+	Proof                 string           `json:"proof"`
+	JoinedAt              int64            `json:"joinedAt"`
+	Key                   *currentGroupKey `json:"key"`
+	Keys                  []struct {
+		Timestamp int64  `json:"timestamp"`
+		PublicKey string `json:"publicKey"`
+	} `json:"keys,omitempty"`
+	Transitions []signedGroupTransition `json:"transitions,omitempty"`
 }
 
 type joinsResult struct {
-	Groups []struct {
-		Sequence            int64            `json:"sequence"`
-		GroupID             string           `json:"groupId"`
-		PairingID           string           `json:"pairingId"`
-		InitialKeyTimestamp int64            `json:"initialKeyTimestamp"`
-		InitialPublicKey    string           `json:"initialPublicKey"`
-		Proof               string           `json:"proof"`
-		JoinedAt            int64            `json:"joinedAt"`
-		Key                 *currentGroupKey `json:"key"`
-		Keys                []struct {
-			Timestamp int64  `json:"timestamp"`
-			PublicKey string `json:"publicKey"`
-		} `json:"keys,omitempty"`
-	} `json:"groups"`
-	ExpiresAt int64 `json:"expiresAt"`
+	Groups    []joinedGroup `json:"groups"`
+	ExpiresAt int64         `json:"expiresAt"`
 }
 
 func (a *API) joins(ctx context.Context, sessionID, managerToken string) (joinsResult, error) {

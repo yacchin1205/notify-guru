@@ -234,6 +234,21 @@ the mechanism. The accurate picture:
 - Keys are derived per device group by ECDH on P-256 plus HKDF-SHA256, bound to
   the session, group, and key generation. Private keys never leave the
   `notifyg` process or the device.
+- In protocol v4, device-group membership and shared keys form a signed
+  transition chain. Pairing authenticates its current transition hash;
+  clients retain that anchor and reject a chain with a changed signature,
+  member/package set, fork, missing trusted head, or rollback. Removing another
+  device includes a fresh key. A self-removing device can sign only an old-key
+  removal marker; events pause until a remaining device verifies the marker and
+  signs the fresh-key transition.
+- Version 4 session inheritance is also authenticated: the joining device signs
+  the session ID, group ID, creator ECDH public key, and transition anchor with
+  both its device identity and the current group continuity key. Other devices
+  reject an unsigned or altered descriptor. New responses use only the current
+  usable group-key epoch; historical epochs are not accepted for new sends.
+- Transition hashes cover the canonical transition transcript, while ECDSA
+  signatures are verified separately. Equivalent ECDSA signature encodings
+  therefore cannot create distinct transition heads.
 - The join payload travels in the **URL fragment**
   (`https://notify.guru/join#a=…&c=…&k=…&p=…&s=…&t=…&v=4`), which browsers do not
   send to a server. The auth secret never reaches the relay at all: it only keys
@@ -267,9 +282,11 @@ gets lost:
   closing the whole session.
 - The relay still observes metadata: timestamps, identifiers, ciphertext sizes,
   and which device is watching which session.
-- The system does not authenticate clients. It is open source, anyone can build
-  a client that speaks the API, and the server cannot tell one from another.
-  Security rests on key possession, not on client identity — which is why
+- The system does not authenticate client software or vendor identity. It is
+  open source, anyone can build a client that speaks the API, and the server
+  cannot distinguish those implementations. Device management operations are
+  authenticated by device identity keys, while access otherwise rests on key
+  possession — which is why
   becoming a key holder is what is gated: joining a session takes the one-shot
   pairing secret, and joining an existing device group takes an approval signed
   by a device already in that group.

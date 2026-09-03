@@ -4,16 +4,55 @@ struct GroupKey: Codable, Equatable {
     let timestamp: Int64
     let publicKey: String
     let privateKey: Data
+    var transitionHash: String? = nil
+
+    init(timestamp: Int64, publicKey: String, privateKey: Data, transitionHash: String? = nil) {
+        self.timestamp = timestamp; self.publicKey = publicKey; self.privateKey = privateKey
+        self.transitionHash = transitionHash
+    }
 }
 
 struct DeviceGroup: Codable, Equatable {
     let groupID: String
     var keys: [String: GroupKey]
+    var rootTransitionHash: String? = nil
+    var headTransitionHash: String? = nil
+    var pendingTransitionHash: String? = nil
+
+    init(
+        groupID: String, keys: [String: GroupKey], rootTransitionHash: String? = nil,
+        headTransitionHash: String? = nil, pendingTransitionHash: String? = nil
+    ) {
+        self.groupID = groupID; self.keys = keys; self.rootTransitionHash = rootTransitionHash
+        self.headTransitionHash = headTransitionHash; self.pendingTransitionHash = pendingTransitionHash
+    }
 }
 
 struct DeviceRequestRecord: Codable, Equatable {
     let requestID: String
     let expiresAt: Int64
+    let requestHash: String
+    let authSecret: String
+
+    init(requestID: String, expiresAt: Int64, requestHash: String = "", authSecret: String = "") {
+        self.requestID = requestID; self.expiresAt = expiresAt
+        self.requestHash = requestHash; self.authSecret = authSecret
+    }
+}
+
+struct DeviceRequestDescriptor: Codable, Equatable {
+    let requestID: String
+    let deviceID: String
+    let accessHash: String
+    let signingPublicKey: String
+    let encryptionPublicKey: String
+    let protocolVersion: Int
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "requestId"
+        case deviceID = "deviceId"
+        case accessHash, signingPublicKey, encryptionPublicKey, protocolVersion
+    }
 }
 
 struct DeviceIdentity: Codable, Equatable {
@@ -28,19 +67,80 @@ struct GroupDevice: Codable, Equatable, Identifiable {
     var id: String { deviceID }
     let deviceID: String
     let encryptionPublicKey: String
+    let signingPublicKey: String
     let addedAt: Int64
+
+    init(deviceID: String, encryptionPublicKey: String, signingPublicKey: String = "", addedAt: Int64) {
+        self.deviceID = deviceID; self.encryptionPublicKey = encryptionPublicKey
+        self.signingPublicKey = signingPublicKey; self.addedAt = addedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case deviceID = "deviceId"
-        case encryptionPublicKey, addedAt
+        case encryptionPublicKey, signingPublicKey, addedAt
+    }
+}
+
+struct TransitionMember: Codable, Equatable {
+    let deviceID: String
+    let signingPublicKey: String
+    let encryptionPublicKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "deviceId"
+        case signingPublicKey, encryptionPublicKey
+    }
+}
+
+struct TransitionPackageDigest: Codable, Equatable {
+    let deviceID: String
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "deviceId"
+        case sha256
     }
 }
 
 struct GroupKeyRecord: Codable, Equatable {
+    let transitionID: String
+    let previousHash: String
+    let transitionHash: String
     let timestamp: Int64
+    let actorDeviceID: String
     let publicKey: String
     let recreated: Bool
-    let members: [String]
+    let members: [TransitionMember]
+    let packageDigests: [TransitionPackageDigest]
+    let actorSignature: String
+    let continuitySignature: String
+
+    enum CodingKeys: String, CodingKey {
+        case transitionID = "transitionId"
+        case previousHash, transitionHash, timestamp
+        case actorDeviceID = "actorDeviceId"
+        case publicKey, recreated, members, packageDigests, actorSignature, continuitySignature
+    }
+
+    init(
+        transitionID: String, previousHash: String, transitionHash: String, timestamp: Int64,
+        actorDeviceID: String, publicKey: String, recreated: Bool, members: [TransitionMember],
+        packageDigests: [TransitionPackageDigest], actorSignature: String, continuitySignature: String
+    ) {
+        self.transitionID = transitionID; self.previousHash = previousHash; self.transitionHash = transitionHash
+        self.timestamp = timestamp; self.actorDeviceID = actorDeviceID; self.publicKey = publicKey
+        self.recreated = recreated; self.members = members; self.packageDigests = packageDigests
+        self.actorSignature = actorSignature; self.continuitySignature = continuitySignature
+    }
+
+    init(timestamp: Int64, publicKey: String, recreated: Bool, members: [String]) {
+        self.init(
+            transitionID: "test", previousHash: String(repeating: "0", count: 64), transitionHash: "",
+            timestamp: timestamp, actorDeviceID: members.first ?? "", publicKey: publicKey, recreated: recreated,
+            members: members.map { TransitionMember(deviceID: $0, signingPublicKey: "", encryptionPublicKey: "") },
+            packageDigests: [], actorSignature: "", continuitySignature: ""
+        )
+    }
 }
 
 struct KeyPackage: Codable, Equatable {
@@ -60,12 +160,38 @@ struct KeyPackage: Codable, Equatable {
 struct GroupSessionResult: Codable, Equatable {
     let protocolVersion: Int
     let sessionID: String
+    let groupID: String
     let creatorPublicKey: String
     let expiresAt: Int64
+    let keyTimestamp: Int64?
+    let transitionHash: String?
+    let actorDeviceID: String?
+    let actorSignature: String?
+    let continuitySignature: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "sessionId"
-        case protocolVersion, creatorPublicKey, expiresAt
+        case groupID = "groupId"
+        case protocolVersion, creatorPublicKey, expiresAt, keyTimestamp, transitionHash
+        case actorDeviceID = "actorDeviceId"
+        case actorSignature, continuitySignature
+    }
+}
+
+struct SignedSessionDescriptor: Codable, Equatable {
+    let sessionID: String
+    let groupID: String
+    let protocolVersion: Int
+    let creatorPublicKey: String
+    let keyTimestamp: Int64
+    let transitionHash: String
+    let actorDeviceID: String
+    let actorSignature: String
+    let continuitySignature: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"; case groupID = "groupId"; case protocolVersion, creatorPublicKey, keyTimestamp, transitionHash
+        case actorDeviceID = "actorDeviceId"; case actorSignature, continuitySignature
     }
 }
 
@@ -84,20 +210,21 @@ struct DeviceGroupStateResult: Codable, Equatable {
 
 enum GroupKeyPolicy {
     static func selectUsableKey(_ state: DeviceGroupStateResult) -> GroupKeyRecord? {
-        let active = Set(state.members.map(\.deviceID))
-        let cutoff = state.keys.last(where: \.recreated)?.timestamp ?? 0
-        return state.keys.reversed().first { $0.timestamp >= cutoff && $0.members.allSatisfy(active.contains) }
+        needsRecreation(state) ? nil : state.keys.last
     }
 
     static func latestKeyMatchesMembers(_ state: DeviceGroupStateResult) -> Bool {
         guard let latest = state.keys.last else { return false }
-        return latest.members.sorted() == state.members.map(\.deviceID).sorted()
+        return latest.members.map(\.deviceID).sorted() == state.members.map(\.deviceID).sorted()
     }
 
-    static func nextKeyIsRecreated(_ state: DeviceGroupStateResult) -> Bool {
-        guard let latest = state.keys.last else { return true }
-        let active = Set(state.members.map(\.deviceID))
-        return latest.members.contains { !active.contains($0) }
+    static func needsRecreation(_ state: DeviceGroupStateResult) -> Bool {
+        guard state.keys.count >= 2 else { return false }
+        let previous = state.keys[state.keys.count - 2]
+        let head = state.keys[state.keys.count - 1]
+        if head.recreated { return false }
+        let current = Set(head.members.map(\.deviceID))
+        return previous.members.contains { !current.contains($0.deviceID) }
     }
 }
 

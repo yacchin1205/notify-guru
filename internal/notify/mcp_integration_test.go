@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -568,7 +569,11 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		}
 	}
 
-	groupPrivateKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	groupContinuityKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupPrivateKey, err := groupContinuityKey.ECDH()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +607,7 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 	if err := api.do(ctx, http.MethodPost, "/api/devices", "", map[string]any{
 		"signingPublicKey": deviceSigningPublicKey,
 		"nonce":            registrationNonce,
-		"signature":        signRawP256(t, deviceSigningKey, deviceCreateTranscript),
+		"signature":        signIntegrationRawP256(t, deviceSigningKey, deviceCreateTranscript),
 	}, &registered); err != nil {
 		t.Fatalf("register device: %v", err)
 	}
@@ -621,40 +626,53 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		"nonce":              packageNonce,
 		"ciphertext":         packageCiphertext,
 	}
+	packageTranscript := fmt.Sprintf(
+		"notify.guru/group-key-package/v1\n%s\n%s\n%s\n%s",
+		deviceID, deviceEncryptionPublicKey, packageNonce, packageCiphertext,
+	)
+	packageDigest := sha256.Sum256([]byte(packageTranscript))
+	transitionID, err := randomValue(18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := signedGroupTransition{
+		TransitionID:  transitionID,
+		PreviousHash:  strings.Repeat("0", 64),
+		Timestamp:     time.Now().UnixMilli(),
+		ActorDeviceID: deviceID,
+		PublicKey:     publicKey,
+		Recreated:     true,
+		Members: []transitionMember{{
+			DeviceID: deviceID, SigningPublicKey: deviceSigningPublicKey,
+			EncryptionPublicKey: deviceEncryptionPublicKey,
+		}},
+		PackageDigests: []transitionPackageDigest{{
+			DeviceID: deviceID, SHA256: hex.EncodeToString(packageDigest[:]),
+		}},
+	}
+	transitionTranscript := groupTransitionTranscript(groupID, transition)
+	transition.ActorSignature = signIntegrationRawP256(t, deviceSigningKey, transitionTranscript)
+	transition.ContinuitySignature = signIntegrationRawP256(t, groupContinuityKey, transitionTranscript)
+	transition.TransitionHash = groupTransitionHash(groupID, transition)
 	createTranscript := fmt.Sprintf(
 		"notify.guru/group-create/v2\n%s\n%s\n%s\n%s",
 		groupID, deviceID, tokenHash(accessToken), deviceEncryptionPublicKey,
 	)
-	deviceSignature := signRawP256(t, deviceSigningKey, createTranscript)
+	deviceSignature := signIntegrationRawP256(t, deviceSigningKey, createTranscript)
 	if err := api.do(ctx, http.MethodPost, "/api/groups", "", map[string]any{
 		"groupId":                   groupID,
 		"deviceId":                  deviceID,
 		"deviceAccessTokenHash":     tokenHash(accessToken),
 		"deviceEncryptionPublicKey": deviceEncryptionPublicKey,
 		"deviceSignature":           deviceSignature,
+		"protocolVersion":           4,
+		"transition":                transition,
+		"packages":                  []any{keyPackage},
 	}, &struct {
 		Created bool   `json:"created"`
 		GroupID string `json:"groupId"`
 	}{}); err != nil {
 		t.Fatalf("create device group: %v", err)
-	}
-	var acceptedKey struct {
-		Timestamp int64 `json:"timestamp"`
-	}
-	keyPath := fmt.Sprintf("/api/groups/%s/keys?deviceId=%s", groupID, deviceID)
-	keyTranscript := fmt.Sprintf(
-		"notify.guru/group-key-register/v1\n%s\n%s\n%s\n1\n1\n%s\n1\n%s\n%s\n%s\n%s",
-		groupID, deviceID, publicKey, deviceID,
-		deviceID, deviceEncryptionPublicKey, packageNonce, packageCiphertext,
-	)
-	if err := api.do(ctx, http.MethodPost, keyPath, accessToken, map[string]any{
-		"publicKey":      publicKey,
-		"recreated":      true,
-		"members":        []string{deviceID},
-		"packages":       []any{keyPackage},
-		"actorSignature": signRawP256(t, deviceSigningKey, keyTranscript),
-	}, &acceptedKey); err != nil {
-		t.Fatalf("register group key: %v", err)
 	}
 	var state map[string]json.RawMessage
 	statePath := fmt.Sprintf("/api/groups/%s/state?deviceId=%s&protocolVersion=4", groupID, deviceID)
@@ -666,8 +684,19 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		t.Fatal(err)
 	}
 	mac := hmac.New(sha256.New, secret)
-	fmt.Fprintf(mac, "v4\n%s\n%s\n%s\n%d\n%s", sessionID, pairingID, groupID, acceptedKey.Timestamp, publicKey)
+	fmt.Fprintf(mac, "v4\n%s\n%s\n%s\n%d\n%s\n%s", sessionID, pairingID, groupID, transition.Timestamp, publicKey, transition.TransitionHash)
 	proof := encode(mac.Sum(nil))
+	descriptorTranscript := fmt.Sprintf(
+		"notify.guru/session-descriptor/v1\n%s\n%s\n4\n%s\n%d\n%s\n%s",
+		sessionID, groupID, creatorPublicKey, transition.Timestamp, transition.TransitionHash, deviceID,
+	)
+	sessionDescriptor := map[string]any{
+		"sessionId": sessionID, "groupId": groupID, "protocolVersion": 4,
+		"creatorPublicKey": creatorPublicKey, "keyTimestamp": transition.Timestamp,
+		"transitionHash": transition.TransitionHash, "actorDeviceId": deviceID,
+		"actorSignature":      signIntegrationRawP256(t, deviceSigningKey, descriptorTranscript),
+		"continuitySignature": signIntegrationRawP256(t, groupContinuityKey, descriptorTranscript),
+	}
 
 	var result struct {
 		Joined    bool  `json:"joined"`
@@ -679,27 +708,29 @@ func joinFromPairingURL(t *testing.T, ctx context.Context, api *API, rawURL stri
 		"groupId":           groupID,
 		"deviceId":          deviceID,
 		"deviceAccessToken": accessToken,
-		"keyTimestamp":      acceptedKey.Timestamp,
+		"keyTimestamp":      transition.Timestamp,
 		"groupPublicKey":    publicKey,
+		"transitionHash":    transition.TransitionHash,
 		"proof":             proof,
+		"sessionDescriptor": sessionDescriptor,
 	}, &result); err != nil {
 		t.Fatalf("join device group: %v", err)
 	}
 	if !result.Joined || result.ExpiresAt <= time.Now().UnixMilli() {
 		t.Fatalf("unexpected join result: %+v", result)
 	}
-	key, err := deriveGroupKey(groupPrivateKey, creatorPublicKey, 4, sessionID, groupID, acceptedKey.Timestamp)
+	key, err := deriveGroupKey(groupPrivateKey, creatorPublicKey, 4, sessionID, groupID, transition.Timestamp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return joinedDeviceGroup{
 		GroupID: groupID, DeviceID: deviceID, AccessToken: accessToken,
-		Timestamp: acceptedKey.Timestamp, Key: key, PrivateKey: groupPrivateKey,
+		Timestamp: transition.Timestamp, Key: key, PrivateKey: groupPrivateKey,
 		CreatorPublicKey: creatorPublicKey,
 	}
 }
 
-func signRawP256(t *testing.T, key *ecdsa.PrivateKey, transcript string) string {
+func signIntegrationRawP256(t *testing.T, key *ecdsa.PrivateKey, transcript string) string {
 	t.Helper()
 	digest := sha256.Sum256([]byte(transcript))
 	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])

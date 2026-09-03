@@ -15,12 +15,12 @@ struct KeychainVault {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw KeychainError.operation("read", status) }
         let envelope = try JSONDecoder().decode(VersionEnvelope.self, from: data)
-        guard envelope.version == 3 else { throw KeychainError.unsupportedVersion(envelope.version) }
+        guard envelope.version == 4 else { throw KeychainError.unsupportedVersion(envelope.version) }
         return try JSONDecoder().decode(Vault.self, from: data)
     }
 
     func save(_ vault: Vault) throws {
-        guard vault.version == 3 else { throw KeychainError.unsupportedVersion(vault.version) }
+        guard vault.version == 4 else { throw KeychainError.unsupportedVersion(vault.version) }
         let data = try JSONEncoder().encode(vault)
         let updateStatus = SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if updateStatus == errSecSuccess { return }

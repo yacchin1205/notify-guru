@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -234,6 +236,14 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 		return 0, err
 	}
 	for _, joined := range result.Groups {
+		if session.protocolVersion == 4 {
+			group, err := s.refreshV4Group(session, joined)
+			if err != nil {
+				return 0, err
+			}
+			session.groups[joined.GroupID] = group
+			continue
+		}
 		group, exists := session.groups[joined.GroupID]
 		if !exists {
 			pairing, known := session.pairings[joined.PairingID]
@@ -248,6 +258,7 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 				joined.GroupID,
 				joined.InitialKeyTimestamp,
 				joined.InitialPublicKey,
+				"",
 				joined.Proof,
 			); err != nil {
 				return 0, fmt.Errorf("authenticate device group %q: %w", joined.GroupID, err)
@@ -327,6 +338,91 @@ func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession
 		group.PublicKey = joined.Key.PublicKey
 	}
 	return len(session.groups), nil
+}
+
+func (s *Store) refreshV4Group(session *managedSession, joined joinedGroup) (*Group, error) {
+	if joined.InitialTransitionHash == "" {
+		return nil, fmt.Errorf("device group %q has no authenticated initial transition", joined.GroupID)
+	}
+	existing, exists := session.groups[joined.GroupID]
+	if !exists {
+		pairing, known := session.pairings[joined.PairingID]
+		if !known {
+			return nil, fmt.Errorf("join references unknown pairing %q", joined.PairingID)
+		}
+		if err := verifyPairingProof(
+			pairing.AuthSecret, 4, session.id, joined.PairingID, joined.GroupID,
+			joined.InitialKeyTimestamp, joined.InitialPublicKey, joined.InitialTransitionHash, joined.Proof,
+		); err != nil {
+			return nil, fmt.Errorf("authenticate device group %q: %w", joined.GroupID, err)
+		}
+	} else if existing.PairingID != joined.PairingID ||
+		existing.InitialTimestamp != joined.InitialKeyTimestamp ||
+		existing.InitialPublicKey != joined.InitialPublicKey ||
+		existing.InitialTransitionHash != joined.InitialTransitionHash {
+		return nil, fmt.Errorf("server changed authenticated initial state for device group %q", joined.GroupID)
+	}
+	trustedHash := joined.InitialTransitionHash
+	if exists {
+		trustedHash = existing.HeadTransitionHash
+	}
+	head, err := validateV4Transitions(
+		joined.GroupID, joined.Transitions, joined.InitialKeyTimestamp,
+		joined.InitialPublicKey, joined.InitialTransitionHash, trustedHash,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("validate device group %q transitions: %w", joined.GroupID, err)
+	}
+	keys := make(map[int64][]byte)
+	publicKeys := make(map[int64]string)
+	if exists {
+		for timestamp, key := range existing.Keys {
+			keys[timestamp] = key
+		}
+		for timestamp, key := range existing.PublicKeys {
+			publicKeys[timestamp] = key
+		}
+	}
+	for _, transition := range joined.Transitions {
+		if known, ok := publicKeys[transition.Timestamp]; ok && known != transition.PublicKey {
+			return nil, fmt.Errorf("server changed public key at timestamp %d for device group %q", transition.Timestamp, joined.GroupID)
+		}
+		if _, ok := keys[transition.Timestamp]; !ok {
+			key, err := deriveGroupKey(
+				session.privateKey, transition.PublicKey, 4, session.id, joined.GroupID, transition.Timestamp,
+			)
+			if err != nil {
+				return nil, err
+			}
+			keys[transition.Timestamp] = key
+		}
+		publicKeys[transition.Timestamp] = transition.PublicKey
+	}
+	group := &Group{
+		ID: joined.GroupID, PairingID: joined.PairingID,
+		InitialTimestamp: joined.InitialKeyTimestamp, InitialPublicKey: joined.InitialPublicKey,
+		InitialTransitionHash: joined.InitialTransitionHash, HeadTransitionHash: head.TransitionHash,
+		Keys: keys, PublicKeys: publicKeys,
+	}
+	if joined.Key == nil {
+		return group, nil
+	}
+	if joined.Key.Timestamp != head.Timestamp || joined.Key.PublicKey != head.PublicKey || joined.Key.TransitionHash != head.TransitionHash {
+		return nil, fmt.Errorf("current key does not match authenticated transition head for device group %q", joined.GroupID)
+	}
+	memberIDs := make([]string, 0, len(head.Members))
+	for _, member := range head.Members {
+		memberIDs = append(memberIDs, member.DeviceID)
+	}
+	sort.Strings(memberIDs)
+	currentMembers := append([]string(nil), joined.Key.Members...)
+	sort.Strings(currentMembers)
+	if !slices.Equal(memberIDs, currentMembers) {
+		return nil, fmt.Errorf("current members do not match authenticated transition head for device group %q", joined.GroupID)
+	}
+	group.Timestamp = head.Timestamp
+	group.PublicKey = head.PublicKey
+	return group, nil
 }
 
 func (s *Store) SendNotify(ctx context.Context, sessionID, message string) (string, error) {
@@ -435,6 +531,13 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		group, exists := session.groups[envelope.GroupID]
 		if !exists {
 			return nil, fmt.Errorf("response references unknown device group %q", envelope.GroupID)
+		}
+		if session.protocolVersion == 4 && (group.Timestamp == 0 || envelope.KeyTimestamp != group.Timestamp) {
+			// A response accepted just before rotation can still be queued when the
+			// new head is observed. It is no longer safe to decrypt, but must not
+			// pin the cursor and block later current-epoch responses forever.
+			session.responseCursor = envelope.Sequence
+			continue
 		}
 		key, exists := group.Keys[envelope.KeyTimestamp]
 		if !exists {

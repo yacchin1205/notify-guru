@@ -18,7 +18,7 @@ import {
   stringField,
 } from "./http";
 import { APNsClient, APNsTransportError, type APNsAlertKind, type APNsEnvironment } from "./apns";
-import { randomIdentifier } from "./protocol";
+import { randomIdentifier, type SignedSessionDescriptor } from "./protocol";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
@@ -69,6 +69,7 @@ interface GroupRow extends Record<string, SqlStorageValue> {
   pairing_id: string;
   initial_key_timestamp: number;
   initial_public_key: string;
+  initial_transition_hash: string | null;
   join_proof: string;
   joined_at: number;
 }
@@ -321,7 +322,7 @@ export class Session extends DurableObject<SessionEnv> {
       "keyTimestamp",
       "groupPublicKey",
       "proof",
-    ]);
+    ], ["transitionHash", "sessionDescriptor"]);
     const pairingId = stringField(body, "pairingId", IDENTIFIER, 64);
     const pairingToken = stringField(body, "pairingToken", BASE64URL, 128);
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
@@ -330,6 +331,10 @@ export class Session extends DurableObject<SessionEnv> {
     const keyTimestamp = integerField(body, "keyTimestamp");
     const groupPublicKey = stringField(body, "groupPublicKey", BASE64URL, 128);
     const proof = stringField(body, "proof", BASE64URL, 128);
+    const transitionHash = meta.protocol_version === 4
+      ? stringField(body, "transitionHash", SHA256_HEX, 64)
+      : null;
+    const descriptor = meta.protocol_version === 4 ? sessionDescriptor(body.sessionDescriptor) : null;
     const pairing = this.unusedPairing(pairingId);
     if (!equalHex(pairing.token_hash, await sha256Hex(pairingToken))) {
       throw new HttpError(401, "invalid_pairing_token", "Pairing token is invalid");
@@ -339,21 +344,29 @@ export class Session extends DurableObject<SessionEnv> {
       throw new HttpError(409, "protocol_upgrade_required", "Every device in the group must support this session protocol");
     }
     const current = await this.groupCurrent(groupId);
-    if (current.key === null || current.key.timestamp !== keyTimestamp || current.key.publicKey !== groupPublicKey) {
+    if (current.key === null || current.key.timestamp !== keyTimestamp || current.key.publicKey !== groupPublicKey
+      || meta.protocol_version === 4 && current.key.transitionHash !== transitionHash) {
       throw new HttpError(409, "group_key_changed", "Device group key has changed");
     }
-    await this.putGroupSession(groupId, meta, meta.expires_at);
+    if (descriptor !== null && (descriptor.sessionId !== meta.session_id || descriptor.groupId !== groupId
+      || descriptor.creatorPublicKey !== meta.creator_public_key || descriptor.protocolVersion !== 4
+      || descriptor.keyTimestamp !== keyTimestamp || descriptor.transitionHash !== transitionHash
+      || descriptor.actorDeviceId !== deviceId)) {
+      throw new HttpError(400, "invalid_session_descriptor", "Session descriptor does not match the authenticated join");
+    }
+    await this.putGroupSession(groupId, meta, meta.expires_at, descriptor);
     const now = Date.now();
     this.state.storage.transactionSync(() => {
       this.state.storage.sql.exec("UPDATE pairings SET consumed_at = ? WHERE id = ?", now, pairingId);
       this.state.storage.sql.exec(
         `INSERT INTO session_groups_v3
-           (id, pairing_id, initial_key_timestamp, initial_public_key, join_proof, joined_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         groupId,
         pairingId,
         keyTimestamp,
         groupPublicKey,
+        transitionHash,
         proof,
         now,
       );
@@ -363,13 +376,13 @@ export class Session extends DurableObject<SessionEnv> {
 
   private async joins(meta: MetaRow): Promise<Response> {
     const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
-      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, join_proof, joined_at
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at
        FROM session_groups_v3 ORDER BY sequence`,
     ));
     const groups = await Promise.all(rows.map(async (row) => {
       const current = await this.groupCurrent(row.id);
-      const keys = meta.protocol_version === 4
-        ? (await this.groupStub(row.id).getKeyHistory()).filter((key) => key.timestamp >= row.initial_key_timestamp)
+      const transitions = meta.protocol_version === 4
+        ? (await this.groupStub(row.id).getTransitionHistory()).filter((transition) => transition.timestamp >= row.initial_key_timestamp)
         : undefined;
       return {
         sequence: row.sequence,
@@ -377,10 +390,11 @@ export class Session extends DurableObject<SessionEnv> {
         pairingId: row.pairing_id,
         initialKeyTimestamp: row.initial_key_timestamp,
         initialPublicKey: row.initial_public_key,
+        ...(row.initial_transition_hash === null ? {} : { initialTransitionHash: row.initial_transition_hash }),
         proof: row.join_proof,
         joinedAt: row.joined_at,
         key: current.key,
-        ...(keys === undefined ? {} : { keys }),
+        ...(transitions === undefined ? {} : { transitions }),
       };
     }));
     return json({ groups, expiresAt: meta.expires_at });
@@ -428,7 +442,7 @@ export class Session extends DurableObject<SessionEnv> {
         return json({ expiresAt: meta.expires_at }, 201);
       }
     }
-    const recipients = await this.groupKeyRecipients(groupId, keyTimestamp);
+    const recipients = await this.groupKeyRecipients(groupId, keyTimestamp, meta.protocol_version);
     const now = Date.now();
     const expiresAt = now + SESSION_LIFETIME_MS;
     await this.putGroupSession(groupId, meta, expiresAt);
@@ -867,7 +881,7 @@ export class Session extends DurableObject<SessionEnv> {
 
   private requireGroup(groupId: string): GroupRow {
     const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
-      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, join_proof, joined_at
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at
        FROM session_groups_v3 WHERE id = ?`,
       groupId,
     ));
@@ -898,8 +912,8 @@ export class Session extends DurableObject<SessionEnv> {
     return result;
   }
 
-  private async groupKeyRecipients(groupId: string, timestamp: number): Promise<string[]> {
-    const result = await this.groupStub(groupId).getKeyRecipients(timestamp);
+  private async groupKeyRecipients(groupId: string, timestamp: number, protocolVersion = 3): Promise<string[]> {
+    const result = await this.groupStub(groupId).getKeyRecipients(timestamp, protocolVersion);
     if (result.status === "unavailable") {
       throw new HttpError(409, "group_key_unavailable", "Group key is not valid for new events");
     }
@@ -907,7 +921,8 @@ export class Session extends DurableObject<SessionEnv> {
   }
 
   private async groupKeyDevice(groupId: string, timestamp: number, deviceId: string): Promise<void> {
-    const result = await this.groupStub(groupId).authorizeKeyForDevice(timestamp, deviceId);
+    const meta = this.metaRow();
+    const result = await this.groupStub(groupId).authorizeKeyForDevice(timestamp, deviceId, meta.protocol_version);
     if (result === "device_removed") {
       throw new HttpError(403, "device_removed", "Device is not an active member of the group");
     }
@@ -916,8 +931,12 @@ export class Session extends DurableObject<SessionEnv> {
     }
   }
 
-  private async putGroupSession(groupId: string, meta: MetaRow, expiresAt: number): Promise<void> {
-    await this.groupStub(groupId).storeSession(meta.session_id, meta.creator_public_key, expiresAt, meta.protocol_version);
+  private async putGroupSession(
+    groupId: string, meta: MetaRow, expiresAt: number, descriptor: SignedSessionDescriptor | null = null,
+  ): Promise<void> {
+    await this.groupStub(groupId).storeSession(
+      meta.session_id, meta.creator_public_key, expiresAt, meta.protocol_version, descriptor,
+    );
   }
 
   private async removeGroupSession(groupId: string, sessionId: string): Promise<void> {
@@ -1052,6 +1071,7 @@ export class Session extends DurableObject<SessionEnv> {
         pairing_id TEXT NOT NULL UNIQUE REFERENCES pairings(id),
         initial_key_timestamp INTEGER NOT NULL,
         initial_public_key TEXT NOT NULL,
+        initial_transition_hash TEXT,
         join_proof TEXT NOT NULL,
         joined_at INTEGER NOT NULL
       );
@@ -1116,6 +1136,10 @@ export class Session extends DurableObject<SessionEnv> {
         created_at INTEGER NOT NULL
       );
     `);
+    const groupColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_groups_v3)"));
+    if (!groupColumns.some((column) => column.name === "initial_transition_hash")) {
+      this.state.storage.sql.exec("ALTER TABLE session_groups_v3 ADD COLUMN initial_transition_hash TEXT");
+    }
     const eventColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_events_v3)"));
     if (!eventColumns.some((column) => column.name === "item_id")) {
       this.state.storage.sql.exec("ALTER TABLE session_events_v3 ADD COLUMN item_id TEXT");
@@ -1193,6 +1217,30 @@ function pairingObject(value: unknown): { id: string; tokenHash: string } {
   return {
     id: stringField(pairing, "id", IDENTIFIER, 64),
     tokenHash: stringField(pairing, "tokenHash", SHA256_HEX, 64),
+  };
+}
+
+function sessionDescriptor(value: unknown): SignedSessionDescriptor {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "invalid_session_descriptor", "Version 4 join requires a signed session descriptor");
+  }
+  const object = value as Record<string, unknown>;
+  expectKeys(object, [
+    "sessionId", "groupId", "protocolVersion", "creatorPublicKey", "keyTimestamp", "transitionHash",
+    "actorDeviceId", "actorSignature", "continuitySignature",
+  ]);
+  const protocolVersion = integerField(object, "protocolVersion");
+  if (protocolVersion !== 4) throw new HttpError(400, "invalid_session_descriptor", "Invalid session descriptor protocol");
+  return {
+    sessionId: stringField(object, "sessionId", IDENTIFIER, 64),
+    groupId: stringField(object, "groupId", IDENTIFIER, 64),
+    protocolVersion,
+    creatorPublicKey: stringField(object, "creatorPublicKey", BASE64URL, 128),
+    keyTimestamp: integerField(object, "keyTimestamp"),
+    transitionHash: stringField(object, "transitionHash", SHA256_HEX, 64),
+    actorDeviceId: stringField(object, "actorDeviceId", IDENTIFIER, 64),
+    actorSignature: stringField(object, "actorSignature", BASE64URL, 128),
+    continuitySignature: stringField(object, "continuitySignature", BASE64URL, 128),
   };
 }
 

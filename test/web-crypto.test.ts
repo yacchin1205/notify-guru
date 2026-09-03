@@ -1,14 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  authenticatedInheritedSessions,
+  authenticateInheritedSession,
   createDeviceIdentity,
   createGroupKey,
+  createGroupTransition,
+  createSessionDescriptor,
   createKeyPackage,
+  deviceApprovalProof,
+  deviceRequestBindingHash,
   deviceCreateTranscript,
   encryptAttachment,
   groupKeyRegisterTranscript,
   groupCreateTranscript,
+  groupTransitionHash,
   openKeyPackage,
   signDevice,
+  validateGroupTransitions,
+  verifyDeviceApprovalProof,
+  verifySessionDescriptor,
 } from "../web/crypto.js";
 import { verifyP256Signature } from "../src/protocol";
 
@@ -50,6 +60,145 @@ describe("web device-group cryptography", () => {
 
     const createGroup = groupCreateTranscript("group_identifier_1234", device, "a".repeat(64));
     expect(await verifyP256Signature(device.signingPublicKey, await signDevice(device, createGroup), createGroup)).toBe(true);
+  });
+
+  it("rejects relay-injected keys, modified membership, and transition rollback", async () => {
+    const device = await registeredIdentity("device_identifier_1234");
+    const member = {
+      deviceId: device.deviceId,
+      signingPublicKey: device.signingPublicKey,
+      encryptionPublicKey: device.encryptionPublicKey,
+    };
+    const firstKey = await createGroupKey();
+    const firstPackages = [await createKeyPackage("group_identifier_1234", firstKey, member)];
+    const first = await createGroupTransition(
+      "group_identifier_1234", device, firstKey, null, [member], firstPackages, true,
+    );
+    device.group = {
+      groupId: "group_identifier_1234",
+      headTransitionHash: first.transitionHash,
+      keys: { [String(first.timestamp)]: { ...firstKey, timestamp: first.timestamp, transitionHash: first.transitionHash } },
+    };
+    const secondKey = await createGroupKey();
+    const secondPackages = [await createKeyPackage("group_identifier_1234", secondKey, member)];
+    const second = await createGroupTransition(
+      "group_identifier_1234", device, secondKey, first, [member], secondPackages, false,
+    );
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [first, second], first.transitionHash,
+    )).resolves.toEqual(second);
+
+    const injected = { ...second, continuitySignature: await signDevice(device, "relay forgery") };
+    injected.transitionHash = await groupTransitionHash(
+      "group_identifier_1234", injected, injected.actorSignature, injected.continuitySignature,
+    );
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [first, injected], first.transitionHash,
+    )).rejects.toThrow("continuity signature");
+
+    const changed = { ...second, members: [{ ...member, encryptionPublicKey: (await createGroupKey()).publicKey }] };
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [first, changed], first.transitionHash,
+    )).rejects.toThrow("hash");
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [first], second.transitionHash,
+    )).rejects.toThrow("trusted group transition is missing");
+  });
+
+  it("rejects a recreated self-removal and keeps signature malleation on the same transition hash", async () => {
+    const leaving = await registeredIdentity("leaving_device_identifier");
+    const remaining = await registeredIdentity("remaining_device_identifier");
+    const members = [leaving, remaining].map((device) => ({
+      deviceId: device.deviceId, signingPublicKey: device.signingPublicKey,
+      encryptionPublicKey: device.encryptionPublicKey,
+    }));
+    const firstKey = await createGroupKey();
+    const firstPackages = await Promise.all(members.map((member) =>
+      createKeyPackage("group_identifier_1234", firstKey, member)));
+    const first = await createGroupTransition(
+      "group_identifier_1234", leaving, firstKey, null, members, firstPackages, true,
+    );
+    leaving.group = {
+      groupId: "group_identifier_1234", headTransitionHash: first.transitionHash,
+      keys: { [String(first.timestamp)]: { ...firstKey, timestamp: first.timestamp, transitionHash: first.transitionHash } },
+    };
+    const attackerKnownKey = await createGroupKey();
+    const remainingMember = members[1];
+    const forged = await createGroupTransition(
+      "group_identifier_1234", leaving, attackerKnownKey, first, [remainingMember],
+      [await createKeyPackage("group_identifier_1234", attackerKnownKey, remainingMember)], true,
+    );
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [first, forged], first.transitionHash,
+    )).rejects.toThrow("self-removal");
+
+    const malleated = { ...first, actorSignature: malleateP256Signature(first.actorSignature) };
+    expect(await groupTransitionHash(
+      "group_identifier_1234", malleated, malleated.actorSignature, malleated.continuitySignature,
+    )).toBe(first.transitionHash);
+    await expect(validateGroupTransitions(
+      "group_identifier_1234", [malleated], first.transitionHash,
+    )).resolves.toEqual(malleated);
+  });
+
+  it("authenticates inherited session descriptors with device and group continuity keys", async () => {
+    const identity = await registeredIdentity("device_identifier_1234");
+    const member = {
+      deviceId: identity.deviceId, signingPublicKey: identity.signingPublicKey,
+      encryptionPublicKey: identity.encryptionPublicKey,
+    };
+    const key = await createGroupKey();
+    const transition = await createGroupTransition(
+      "group_identifier_1234", identity, key, null, [member],
+      [await createKeyPackage("group_identifier_1234", key, member)], true,
+    );
+    const localKey = { ...key, timestamp: transition.timestamp, transitionHash: transition.transitionHash };
+    const descriptor = await createSessionDescriptor(
+      identity, localKey, "session_identifier_1234", "group_identifier_1234", key.publicKey,
+    );
+    expect(await verifySessionDescriptor(descriptor, "group_identifier_1234", [transition])).toBe(true);
+    await expect(authenticateInheritedSession(
+      descriptor, "group_identifier_1234", [transition],
+    )).resolves.toBeUndefined();
+    await expect(authenticateInheritedSession(
+      { ...descriptor, creatorPublicKey: (await createGroupKey()).publicKey },
+      "group_identifier_1234", [transition],
+    )).rejects.toThrow("unauthenticated session descriptor");
+    await expect(authenticateInheritedSession(
+      { ...descriptor, protocolVersion: 3 },
+      "group_identifier_1234", [transition],
+    )).rejects.toThrow("unauthenticated session descriptor");
+    const legacy = {
+      ...descriptor, sessionId: "legacy_session_identifier", protocolVersion: 3,
+      keyTimestamp: null, transitionHash: null, actorDeviceId: null,
+      actorSignature: null, continuitySignature: null,
+    };
+    await expect(authenticatedInheritedSessions(
+      [legacy, descriptor], "group_identifier_1234", [transition],
+    )).resolves.toEqual([descriptor]);
+    await expect(authenticatedInheritedSessions(
+      [legacy, { ...descriptor, creatorPublicKey: (await createGroupKey()).publicKey }],
+      "group_identifier_1234", [transition],
+    )).rejects.toThrow("unauthenticated session descriptor");
+  });
+
+  it("binds device approval to the complete request and accepted transition", async () => {
+    const device = await registeredIdentity("device_identifier_1234");
+    const request = {
+      requestId: "request_identifier_1234", deviceId: device.deviceId,
+      signingPublicKey: device.signingPublicKey, accessHash: "a".repeat(64),
+      encryptionPublicKey: device.encryptionPublicKey, protocolVersion: 4,
+    };
+    const binding = await deviceRequestBindingHash(request);
+    expect(binding).toMatch(/^[a-f0-9]{64}$/);
+    const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const proof = await deviceApprovalProof(secret, request.requestId, "group", "b".repeat(64));
+    await expect(verifyDeviceApprovalProof(
+      secret, request.requestId, "group", "b".repeat(64), proof,
+    )).resolves.toBe(true);
+    await expect(verifyDeviceApprovalProof(
+      secret, request.requestId, "group", "c".repeat(64), proof,
+    )).resolves.toBe(false);
   });
 
   it("canonicalizes every group key package into the management signature", () => {
@@ -119,4 +268,13 @@ function base64url(value: Uint8Array): string {
 function fromBase64url(value: string): Uint8Array {
   const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
   return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+}
+
+function malleateP256Signature(signature: string): string {
+  const bytes = fromBase64url(signature);
+  const order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+  const s = BigInt(`0x${Array.from(bytes.slice(32), (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
+  const replacement = (order - s).toString(16).padStart(64, "0");
+  for (let index = 0; index < 32; index += 1) bytes[32 + index] = Number.parseInt(replacement.slice(index * 2, index * 2 + 2), 16);
+  return base64url(bytes);
 }

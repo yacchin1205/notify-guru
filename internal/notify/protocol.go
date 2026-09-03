@@ -12,14 +12,16 @@ type Pairing struct {
 }
 
 type Group struct {
-	ID               string
-	PairingID        string
-	InitialTimestamp int64
-	InitialPublicKey string
-	Timestamp        int64
-	PublicKey        string
-	Keys             map[int64][]byte
-	PublicKeys       map[int64]string
+	ID                    string
+	PairingID             string
+	InitialTimestamp      int64
+	InitialPublicKey      string
+	InitialTransitionHash string
+	HeadTransitionHash    string
+	Timestamp             int64
+	PublicKey             string
+	Keys                  map[int64][]byte
+	PublicKeys            map[int64]string
 }
 
 type Choice struct {

@@ -50,15 +50,20 @@ private struct MacMenuBarLabel: View {
 
     var body: some View {
         let unresolvedCount = model.sessions.unresolvedCount
+        let hasSyncError = model.connectionState == .failed
         HStack(spacing: 3) {
-            Image(systemName: unresolvedCount == 0 ? "bell" : "bell.badge.fill")
+            Image(systemName: hasSyncError ? "exclamationmark.triangle.fill" : unresolvedCount == 0 ? "bell" : "bell.badge.fill")
+                .id(hasSyncError ? "sync-error-icon" : "notification-icon")
             if unresolvedCount > 0 {
                 Text("\(unresolvedCount)")
                     .monospacedDigit()
             }
         }
+            .id(hasSyncError ? "sync-error-label" : "notification-label-\(unresolvedCount)")
             .accessibilityLabel(
-                unresolvedCount == 0
+                hasSyncError
+                    ? "notify.guru, sync error"
+                    : unresolvedCount == 0
                     ? "notify.guru, no unresolved items"
                     : "notify.guru, \(unresolvedCount) unresolved \(unresolvedCount == 1 ? "item" : "items")"
             )

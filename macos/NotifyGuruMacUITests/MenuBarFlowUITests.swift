@@ -7,6 +7,31 @@ final class MenuBarFlowUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testRecoverableStartupFailureShowsWarningAndCanReset() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-recoverable-startup-error"]
+        app.launch()
+
+        let warningItem = app.menuBars.statusItems["notify.guru, sync error"]
+        XCTAssertTrue(warningItem.waitForExistence(timeout: 5))
+        attachScreenshot(named: "40-sync-error-menu-bar-warning", app: app)
+        warningItem.click()
+
+        XCTAssertTrue(app.staticTexts["Unable to start"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The saved notify.guru data on this device can no longer be opened."].exists)
+        let erase = app.buttons["Erase Saved Data"]
+        XCTAssertTrue(erase.isHittable)
+        XCTAssertFalse(app.buttons["Add Session"].isEnabled)
+        XCTAssertFalse(app.buttons["Device Group"].isEnabled)
+        attachScreenshot(named: "41-recoverable-startup-error", app: app)
+
+        erase.click()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "42-recovered-after-erasing-data", app: app)
+        XCTAssertTrue(app.menuBars.statusItems["notify.guru, 3 unresolved items"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Unable to start"].exists)
+    }
+
     func testNotificationHistoryAndRequestDismissalFromMenuBar() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-session-history"]

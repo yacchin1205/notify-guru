@@ -10,7 +10,7 @@ import {
   readObject,
   stringField,
 } from "./http";
-import { randomIdentifier, verifyP256Signature } from "./protocol";
+import { deviceRequestBindingHash, randomIdentifier, verifyP256Signature } from "./protocol";
 
 const DEVICE_REQUEST_LIFETIME_MS = 10 * 60 * 1000;
 const PUBLIC_KEY = BASE64URL;
@@ -38,6 +38,8 @@ interface DeviceRequestRow extends Record<string, SqlStorageValue> {
   claimed_group_id: string | null;
   approved_group_id: string | null;
   protocol_version: number;
+  approval_transition_hash: string | null;
+  approval_proof: string | null;
 }
 
 export type DeviceRequestClaim =
@@ -49,6 +51,7 @@ export interface ClaimedDeviceRequest {
   deviceId: string;
   deviceAccessTokenHash: string;
   deviceEncryptionPublicKey: string;
+  deviceSigningPublicKey: string;
   protocolVersion: number;
 }
 
@@ -84,6 +87,8 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
         approved_group_id TEXT,
         created_at INTEGER NOT NULL,
         approved_at INTEGER,
+        approval_transition_hash TEXT,
+        approval_proof TEXT,
         protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
       );
       CREATE TABLE IF NOT EXISTS device_active_items_v1 (
@@ -102,6 +107,12 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
     const requestColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(device_requests)"));
     if (!requestColumns.some((column) => column.name === "protocol_version")) {
       this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
+    }
+    if (!requestColumns.some((column) => column.name === "approval_transition_hash")) {
+      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN approval_transition_hash TEXT");
+    }
+    if (!requestColumns.some((column) => column.name === "approval_proof")) {
+      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN approval_proof TEXT");
     }
   }
 
@@ -158,18 +169,41 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       deviceId: row.device_id,
       deviceAccessTokenHash: row.access_hash,
       deviceEncryptionPublicKey: row.encryption_public_key,
+      deviceSigningPublicKey: this.requiredDevice(row.device_id).signing_public_key,
       protocolVersion: row.protocol_version,
     };
   }
 
-  completeDeviceRequest(requestId: string, groupId: string): "approved" | "not_claimed" | "used" {
+  getDeviceRequestForApproval(requestId: string): ClaimedDeviceRequest | null {
+    const row = this.deviceRequestRow(requestId);
+    if (row === null || Date.now() >= row.expires_at || row.approved_group_id !== null) return null;
+    return {
+      requestId: row.id,
+      deviceId: row.device_id,
+      deviceAccessTokenHash: row.access_hash,
+      deviceEncryptionPublicKey: row.encryption_public_key,
+      deviceSigningPublicKey: this.requiredDevice(row.device_id).signing_public_key,
+      protocolVersion: row.protocol_version,
+    };
+  }
+
+  completeDeviceRequest(
+    requestId: string,
+    groupId: string,
+    approvalTransitionHash: string,
+    approvalProof: string,
+  ): "approved" | "not_claimed" | "used" {
     const row = this.deviceRequestRow(requestId);
     if (row === null || row.claimed_group_id !== groupId) return "not_claimed";
     if (row.approved_group_id !== null && row.approved_group_id !== groupId) return "used";
     this.state.storage.sql.exec(
-      "UPDATE device_requests SET approved_group_id = ?, approved_at = ? WHERE id = ?",
+      `UPDATE device_requests
+       SET approved_group_id = ?, approved_at = ?, approval_transition_hash = ?, approval_proof = ?
+       WHERE id = ?`,
       groupId,
       Date.now(),
+      approvalTransitionHash,
+      approvalProof,
       requestId,
     );
     return "approved";
@@ -332,7 +366,15 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       Date.now(),
       protocolVersion,
     );
-    return json({ requestId, expiresAt }, 201);
+    const requestHash = await deviceRequestBindingHash({
+      requestId,
+      deviceId,
+      signingPublicKey: device.signing_public_key,
+      accessHash,
+      encryptionPublicKey,
+      protocolVersion,
+    });
+    return json({ requestId, expiresAt, ...(protocolVersion === 4 ? { requestHash } : {}) }, 201);
   }
 
   private async deviceRequest(request: Request, requestId: string): Promise<Response> {
@@ -347,7 +389,15 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       throw new HttpError(401, "invalid_device_signature", "Device request signature is invalid");
     }
     if (row.approved_group_id !== null) {
-      return json({ status: "approved", groupId: row.approved_group_id, expiresAt: row.expires_at });
+      return json({
+        status: "approved",
+        groupId: row.approved_group_id,
+        expiresAt: row.expires_at,
+        ...(row.protocol_version === 4 ? {
+          transitionHash: row.approval_transition_hash,
+          approvalProof: row.approval_proof,
+        } : {}),
+      });
     }
     if (Date.now() >= row.expires_at) {
       return json({ status: "expired", expiresAt: row.expires_at });
@@ -400,7 +450,8 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
   private deviceRequestRow(requestId: string): DeviceRequestRow | null {
     const rows = Array.from(this.state.storage.sql.exec<DeviceRequestRow>(
       `SELECT id, device_id, access_hash, encryption_public_key, expires_at,
-              claimed_group_id, approved_group_id, protocol_version
+              claimed_group_id, approved_group_id, protocol_version,
+              approval_transition_hash, approval_proof
        FROM device_requests WHERE id = ?`,
       requestId,
     ));

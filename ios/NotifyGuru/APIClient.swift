@@ -16,7 +16,7 @@ struct EventsResult: Equatable { let events: [EventEnvelope]; let activeItemIDs:
 enum DeviceRequestStatus: Equatable {
     case waiting(expiresAt: Int64)
     case expired(expiresAt: Int64)
-    case approved(groupID: String, expiresAt: Int64)
+    case approved(groupID: String, expiresAt: Int64, transitionHash: String, approvalProof: String)
 }
 
 struct APIClient {
@@ -53,7 +53,9 @@ struct APIClient {
         }
     }
 
-    func createGroup(groupID: String, identity: DeviceIdentity) async throws {
+    func createGroup(
+        groupID: String, identity: DeviceIdentity, transition: GroupKeyRecord, packages: [KeyPackage]
+    ) async throws {
         let accessHash = CryptoEngine.hashToken(identity.accessToken)
         let signature = try CryptoEngine.signDevice(
             identity: identity,
@@ -62,6 +64,9 @@ struct APIClient {
         let body: [String: Any] = [
             "groupId": groupID, "deviceId": identity.deviceID, "deviceAccessTokenHash": accessHash,
             "deviceEncryptionPublicKey": try CryptoEngine.encryptionPublicKey(for: identity), "deviceSignature": signature,
+            "protocolVersion": 4,
+            "transition": try jsonObject(transition),
+            "packages": try jsonObject(packages),
         ]
         let data = try await request(method: "POST", path: "/api/groups", token: nil, body: try encode(body), expectedStatus: 201)
         let fields = try object(data, keys: ["created", "groupId"])
@@ -80,29 +85,21 @@ struct APIClient {
         return result
     }
 
-    func registerGroupKey(identity: DeviceIdentity, key: GroupKey, recreated: Bool, members: [GroupDevice]) async throws -> Int64 {
+    func registerGroupKey(
+        identity: DeviceIdentity, transition: GroupKeyRecord, packages: [KeyPackage]
+    ) async throws -> String {
         guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
-        let packages = try members.map {
-            try CryptoEngine.createKeyPackage(groupID: group.groupID, key: key, deviceID: $0.deviceID, encryptionPublicKey: $0.encryptionPublicKey)
-        }
-        let memberIDs = members.map(\.deviceID)
-        let signature = try CryptoEngine.signDevice(
-            identity: identity,
-            transcript: CryptoEngine.groupKeyRegisterTranscript(
-                groupID: group.groupID, actorDeviceID: identity.deviceID, publicKey: key.publicKey,
-                recreated: recreated, members: memberIDs, packages: packages
-            )
-        )
-        let body = RegisterGroupKeyRequest(
-            publicKey: key.publicKey, recreated: recreated, members: memberIDs,
-            packages: packages, actorSignature: signature
-        )
+        let body = GroupTransitionRequest(transition: transition, packages: packages)
         let path = pathWithQuery("/api/groups/\(group.groupID)/keys", ["deviceId": identity.deviceID])
         let data = try await request(method: "POST", path: path, token: identity.accessToken, body: try JSONEncoder().encode(body), expectedStatus: 201)
-        return try integer(object(data, keys: ["timestamp"]), "timestamp")
+        let fields = try object(data, keys: ["timestamp", "transitionHash"])
+        guard try integer(fields, "timestamp") == transition.timestamp else {
+            throw ProtocolError.invalidResponse("accepted transition timestamp changed")
+        }
+        return try text(fields, "transitionHash")
     }
 
-    func createDeviceRequest(identity: DeviceIdentity, requestID: String) async throws -> DeviceRequestRecord {
+    func createDeviceRequest(identity: DeviceIdentity, requestID: String, authSecret: String) async throws -> DeviceRequestRecord {
         let accessHash = CryptoEngine.hashToken(identity.accessToken)
         let signature = try CryptoEngine.signDevice(
             identity: identity,
@@ -114,11 +111,22 @@ struct APIClient {
             "protocolVersion": 4,
         ]
         let data = try await request(method: "POST", path: "/api/device-requests", token: nil, body: try encode(body), expectedStatus: 201)
-        let fields = try object(data, keys: ["requestId", "expiresAt"])
+        let fields = try object(data, keys: ["requestId", "expiresAt", "requestHash"])
         guard try text(fields, "requestId") == requestID else {
             throw ProtocolError.invalidResponse("the server response did not match the add-to-group link")
         }
-        return DeviceRequestRecord(requestID: requestID, expiresAt: try integer(fields, "expiresAt"))
+        let requestHash = CryptoEngine.deviceRequestBindingHash(
+            requestID: requestID, deviceID: identity.deviceID,
+            signingPublicKey: try CryptoEngine.signingPublicKey(for: identity), accessHash: accessHash,
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity), protocolVersion: 4
+        )
+        guard try text(fields, "requestHash") == requestHash else {
+            throw ProtocolError.crypto("relay changed the device request binding")
+        }
+        return DeviceRequestRecord(
+            requestID: requestID, expiresAt: try integer(fields, "expiresAt"),
+            requestHash: requestHash, authSecret: authSecret
+        )
     }
 
     func deviceRequestStatus(identity: DeviceIdentity, requestID: String) async throws -> DeviceRequestStatus {
@@ -139,45 +147,74 @@ struct APIClient {
             try requireKeys(fields, ["status", "expiresAt"])
             return .expired(expiresAt: try integer(fields, "expiresAt"))
         case "approved":
-            try requireKeys(fields, ["status", "groupId", "expiresAt"])
-            return .approved(groupID: try text(fields, "groupId"), expiresAt: try integer(fields, "expiresAt"))
+            try requireKeys(fields, ["status", "groupId", "expiresAt", "transitionHash", "approvalProof"])
+            return .approved(
+                groupID: try text(fields, "groupId"), expiresAt: try integer(fields, "expiresAt"),
+                transitionHash: try text(fields, "transitionHash"), approvalProof: try text(fields, "approvalProof")
+            )
         default: throw ProtocolError.invalidResponse("the server returned an unknown add-to-group status")
         }
     }
 
-    func approveDeviceRequest(identity: DeviceIdentity, requestID: String) async throws {
+    func deviceRequestForApproval(identity: DeviceIdentity, requestID: String) async throws -> DeviceRequestDescriptor {
+        guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
+        let path = pathWithQuery("/api/groups/\(group.groupID)/device-requests/\(requestID)", ["deviceId": identity.deviceID])
+        let data = try await request(method: "GET", path: path, token: identity.accessToken, body: nil, expectedStatus: 200)
+        _ = try object(data, keys: [
+            "requestId", "deviceId", "accessHash", "signingPublicKey", "encryptionPublicKey", "protocolVersion",
+        ])
+        return try JSONDecoder().decode(DeviceRequestDescriptor.self, from: data)
+    }
+
+    func approveDeviceRequest(
+        identity: DeviceIdentity, requestID: String, transition: GroupKeyRecord,
+        packages: [KeyPackage], approvalProof: String
+    ) async throws {
         guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
         let path = pathWithQuery("/api/groups/\(group.groupID)/device-requests/\(requestID)/approve", ["deviceId": identity.deviceID])
-        let signature = try CryptoEngine.signDevice(
-            identity: identity,
-            transcript: CryptoEngine.groupDeviceApproveTranscript(
-                groupID: group.groupID, actorDeviceID: identity.deviceID, requestID: requestID
-            )
-        )
+        let body = ApproveDeviceRequest(transition: transition, packages: packages, approvalProof: approvalProof)
         let data = try await request(
             method: "POST", path: path, token: identity.accessToken,
-            body: try encode(["actorSignature": signature]), expectedStatus: 200
+            body: try JSONEncoder().encode(body), expectedStatus: 200
         )
-        guard try object(data, keys: ["approved", "deviceId", "approvedByDeviceId"])["approved"] as? Bool == true else {
+        let fields = try object(data, keys: ["approved", "deviceId", "approvedByDeviceId", "transitionHash"])
+        guard fields["approved"] as? Bool == true,
+              try text(fields, "transitionHash") == transition.transitionHash else {
             throw ProtocolError.invalidResponse("the server did not confirm that the device was added to the group")
         }
     }
 
-    func removeDevice(identity: DeviceIdentity, deviceID: String) async throws {
+    func removeDevice(
+        identity: DeviceIdentity, deviceID: String, transition: GroupKeyRecord, packages: [KeyPackage]
+    ) async throws {
         guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
         let path = pathWithQuery("/api/groups/\(group.groupID)/devices/\(deviceID)", ["deviceId": identity.deviceID])
+        let data = try await request(
+            method: "DELETE", path: path, token: identity.accessToken,
+            body: try JSONEncoder().encode(GroupTransitionRequest(transition: transition, packages: packages)), expectedStatus: 200
+        )
+        let fields = try object(data, keys: ["removed", "transitionHash"])
+        guard fields["removed"] as? Bool == true, try text(fields, "transitionHash") == transition.transitionHash else {
+            throw ProtocolError.invalidResponse("device removal was not confirmed")
+        }
+    }
+
+    func abandonGroup(identity: DeviceIdentity, headTransitionHash: String) async throws {
+        guard let group = identity.group else { throw ProtocolError.invalidResponse("device group is not ready") }
+        let path = pathWithQuery("/api/groups/\(group.groupID)/devices/\(identity.deviceID)", ["deviceId": identity.deviceID])
         let signature = try CryptoEngine.signDevice(
             identity: identity,
-            transcript: CryptoEngine.groupDeviceRemoveTranscript(
-                groupID: group.groupID, actorDeviceID: identity.deviceID, deviceID: deviceID
+            transcript: CryptoEngine.groupAbandonTranscript(
+                groupID: group.groupID, actorDeviceID: identity.deviceID, headTransitionHash: headTransitionHash
             )
         )
         let data = try await request(
             method: "DELETE", path: path, token: identity.accessToken,
-            body: try encode(["actorSignature": signature]), expectedStatus: 200
+            body: try encode(["actorSignature": signature, "headTransitionHash": headTransitionHash]), expectedStatus: 200
         )
-        guard try object(data, keys: ["removed"])["removed"] as? Bool == true else {
-            throw ProtocolError.invalidResponse("device removal was not confirmed")
+        let fields = try object(data, keys: ["removed", "transitionHash"])
+        guard fields["removed"] as? Bool == true, try text(fields, "transitionHash") == headTransitionHash else {
+            throw ProtocolError.invalidResponse("group abandonment was not confirmed")
         }
     }
 
@@ -186,12 +223,17 @@ struct APIClient {
         let proof = try CryptoEngine.pairingProof(
             authSecret: pairing.authSecret, protocolVersion: pairing.protocolVersion,
             sessionID: pairing.sessionID, pairingID: pairing.pairingID,
-            groupID: group.groupID, timestamp: key.timestamp, groupPublicKey: key.publicKey
+            groupID: group.groupID, timestamp: key.timestamp, groupPublicKey: key.publicKey,
+            transitionHash: key.transitionHash
         )
         let body = JoinRequest(
             pairingID: pairing.pairingID, pairingToken: pairing.pairingToken, groupID: group.groupID,
             deviceID: identity.deviceID, deviceAccessToken: identity.accessToken, keyTimestamp: key.timestamp,
-            groupPublicKey: key.publicKey, proof: proof
+            groupPublicKey: key.publicKey, transitionHash: key.transitionHash, proof: proof,
+            sessionDescriptor: pairing.protocolVersion == 4 ? try CryptoEngine.createSessionDescriptor(
+                identity: identity, key: key, sessionID: pairing.sessionID,
+                groupID: group.groupID, creatorPublicKey: pairing.creatorPublicKey
+            ) : nil
         )
         let data = try await request(method: "POST", path: "/api/sessions/\(pairing.sessionID)/join", token: nil, body: try JSONEncoder().encode(body), expectedStatus: 201)
         let fields = try object(data, keys: ["joined", "expiresAt"])
@@ -356,6 +398,10 @@ struct APIClient {
         guard value >= 0, NSNumber(value: value) == number else { throw ProtocolError.invalidResponse("\(name) must be non-negative") }
         return value
     }
+
+    private func jsonObject<T: Encodable>(_ value: T) throws -> Any {
+        try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+    }
 }
 
 struct APIError: LocalizedError, Equatable {
@@ -363,16 +409,24 @@ struct APIError: LocalizedError, Equatable {
     var errorDescription: String? { "notify.guru API: \(code) (\(status)): \(message)" }
 }
 
-private struct RegisterGroupKeyRequest: Encodable {
-    let publicKey: String; let recreated: Bool; let members: [String]; let packages: [KeyPackage]; let actorSignature: String
+private struct GroupTransitionRequest: Encodable {
+    let transition: GroupKeyRecord
+    let packages: [KeyPackage]
+}
+
+private struct ApproveDeviceRequest: Encodable {
+    let transition: GroupKeyRecord
+    let packages: [KeyPackage]
+    let approvalProof: String
 }
 
 private struct JoinRequest: Encodable {
     let pairingID: String; let pairingToken: String; let groupID: String; let deviceID: String
-    let deviceAccessToken: String; let keyTimestamp: Int64; let groupPublicKey: String; let proof: String
+    let deviceAccessToken: String; let keyTimestamp: Int64; let groupPublicKey: String
+    let transitionHash: String?; let proof: String; let sessionDescriptor: SignedSessionDescriptor?
     enum CodingKeys: String, CodingKey {
         case pairingID = "pairingId"; case pairingToken; case groupID = "groupId"; case deviceID = "deviceId"
-        case deviceAccessToken, keyTimestamp, groupPublicKey, proof
+        case deviceAccessToken, keyTimestamp, groupPublicKey, transitionHash, proof, sessionDescriptor
     }
 }
 

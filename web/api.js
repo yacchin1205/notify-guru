@@ -14,16 +14,26 @@ export async function registerDevice(body) {
 
 export async function createDeviceRequest(body) {
   const result = await request("/api/device-requests", { method: "POST", body });
-  requireExactKeys(result, ["requestId", "expiresAt"]);
-  return { requestId: stringValue(result.requestId, "requestId"), expiresAt: integerValue(result.expiresAt, "expiresAt") };
+  requireExactKeys(result, ["requestId", "expiresAt", "requestHash"]);
+  return {
+    requestId: stringValue(result.requestId, "requestId"),
+    expiresAt: integerValue(result.expiresAt, "expiresAt"),
+    requestHash: stringValue(result.requestHash, "requestHash"),
+  };
 }
 
 export async function getDeviceRequest(identity, requestId, signature) {
   const result = await request(`/api/device-requests/${requestId}?deviceId=${identity.deviceId}`, { token: signature });
   const status = stringValue(result.status, "status");
   if (status === "approved") {
-    requireExactKeys(result, ["status", "groupId", "expiresAt"]);
-    return { status, groupId: stringValue(result.groupId, "groupId"), expiresAt: integerValue(result.expiresAt, "expiresAt") };
+    requireExactKeys(result, ["status", "groupId", "expiresAt", "transitionHash", "approvalProof"]);
+    return {
+      status,
+      groupId: stringValue(result.groupId, "groupId"),
+      expiresAt: integerValue(result.expiresAt, "expiresAt"),
+      transitionHash: stringValue(result.transitionHash, "transitionHash"),
+      approvalProof: stringValue(result.approvalProof, "approvalProof"),
+    };
   }
   if (status !== "waiting" && status !== "expired") throw new Error("Unknown device request status");
   requireExactKeys(result, ["status", "expiresAt"]);
@@ -52,8 +62,22 @@ export async function registerGroupKey(identity, body) {
   const result = await request(`/api/groups/${identity.group.groupId}/keys?deviceId=${identity.deviceId}`, {
     method: "POST", token: identity.accessToken, body,
   });
-  requireExactKeys(result, ["timestamp"]);
-  return integerValue(result.timestamp, "timestamp");
+  requireExactKeys(result, ["timestamp", "transitionHash"]);
+  return {
+    timestamp: integerValue(result.timestamp, "timestamp"),
+    transitionHash: stringValue(result.transitionHash, "transitionHash"),
+  };
+}
+
+export async function getDeviceRequestForApproval(identity, requestId) {
+  const result = await request(
+    `/api/groups/${identity.group.groupId}/device-requests/${requestId}?deviceId=${identity.deviceId}`,
+    { token: identity.accessToken },
+  );
+  requireExactKeys(result, [
+    "requestId", "deviceId", "accessHash", "signingPublicKey", "encryptionPublicKey", "protocolVersion",
+  ]);
+  return result;
 }
 
 export async function approveDeviceRequest(identity, requestId, body) {
@@ -61,7 +85,7 @@ export async function approveDeviceRequest(identity, requestId, body) {
     `/api/groups/${identity.group.groupId}/device-requests/${requestId}/approve?deviceId=${identity.deviceId}`,
     { method: "POST", token: identity.accessToken, body },
   );
-  requireExactKeys(result, ["approved", "deviceId", "approvedByDeviceId"]);
+  requireExactKeys(result, ["approved", "deviceId", "approvedByDeviceId", "transitionHash"]);
   if (result.approved !== true) throw new Error("Device request approval was not confirmed");
   return stringValue(result.deviceId, "deviceId");
 }
@@ -70,7 +94,7 @@ export async function removeDevice(identity, deviceId, body) {
   const result = await request(`/api/groups/${identity.group.groupId}/devices/${deviceId}?deviceId=${identity.deviceId}`, {
     method: "DELETE", token: identity.accessToken, body,
   });
-  requireExactKeys(result, ["removed"]);
+  requireExactKeys(result, ["removed", "transitionHash"]);
   if (result.removed !== true) throw new Error("Device removal was not confirmed");
 }
 

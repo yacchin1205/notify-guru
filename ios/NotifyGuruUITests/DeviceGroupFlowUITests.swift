@@ -57,6 +57,18 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "35-startup-error", app: app)
     }
 
+    func testMixedSessionInheritanceShowsOnlyAuthenticatedV4Session() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-mixed-session-inheritance"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Authenticated v4 session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Connected securely"].exists)
+        XCTAssertFalse(app.staticTexts["Legacy v3 session"].exists)
+        XCTAssertFalse(app.staticTexts["Unable to start"].exists)
+        attachScreenshot(named: "36-mixed-inheritance-v4-only", app: app)
+    }
+
     func testIPhoneKeepsSessionCardsInOneColumn() throws {
         XCUIDevice.shared.orientation = .portrait
         addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
@@ -347,7 +359,14 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Add device"].exists)
         attachScreenshot(named: "20-device-addition-confirmation", app: app)
 
-        app.buttons["Cancel"].tap()
+        let cancel = app.buttons["Cancel"]
+        if cancel.exists {
+            cancel.tap()
+        } else {
+            // iOS 26 presents a confirmation dialog's cancel role as an
+            // outside-tap dismissal instead of an accessibility button.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.2)).tap()
+        }
         XCTAssertFalse(app.staticTexts["Add a device to this group?"].exists)
         attachScreenshot(named: "21-device-addition-cancelled", app: app)
     }

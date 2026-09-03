@@ -52,6 +52,22 @@ final class AppModel: ObservableObject {
 #endif
     }
 
+    private var isRecoverableStartupFailureUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-recoverable-startup-error")
+#else
+        false
+#endif
+    }
+
+    private var isMixedSessionInheritanceUITest: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-mixed-session-inheritance")
+#else
+        false
+#endif
+    }
+
     private var isDeviceAdditionApprovalUITest: Bool {
 #if DEBUG
         ProcessInfo.processInfo.arguments.contains("-ui-test-device-addition-approval")
@@ -84,6 +100,18 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !isReady else { return }
 #if DEBUG
+        if isRecoverableStartupFailureUITest {
+            failStartup("The saved notify.guru data on this device can no longer be opened.", canReset: true)
+            return
+        }
+        if isMixedSessionInheritanceUITest {
+            do {
+                try startMixedSessionInheritanceUITest()
+            } catch {
+                failStartup(error.localizedDescription, canReset: false)
+            }
+            return
+        }
         if isStartupScreenUITest {
             return
         }
@@ -92,7 +120,7 @@ final class AppModel: ObservableObject {
             if isDeviceAdditionApprovalUITest {
                 do {
                     try stageDeviceAddition(
-                        DeviceRequestLink("https://notify.guru/device#v=2&r=ui-test-device-request")
+                        DeviceRequestLink("https://notify.guru/device#v=3&r=ui-test-device-request&a=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&h=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                     )
                 } catch {
                     failStartup(error.localizedDescription, canReset: false)
@@ -114,7 +142,7 @@ final class AppModel: ObservableObject {
             } else {
                 var identity = try CryptoEngine.createIdentity()
                 identity.deviceID = try await api.registerDevice(identity: identity)
-                current = Vault(version: 3, identity: identity, sessions: [])
+                current = Vault(version: 4, identity: identity, sessions: [])
             }
             if current.identity.group == nil { try await createSoloGroup(&current) }
             try persist(current)
@@ -228,12 +256,29 @@ final class AppModel: ObservableObject {
                 throw ProtocolError.invalidResponse("confirm removing this device from its current group and deleting its saved sessions")
             }
             if let groupID = current.identity.group?.groupID {
-                try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
+                guard let state = groupState, let head = current.identity.group?.headTransitionHash else {
+                    throw ProtocolError.crypto("group transition head is unavailable")
+                }
+                if state.members.count == 1 {
+                    try await api.abandonGroup(identity: current.identity, headTransitionHash: head)
+                } else {
+                    let update = try createSelfRemovalTransition(
+                        current: current,
+                        members: state.members.filter { $0.deviceID != current.identity.deviceID }.map(transitionMember)
+                    )
+                    try await api.removeDevice(
+                        identity: current.identity, deviceID: current.identity.deviceID,
+                        transition: update.transition, packages: update.packages
+                    )
+                }
                 current = Self.detachingFromDeviceGroup(current, groupID: groupID)
                 clearPublishedGroupState()
             }
             let requestID = try CryptoEngine.randomID()
-            let created = try await api.createDeviceRequest(identity: current.identity, requestID: requestID)
+            let authSecret = try CryptoEngine.randomToken()
+            let created = try await api.createDeviceRequest(
+                identity: current.identity, requestID: requestID, authSecret: authSecret
+            )
             pendingDeviceRequest = created
             try persist(current)
             deviceRequestLink = try deviceRequestURL(created)
@@ -244,7 +289,17 @@ final class AppModel: ObservableObject {
     func removeDevice(_ deviceID: String) async {
         do {
             var current = try requiredVault()
-            try await api.removeDevice(identity: current.identity, deviceID: deviceID)
+            guard let state = groupState else { throw ProtocolError.crypto("group state is unavailable") }
+            let update = try createMembershipTransition(
+                current: current,
+                members: state.members.filter { $0.deviceID != deviceID }.map(transitionMember),
+                recreated: true
+            )
+            try await api.removeDevice(
+                identity: current.identity, deviceID: deviceID,
+                transition: update.transition, packages: update.packages
+            )
+            try storeTransitionKey(update, in: &current)
             try await synchronizeGroup(&current)
             try await ensureExactGroupKey(&current)
             try persist(current)
@@ -257,7 +312,15 @@ final class AppModel: ObservableObject {
             guard groupDevices.count > 1, let groupID = current.identity.group?.groupID else {
                 throw ProtocolError.invalidResponse("this device cannot be removed from a group with no other devices")
             }
-            try await api.removeDevice(identity: current.identity, deviceID: current.identity.deviceID)
+            guard let state = groupState else { throw ProtocolError.crypto("group state is unavailable") }
+            let update = try createSelfRemovalTransition(
+                current: current,
+                members: state.members.filter { $0.deviceID != current.identity.deviceID }.map(transitionMember)
+            )
+            try await api.removeDevice(
+                identity: current.identity, deviceID: current.identity.deviceID,
+                transition: update.transition, packages: update.packages
+            )
             current = Self.detachingFromDeviceGroup(current, groupID: groupID)
             clearPublishedGroupState()
             try await createSoloGroup(&current)
@@ -270,9 +333,12 @@ final class AppModel: ObservableObject {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
                   let request = current.sessions[index].request,
-                  let timestamp = current.sessions[index].requestKeyTimestamp else {
+                  let group = current.identity.group,
+                  let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
                 throw ProtocolError.invalidResponse("request is no longer available")
             }
+            try populateSessionKeys(&current.sessions[index], group: group)
+            let timestamp = key.timestamp
             let responseID = try CryptoEngine.randomID()
             let payload = try CryptoEngine.encryptResponse(
                 session: current.sessions[index], timestamp: timestamp, responseID: responseID,
@@ -294,9 +360,12 @@ final class AppModel: ObservableObject {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
                   let request = current.sessions[index].request,
-                  let timestamp = current.sessions[index].requestKeyTimestamp else {
+                  let group = current.identity.group,
+                  let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
                 throw ProtocolError.invalidResponse("request is no longer available")
             }
+            try populateSessionKeys(&current.sessions[index], group: group)
+            let timestamp = key.timestamp
 #if DEBUG
             if isSessionHistoryUITest {
                 if ProcessInfo.processInfo.arguments.contains("-ui-test-dismiss-error") {
@@ -463,6 +532,21 @@ final class AppModel: ObservableObject {
 
     func resetLocalData() async {
         guard canResetLocalData else { return }
+#if DEBUG
+        if isRecoverableStartupFailureUITest {
+            vault = nil
+            sessions = []
+            clearPublishedGroupState()
+            hasDeviceGroup = false
+            deviceID = nil
+            startupErrorMessage = nil
+            canResetLocalData = false
+            connectionState = .preparing
+            hasFinishedStarting = false
+            startSessionHistoryUITest()
+            return
+        }
+#endif
         do {
             try keychain.remove()
             vault = nil
@@ -481,7 +565,8 @@ final class AppModel: ObservableObject {
     }
 
     func sync() async {
-        guard !isSessionHistoryUITest, !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
+        guard !isSessionHistoryUITest, !isRecoverableStartupFailureUITest, !isMixedSessionInheritanceUITest,
+              !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
         guard isReady, !isSyncing else { return }
         isSyncing = true; connectionState = .syncing
         defer { isSyncing = false }
@@ -550,7 +635,32 @@ final class AppModel: ObservableObject {
         }
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
-        try await api.approveDeviceRequest(identity: current.identity, requestID: link.requestID)
+        let request = try await api.deviceRequestForApproval(identity: current.identity, requestID: link.requestID)
+        let requestHash = CryptoEngine.deviceRequestBindingHash(
+            requestID: request.requestID, deviceID: request.deviceID,
+            signingPublicKey: request.signingPublicKey, accessHash: request.accessHash,
+            encryptionPublicKey: request.encryptionPublicKey, protocolVersion: request.protocolVersion
+        )
+        guard requestHash == link.requestHash, request.protocolVersion == 4 else {
+            throw ProtocolError.crypto("add-to-group link does not authenticate this device request")
+        }
+        guard let state = groupState, !state.members.contains(where: { $0.deviceID == request.deviceID }) else {
+            throw ProtocolError.invalidResponse("device is already in this group")
+        }
+        let members = state.members.map(transitionMember) + [TransitionMember(
+            deviceID: request.deviceID, signingPublicKey: request.signingPublicKey,
+            encryptionPublicKey: request.encryptionPublicKey
+        )]
+        let update = try createMembershipTransition(current: current, members: members, recreated: false)
+        let approvalProof = try CryptoEngine.deviceApprovalProof(
+            authSecret: link.authSecret, requestID: link.requestID,
+            groupID: current.identity.group!.groupID, transitionHash: update.transition.transitionHash
+        )
+        try await api.approveDeviceRequest(
+            identity: current.identity, requestID: link.requestID,
+            transition: update.transition, packages: update.packages, approvalProof: approvalProof
+        )
+        try storeTransitionKey(update, in: &current)
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
         try persist(current)
@@ -595,8 +705,31 @@ final class AppModel: ObservableObject {
 
     private func createSoloGroup(_ current: inout Vault) async throws {
         let groupID = try CryptoEngine.randomID()
-        try await api.createGroup(groupID: groupID, identity: current.identity)
-        current.identity.group = DeviceGroup(groupID: groupID, keys: [:])
+        let draft = CryptoEngine.createGroupKey()
+        let member = TransitionMember(
+            deviceID: current.identity.deviceID,
+            signingPublicKey: try CryptoEngine.signingPublicKey(for: current.identity),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: current.identity)
+        )
+        let package = try CryptoEngine.createKeyPackage(
+            groupID: groupID, key: draft, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let transition = try CryptoEngine.createGroupTransition(
+            groupID: groupID, identity: current.identity, groupKey: draft,
+            previous: nil, members: [member], packages: [package], recreated: true
+        )
+        try await api.createGroup(
+            groupID: groupID, identity: current.identity, transition: transition, packages: [package]
+        )
+        let key = GroupKey(
+            timestamp: transition.timestamp, publicKey: draft.publicKey,
+            privateKey: draft.privateKey, transitionHash: transition.transitionHash
+        )
+        current.identity.group = DeviceGroup(
+            groupID: groupID, keys: [String(transition.timestamp): key],
+            rootTransitionHash: transition.transitionHash, headTransitionHash: transition.transitionHash
+        )
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
     }
@@ -610,9 +743,15 @@ final class AppModel: ObservableObject {
             pendingDeviceRequest = nil; deviceRequestLink = nil
             try await createSoloGroup(&current)
             noticeMessage = "The add-to-group link expired. This device is now used on its own."
-        case .approved(let groupID, _):
+        case .approved(let groupID, _, let transitionHash, let approvalProof):
+            guard try CryptoEngine.verifyDeviceApprovalProof(
+                authSecret: pending.authSecret, requestID: pending.requestID,
+                groupID: groupID, transitionHash: transitionHash, proof: approvalProof
+            ) else { throw ProtocolError.crypto("device approval proof is invalid") }
             pendingDeviceRequest = nil
-            current.identity.group = DeviceGroup(groupID: groupID, keys: [:])
+            current.identity.group = DeviceGroup(
+                groupID: groupID, keys: [:], pendingTransitionHash: transitionHash
+            )
             deviceRequestLink = nil
             try await synchronizeGroup(&current)
             try await ensureExactGroupKey(&current)
@@ -623,19 +762,34 @@ final class AppModel: ObservableObject {
     private func synchronizeGroup(_ current: inout Vault) async throws {
         guard var group = current.identity.group else { return }
         let state = try await api.groupState(identity: current.identity)
+        guard let trustedHash = group.headTransitionHash ?? group.pendingTransitionHash else {
+            throw ProtocolError.crypto("device group has no authenticated transition anchor")
+        }
+        let head = try CryptoEngine.validateGroupTransitions(
+            groupID: state.groupID, transitions: state.keys, trustedHash: trustedHash
+        )
+        guard sameTransitionMembers(head.members, state.members.map(transitionMember)) else {
+            throw ProtocolError.crypto("relay changed the active group member set")
+        }
         for package in state.packages {
             guard let timestamp = package.timestamp,
                   let record = state.keys.first(where: { $0.timestamp == timestamp }) else {
                 throw ProtocolError.crypto("key package refers to an unknown key")
             }
+            try CryptoEngine.verifyKeyPackageDigest(package, transition: record)
             if let local = group.keys[String(timestamp)] {
-                guard local.publicKey == record.publicKey else { throw ProtocolError.crypto("stored key conflicts with server metadata") }
+                guard local.publicKey == record.publicKey, local.transitionHash == record.transitionHash else {
+                    throw ProtocolError.crypto("stored key conflicts with server metadata")
+                }
             } else {
                 group.keys[String(timestamp)] = try CryptoEngine.openKeyPackage(
                     identity: current.identity, groupID: group.groupID, record: record, package: package
                 )
             }
         }
+        if group.rootTransitionHash == nil { group.rootTransitionHash = state.keys.first?.transitionHash }
+        group.headTransitionHash = head.transitionHash
+        group.pendingTransitionHash = nil
         current.identity.group = group
         groupState = state
         groupDevices = state.members
@@ -644,22 +798,26 @@ final class AppModel: ObservableObject {
     }
 
     private func ensureExactGroupKey(_ current: inout Vault) async throws {
-        guard let state = groupState, var group = current.identity.group else { throw ProtocolError.crypto("group state is unavailable") }
-        if GroupKeyPolicy.latestKeyMatchesMembers(state) { return }
-        let draft = CryptoEngine.createGroupKey()
-        let timestamp: Int64
+        guard let state = groupState, GroupKeyPolicy.latestKeyMatchesMembers(state) else {
+            throw ProtocolError.crypto("device group key does not match its authenticated members")
+        }
+        guard GroupKeyPolicy.needsRecreation(state) else { return }
+        let update = try createMembershipTransition(
+            current: current, members: state.members.map(transitionMember), recreated: true
+        )
         do {
-            timestamp = try await api.registerGroupKey(
-                identity: current.identity, key: draft,
-                recreated: GroupKeyPolicy.nextKeyIsRecreated(state), members: state.members
+            let acceptedHash = try await api.registerGroupKey(
+                identity: current.identity, transition: update.transition, packages: update.packages
             )
-        } catch let error as APIError where error.code == "member_set_changed" || error.code == "key_timestamp_conflict" {
+            guard acceptedHash == update.transition.transitionHash else {
+                throw ProtocolError.crypto("accepted group transition hash changed")
+            }
+            try storeTransitionKey(update, in: &current)
+        } catch let error as APIError
+            where error.code == "group_transition_changed" || error.code == "key_timestamp_conflict" {
             try await synchronizeGroup(&current)
             return
         }
-        group.keys[String(timestamp)] = GroupKey(timestamp: timestamp, publicKey: draft.publicKey, privateKey: draft.privateKey)
-        current.identity.group = group
-        try persist(current)
         try await synchronizeGroup(&current)
     }
 
@@ -668,12 +826,19 @@ final class AppModel: ObservableObject {
         guard let key = group.keys[String(record.timestamp)], key.publicKey == record.publicKey else {
             throw ProtocolError.crypto("current group private key is unavailable")
         }
+        guard key.transitionHash == record.transitionHash else {
+            throw ProtocolError.crypto("current group key transition is not authenticated")
+        }
         return key
     }
 
     private func inheritSessions(_ current: inout Vault) throws {
         guard let group = current.identity.group, let state = groupState else { return }
-        for remote in state.sessions where !current.sessions.contains(where: { $0.sessionID == remote.sessionID }) {
+        let localSessionIDs = Set(current.sessions.map(\.sessionID))
+        let candidates = state.sessions.filter { !localSessionIDs.contains($0.sessionID) }
+        for remote in try CryptoEngine.authenticatedInheritedSessions(
+            candidates, groupID: group.groupID, transitions: state.keys
+        ) {
             var record = SessionRecord(
                 protocolVersion: remote.protocolVersion, sessionID: remote.sessionID, groupID: group.groupID,
                 creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
@@ -762,12 +927,85 @@ final class AppModel: ObservableObject {
 
     private func deviceRequestURL(_ request: DeviceRequestRecord) throws -> String {
         var fragment = URLComponents(); fragment.queryItems = [
-            URLQueryItem(name: "v", value: "2"), URLQueryItem(name: "r", value: request.requestID),
+            URLQueryItem(name: "v", value: "3"), URLQueryItem(name: "r", value: request.requestID),
+            URLQueryItem(name: "a", value: request.authSecret), URLQueryItem(name: "h", value: request.requestHash),
         ]
         var result = URLComponents(string: "https://notify.guru/device")!
         result.percentEncodedFragment = fragment.percentEncodedQuery
         guard let value = result.url?.absoluteString else { throw ProtocolError.invalidResponse("could not create the link for adding this device") }
         return value
+    }
+
+    private func transitionMember(_ device: GroupDevice) -> TransitionMember {
+        TransitionMember(
+            deviceID: device.deviceID, signingPublicKey: device.signingPublicKey,
+            encryptionPublicKey: device.encryptionPublicKey
+        )
+    }
+
+    private func sameTransitionMembers(_ left: [TransitionMember], _ right: [TransitionMember]) -> Bool {
+        let normalize: ([TransitionMember]) -> [String] = { members in
+            members.sorted { $0.deviceID.utf8.lexicographicallyPrecedes($1.deviceID.utf8) }
+                .map { "\($0.deviceID)\n\($0.signingPublicKey)\n\($0.encryptionPublicKey)" }
+        }
+        return normalize(left) == normalize(right)
+    }
+
+    private func createMembershipTransition(
+        current: Vault, members: [TransitionMember], recreated: Bool
+    ) throws -> (key: GroupKey, packages: [KeyPackage], transition: GroupKeyRecord) {
+        guard let group = current.identity.group, let state = groupState, let previous = state.keys.last,
+              previous.transitionHash == group.headTransitionHash else {
+            throw ProtocolError.crypto("device group transition head is not synchronized")
+        }
+        let draft = CryptoEngine.createGroupKey()
+        let packages = try members.map {
+            try CryptoEngine.createKeyPackage(
+                groupID: group.groupID, key: draft, deviceID: $0.deviceID,
+                encryptionPublicKey: $0.encryptionPublicKey
+            )
+        }
+        let transition = try CryptoEngine.createGroupTransition(
+            groupID: group.groupID, identity: current.identity, groupKey: draft,
+            previous: previous, members: members, packages: packages, recreated: recreated
+        )
+        return (draft, packages, transition)
+    }
+
+    private func createSelfRemovalTransition(
+        current: Vault, members: [TransitionMember]
+    ) throws -> (key: GroupKey, packages: [KeyPackage], transition: GroupKeyRecord) {
+        guard let group = current.identity.group, let state = groupState, let previous = state.keys.last,
+              previous.transitionHash == group.headTransitionHash,
+              let currentKey = group.keys[String(previous.timestamp)],
+              currentKey.publicKey == previous.publicKey else {
+            throw ProtocolError.crypto("device group transition head is not synchronized")
+        }
+        let packages = try members.map {
+            try CryptoEngine.createKeyPackage(
+                groupID: group.groupID, key: currentKey, deviceID: $0.deviceID,
+                encryptionPublicKey: $0.encryptionPublicKey
+            )
+        }
+        let transition = try CryptoEngine.createGroupTransition(
+            groupID: group.groupID, identity: current.identity, groupKey: currentKey,
+            previous: previous, members: members, packages: packages, recreated: false
+        )
+        return (currentKey, packages, transition)
+    }
+
+    private func storeTransitionKey(
+        _ update: (key: GroupKey, packages: [KeyPackage], transition: GroupKeyRecord),
+        in current: inout Vault
+    ) throws {
+        guard var group = current.identity.group else { throw ProtocolError.crypto("device group is unavailable") }
+        group.keys[String(update.transition.timestamp)] = GroupKey(
+            timestamp: update.transition.timestamp, publicKey: update.key.publicKey,
+            privateKey: update.key.privateKey, transitionHash: update.transition.transitionHash
+        )
+        group.headTransitionHash = update.transition.transitionHash
+        current.identity.group = group
+        try persist(current)
     }
 
     private func requiredGroupState() throws -> DeviceGroupStateResult {
@@ -825,6 +1063,76 @@ final class AppModel: ObservableObject {
     }
 
 #if DEBUG
+    private func startMixedSessionInheritanceUITest() throws {
+        let groupID = "ui-test-mixed-group"
+        var identity = try CryptoEngine.createIdentity()
+        identity.deviceID = "ui-test-mixed-device"
+        let member = TransitionMember(
+            deviceID: identity.deviceID,
+            signingPublicKey: try CryptoEngine.signingPublicKey(for: identity),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity)
+        )
+        let draft = CryptoEngine.createGroupKey()
+        let package = try CryptoEngine.createKeyPackage(
+            groupID: groupID, key: draft, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let transition = try CryptoEngine.createGroupTransition(
+            groupID: groupID, identity: identity, groupKey: draft, previous: nil,
+            members: [member], packages: [package], recreated: true, now: 10
+        )
+        let key = GroupKey(
+            timestamp: transition.timestamp, publicKey: draft.publicKey,
+            privateKey: draft.privateKey, transitionHash: transition.transitionHash
+        )
+        identity.group = DeviceGroup(
+            groupID: groupID, keys: [String(key.timestamp): key],
+            rootTransitionHash: transition.transitionHash, headTransitionHash: transition.transitionHash
+        )
+        let descriptor = try CryptoEngine.createSessionDescriptor(
+            identity: identity, key: key, sessionID: "authenticated-v4-session",
+            groupID: groupID, creatorPublicKey: draft.publicKey
+        )
+        let legacy = GroupSessionResult(
+            protocolVersion: 3, sessionID: "legacy-v3-session", groupID: groupID,
+            creatorPublicKey: draft.publicKey,
+            expiresAt: Self.currentTimeMilliseconds() + 86_400_000, keyTimestamp: nil,
+            transitionHash: nil, actorDeviceID: nil, actorSignature: nil, continuitySignature: nil
+        )
+        let signed = GroupSessionResult(
+            protocolVersion: 4, sessionID: descriptor.sessionID, groupID: descriptor.groupID,
+            creatorPublicKey: descriptor.creatorPublicKey,
+            expiresAt: Self.currentTimeMilliseconds() + 86_400_000,
+            keyTimestamp: descriptor.keyTimestamp, transitionHash: descriptor.transitionHash,
+            actorDeviceID: descriptor.actorDeviceID, actorSignature: descriptor.actorSignature,
+            continuitySignature: descriptor.continuitySignature
+        )
+        let inherited = try CryptoEngine.authenticatedInheritedSessions(
+            [legacy, signed], groupID: groupID, transitions: [transition]
+        )
+        let records = try inherited.map { remote in
+            var record = SessionRecord(
+                protocolVersion: remote.protocolVersion, sessionID: remote.sessionID, groupID: groupID,
+                creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
+                title: "Authenticated v4 session", status: "Connected securely",
+                notifications: [], request: nil, requestKeyTimestamp: nil, color: "#d9f2d0",
+                updatedAt: Self.currentTimeMilliseconds(), expiresAt: remote.expiresAt
+            )
+            try populateSessionKeys(&record, group: identity.group!)
+            return record
+        }
+        let current = Vault(version: 4, identity: identity, sessions: records)
+        vault = current
+        publish(current)
+        groupDevices = [GroupDevice(
+            deviceID: member.deviceID, encryptionPublicKey: member.encryptionPublicKey,
+            signingPublicKey: member.signingPublicKey, addedAt: 0
+        )]
+        connectionState = .current
+        isReady = true
+        hasFinishedStarting = true
+    }
+
     private func startSessionHistoryUITest() {
         let now = Self.currentTimeMilliseconds()
         let session = SessionRecord(
@@ -881,7 +1189,7 @@ final class AppModel: ObservableObject {
             signingPrivateKey: Data(repeating: 2, count: 32),
             group: DeviceGroup(groupID: "ui-test-group", keys: [:])
         )
-        let current = Vault(version: 3, identity: identity, sessions: uiTestSessions)
+        let current = Vault(version: 4, identity: identity, sessions: uiTestSessions)
         vault = current
         publish(current)
         if ProcessInfo.processInfo.arguments.contains("-ui-test-session-sync-error") {

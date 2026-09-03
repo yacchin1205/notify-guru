@@ -69,7 +69,10 @@ enum CryptoEngine {
         guard fields.count == 3, fields[0] == "notify.guru/group-key/v2", fields[1] == record.publicKey else {
             throw ProtocolError.crypto("key package plaintext has invalid fields")
         }
-        let key = GroupKey(timestamp: record.timestamp, publicKey: fields[1], privateKey: try Base64URL.decode(fields[2]))
+        let key = GroupKey(
+            timestamp: record.timestamp, publicKey: fields[1], privateKey: try Base64URL.decode(fields[2]),
+            transitionHash: record.transitionHash
+        )
         let parsed = try P256.KeyAgreement.PrivateKey(rawRepresentation: key.privateKey)
         guard Base64URL.encode(parsed.publicKey.x963Representation) == key.publicKey else {
             throw ProtocolError.crypto("group private and public keys do not match")
@@ -85,12 +88,83 @@ enum CryptoEngine {
         return symmetricData(secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(), sharedInfo: info, outputByteCount: 32))
     }
 
-    static func pairingProof(authSecret: String, protocolVersion: Int, sessionID: String, pairingID: String, groupID: String, timestamp: Int64, groupPublicKey: String) throws -> String {
-        let transcript = "v\(protocolVersion)\n\(sessionID)\n\(pairingID)\n\(groupID)\n\(timestamp)\n\(groupPublicKey)"
+    static func pairingProof(authSecret: String, protocolVersion: Int, sessionID: String, pairingID: String, groupID: String, timestamp: Int64, groupPublicKey: String, transitionHash: String?) throws -> String {
+        var fields = ["v\(protocolVersion)", sessionID, pairingID, groupID, String(timestamp), groupPublicKey]
+        if protocolVersion == 4 {
+            guard let transitionHash else { throw ProtocolError.crypto("version 4 pairing has no transition hash") }
+            fields.append(transitionHash)
+        }
+        let transcript = fields.joined(separator: "\n")
         let authentication = HMAC<SHA256>.authenticationCode(
             for: Data(transcript.utf8), using: SymmetricKey(data: try Base64URL.decode(authSecret))
         )
         return Base64URL.encode(Data(authentication))
+    }
+
+    static func sessionDescriptorTranscript(
+        sessionID: String, groupID: String, protocolVersion: Int, creatorPublicKey: String,
+        keyTimestamp: Int64, transitionHash: String, actorDeviceID: String
+    ) -> String {
+        [
+            "notify.guru/session-descriptor/v1", sessionID, groupID, String(protocolVersion), creatorPublicKey,
+            String(keyTimestamp), transitionHash, actorDeviceID,
+        ].joined(separator: "\n")
+    }
+
+    static func createSessionDescriptor(
+        identity: DeviceIdentity, key: GroupKey, sessionID: String, groupID: String, creatorPublicKey: String
+    ) throws -> SignedSessionDescriptor {
+        guard let transitionHash = key.transitionHash else { throw ProtocolError.crypto("group key has no transition hash") }
+        let transcript = sessionDescriptorTranscript(
+            sessionID: sessionID, groupID: groupID, protocolVersion: 4, creatorPublicKey: creatorPublicKey,
+            keyTimestamp: key.timestamp, transitionHash: transitionHash, actorDeviceID: identity.deviceID
+        )
+        let continuityKey = try P256.Signing.PrivateKey(rawRepresentation: key.privateKey)
+        return SignedSessionDescriptor(
+            sessionID: sessionID, groupID: groupID, protocolVersion: 4, creatorPublicKey: creatorPublicKey,
+            keyTimestamp: key.timestamp, transitionHash: transitionHash, actorDeviceID: identity.deviceID,
+            actorSignature: try signDevice(identity: identity, transcript: transcript),
+            continuitySignature: Base64URL.encode(try continuityKey.signature(for: Data(transcript.utf8)).rawRepresentation)
+        )
+    }
+
+    static func verifySessionDescriptor(
+        _ remote: GroupSessionResult, groupID: String, transitions: [GroupKeyRecord]
+    ) throws -> Bool {
+        guard remote.protocolVersion == 4, remote.groupID == groupID, let keyTimestamp = remote.keyTimestamp,
+              let transitionHash = remote.transitionHash, let actorDeviceID = remote.actorDeviceID,
+              let actorSignature = remote.actorSignature, let continuitySignature = remote.continuitySignature,
+              let transition = transitions.first(where: {
+                  $0.timestamp == keyTimestamp && $0.transitionHash == transitionHash
+              }), let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }) else { return false }
+        let transcript = sessionDescriptorTranscript(
+            sessionID: remote.sessionID, groupID: groupID, protocolVersion: 4,
+            creatorPublicKey: remote.creatorPublicKey, keyTimestamp: keyTimestamp,
+            transitionHash: transitionHash, actorDeviceID: actorDeviceID
+        )
+        return try verifySignature(publicKey: actor.signingPublicKey, signature: actorSignature, transcript: transcript)
+            && verifySignature(publicKey: transition.publicKey, signature: continuitySignature, transcript: transcript)
+    }
+
+    static func authenticateInheritedSession(
+        _ remote: GroupSessionResult, groupID: String, transitions: [GroupKeyRecord]
+    ) throws {
+        guard remote.protocolVersion == 4 else {
+            throw ProtocolError.crypto("relay supplied an unauthenticated session descriptor")
+        }
+        guard try verifySessionDescriptor(remote, groupID: groupID, transitions: transitions) else {
+            throw ProtocolError.crypto("relay supplied an unauthenticated session descriptor")
+        }
+    }
+
+    static func authenticatedInheritedSessions(
+        _ sessions: [GroupSessionResult], groupID: String, transitions: [GroupKeyRecord]
+    ) throws -> [GroupSessionResult] {
+        try sessions.compactMap { remote in
+            guard remote.protocolVersion == 4 else { return nil }
+            try authenticateInheritedSession(remote, groupID: groupID, transitions: transitions)
+            return remote
+        }
     }
 
     static func deviceCreateTranscript(signingPublicKey: String, nonce: String) -> String {
@@ -152,6 +226,204 @@ enum CryptoEngine {
         ["notify.guru/group-device-remove/v1", groupID, actorDeviceID, deviceID].joined(separator: "\n")
     }
 
+    static func groupAbandonTranscript(groupID: String, actorDeviceID: String, headTransitionHash: String) -> String {
+        ["notify.guru/group-abandon/v1", groupID, actorDeviceID, headTransitionHash].joined(separator: "\n")
+    }
+
+    static func createGroupTransition(
+        groupID: String,
+        identity: DeviceIdentity,
+        groupKey: GroupKey,
+        previous: GroupKeyRecord?,
+        members: [TransitionMember],
+        packages: [KeyPackage],
+        recreated: Bool,
+        now: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+    ) throws -> GroupKeyRecord {
+        let digests = try packages.map {
+            TransitionPackageDigest(deviceID: $0.deviceID, sha256: try groupKeyPackageDigest($0))
+        }
+        let unsigned = GroupKeyRecord(
+            transitionID: try randomID(), previousHash: previous?.transitionHash ?? String(repeating: "0", count: 64),
+            transitionHash: "", timestamp: max(now, (previous?.timestamp ?? 0) + 1),
+            actorDeviceID: identity.deviceID, publicKey: groupKey.publicKey, recreated: recreated,
+            members: members, packageDigests: digests, actorSignature: "", continuitySignature: ""
+        )
+        let transcript = groupTransitionTranscript(groupID: groupID, transition: unsigned)
+        let actorSignature = try signDevice(identity: identity, transcript: transcript)
+        let continuityKey: GroupKey
+        if let previous {
+            guard let value = identity.group?.keys[String(previous.timestamp)], value.publicKey == previous.publicKey else {
+                throw ProtocolError.crypto("previous group private key is unavailable")
+            }
+            continuityKey = value
+        } else {
+            continuityKey = groupKey
+        }
+        let signingKey = try P256.Signing.PrivateKey(rawRepresentation: continuityKey.privateKey)
+        let continuitySignature = Base64URL.encode(try signingKey.signature(for: Data(transcript.utf8)).rawRepresentation)
+        let hash = groupTransitionHash(
+            groupID: groupID, transition: unsigned,
+            actorSignature: actorSignature, continuitySignature: continuitySignature
+        )
+        return GroupKeyRecord(
+            transitionID: unsigned.transitionID, previousHash: unsigned.previousHash, transitionHash: hash,
+            timestamp: unsigned.timestamp, actorDeviceID: unsigned.actorDeviceID, publicKey: unsigned.publicKey,
+            recreated: unsigned.recreated, members: members, packageDigests: digests,
+            actorSignature: actorSignature, continuitySignature: continuitySignature
+        )
+    }
+
+    static func groupTransitionTranscript(groupID: String, transition: GroupKeyRecord) -> String {
+        let members = transition.members.sorted { canonicalLess($0.deviceID, $1.deviceID) }
+        let digests = transition.packageDigests.sorted { canonicalLess($0.deviceID, $1.deviceID) }
+        var lines = [
+            "notify.guru/group-transition/v1", groupID, transition.transitionID, transition.previousHash,
+            String(transition.timestamp), transition.actorDeviceID, transition.publicKey,
+            transition.recreated ? "1" : "0", String(members.count),
+        ]
+        for member in members {
+            lines.append(contentsOf: [member.deviceID, member.signingPublicKey, member.encryptionPublicKey])
+        }
+        lines.append(String(digests.count))
+        for digest in digests { lines.append(contentsOf: [digest.deviceID, digest.sha256]) }
+        return lines.joined(separator: "\n")
+    }
+
+    static func groupTransitionHash(
+        groupID: String, transition: GroupKeyRecord, actorSignature: String, continuitySignature: String
+    ) -> String {
+        hashText([
+            "notify.guru/group-transition-hash/v2", groupTransitionTranscript(groupID: groupID, transition: transition),
+        ].joined(separator: "\n"))
+    }
+
+    static func validateGroupTransitions(
+        groupID: String, transitions: [GroupKeyRecord], trustedHash: String
+    ) throws -> GroupKeyRecord {
+        guard !transitions.isEmpty else { throw ProtocolError.crypto("group transition chain is empty") }
+        var previous: GroupKeyRecord?
+        var trustedSeen = false
+        for transition in transitions {
+            guard transition.previousHash == (previous?.transitionHash ?? String(repeating: "0", count: 64)) else {
+                throw ProtocolError.crypto("group transition chain is not contiguous")
+            }
+            if let previous, transition.timestamp <= previous.timestamp {
+                throw ProtocolError.crypto("group transition timestamp did not advance")
+            }
+            let expectedHash = groupTransitionHash(
+                groupID: groupID, transition: transition,
+                actorSignature: transition.actorSignature, continuitySignature: transition.continuitySignature
+            )
+            guard expectedHash == transition.transitionHash else {
+                throw ProtocolError.crypto("group transition hash is invalid")
+            }
+            let authorizedMembers = previous?.members ?? transition.members
+            guard let actor = authorizedMembers.first(where: { $0.deviceID == transition.actorDeviceID }) else {
+                throw ProtocolError.crypto("group transition actor is not authorized")
+            }
+            let transcript = groupTransitionTranscript(groupID: groupID, transition: transition)
+            guard try verifySignature(publicKey: actor.signingPublicKey, signature: transition.actorSignature, transcript: transcript) else {
+                throw ProtocolError.crypto("group transition actor signature is invalid")
+            }
+            guard try verifySignature(
+                publicKey: previous?.publicKey ?? transition.publicKey,
+                signature: transition.continuitySignature,
+                transcript: transcript
+            ) else { throw ProtocolError.crypto("group transition continuity signature is invalid") }
+            let memberIDs = transition.members.map(\.deviceID)
+            let packageIDs = transition.packageDigests.map(\.deviceID)
+            guard Set(memberIDs).count == memberIDs.count,
+                  Set(packageIDs).count == packageIDs.count,
+                  Set(memberIDs) == Set(packageIDs) else {
+                throw ProtocolError.crypto("group transition package set is invalid")
+            }
+            if previous == nil, !transition.recreated {
+                throw ProtocolError.crypto("genesis transition must create a fresh key")
+            }
+            if let previous {
+                let nextMembers = Set(memberIDs)
+                let removed = previous.members.filter { !nextMembers.contains($0.deviceID) }
+                let previousByID = Dictionary(uniqueKeysWithValues: previous.members.map { ($0.deviceID, $0) })
+                for member in transition.members {
+                    if let before = previousByID[member.deviceID], before != member {
+                        throw ProtocolError.crypto("retained group member descriptor changed")
+                    }
+                }
+                let actorRemoved = removed.contains { $0.deviceID == transition.actorDeviceID }
+                if actorRemoved,
+                   (removed.count != 1 || transition.recreated || transition.publicKey != previous.publicKey
+                    || transition.members.contains { previousByID[$0.deviceID] == nil }) {
+                    throw ProtocolError.crypto("self-removal must be a same-key marker removing only its actor")
+                }
+                if !removed.isEmpty, !actorRemoved,
+                   (!transition.recreated || transition.publicKey == previous.publicKey) {
+                    throw ProtocolError.crypto("removing another device must create a fresh group key")
+                }
+                if let previousIndex = transitions.firstIndex(where: { $0.transitionHash == previous.previousHash }),
+                   !previous.recreated {
+                    let beforePrevious = transitions[previousIndex]
+                    let previousIDs = Set(previous.members.map(\.deviceID))
+                    let previousWasMarker = beforePrevious.members.contains { !previousIDs.contains($0.deviceID) }
+                    if previousWasMarker,
+                       (!transition.recreated || transition.publicKey == previous.publicKey
+                        || Set(memberIDs) != previousIDs) {
+                        throw ProtocolError.crypto("removal marker must be followed by a fresh key for the same members")
+                    }
+                }
+            }
+            if transition.transitionHash == trustedHash { trustedSeen = true }
+            previous = transition
+        }
+        guard trustedSeen, let head = previous else {
+            throw ProtocolError.crypto("previously trusted group transition is missing")
+        }
+        return head
+    }
+
+    static func verifyKeyPackageDigest(_ package: KeyPackage, transition: GroupKeyRecord) throws {
+        guard let expected = transition.packageDigests.first(where: { $0.deviceID == package.deviceID }),
+              expected.sha256 == (try groupKeyPackageDigest(package)) else {
+            throw ProtocolError.crypto("group key package digest is invalid")
+        }
+    }
+
+    static func groupKeyPackageDigest(_ package: KeyPackage) throws -> String {
+        hashText([
+            "notify.guru/group-key-package/v1", package.deviceID, package.ephemeralPublicKey,
+            package.nonce, package.ciphertext,
+        ].joined(separator: "\n"))
+    }
+
+    static func deviceRequestBindingHash(
+        requestID: String, deviceID: String, signingPublicKey: String,
+        accessHash: String, encryptionPublicKey: String, protocolVersion: Int
+    ) -> String {
+        hashText([
+            "notify.guru/device-request-binding/v1", requestID, deviceID, signingPublicKey,
+            accessHash, encryptionPublicKey, String(protocolVersion),
+        ].joined(separator: "\n"))
+    }
+
+    static func deviceApprovalProof(
+        authSecret: String, requestID: String, groupID: String, transitionHash: String
+    ) throws -> String {
+        let transcript = ["notify.guru/device-approval/v1", requestID, groupID, transitionHash].joined(separator: "\n")
+        return Base64URL.encode(Data(HMAC<SHA256>.authenticationCode(
+            for: Data(transcript.utf8), using: SymmetricKey(data: try Base64URL.decode(authSecret))
+        )))
+    }
+
+    static func verifyDeviceApprovalProof(
+        authSecret: String, requestID: String, groupID: String, transitionHash: String, proof: String
+    ) throws -> Bool {
+        let transcript = ["notify.guru/device-approval/v1", requestID, groupID, transitionHash].joined(separator: "\n")
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            try Base64URL.decode(proof), authenticating: Data(transcript.utf8),
+            using: SymmetricKey(data: try Base64URL.decode(authSecret))
+        )
+    }
+
     static func pushTranscript(deviceID: String, token: String, environment: PushEnvironment) -> String {
         ["notify.guru/device-push/v1", deviceID, token, environment.rawValue].joined(separator: "\n")
     }
@@ -163,6 +435,20 @@ enum CryptoEngine {
 
     static func hashToken(_ token: String) -> String {
         SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func verifySignature(publicKey: String, signature: String, transcript: String) throws -> Bool {
+        let key = try P256.Signing.PublicKey(x963Representation: Base64URL.decode(publicKey))
+        let value = try P256.Signing.ECDSASignature(rawRepresentation: Base64URL.decode(signature))
+        return key.isValidSignature(value, for: Data(transcript.utf8))
+    }
+
+    private static func hashText(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func canonicalLess(_ left: String, _ right: String) -> Bool {
+        left.utf8.lexicographicallyPrecedes(right.utf8)
     }
 
     static func decryptEvent(session: SessionRecord, envelope: EventEnvelope) throws -> SessionEvent {

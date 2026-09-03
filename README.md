@@ -32,7 +32,7 @@ The terminal QR code depends on the cell geometry of a terminal, so it is drawn 
 
 Session cards use a randomly selected pastel color by default. Pass `--color '#a1b2c3'` to choose an exact color at startup.
 
-The PWA and iOS app prepare a single-device cryptographic group automatically. To receive the same notifications on another device, open device management, create a 10-minute invitation, scan it on the other device, compare the six-digit code, and approve it on the inviting device. Invitation QR codes and links disappear as soon as approval is pending. A device can stop sharing only while two or more devices are connected; it then returns automatically to single-device use. Different people should join the Agent session as separate device groups instead of sharing one group.
+The PWA and iOS app prepare a single-device cryptographic group automatically. To receive the same notifications on another device, open device management, create a 10-minute invitation, and approve it on a device already in the group. The invitation authenticates the exact device request and the accepted signed group transition without revealing its approval secret to the relay. Invitation QR codes and links disappear as soon as approval is pending. A device can stop sharing only while two or more devices are connected; it then returns automatically to single-device use. Different people should join the Agent session as separate device groups instead of sharing one group.
 
 Available commands:
 
@@ -109,7 +109,7 @@ The image URL is reachable only from the same machine as the `notifyg` process. 
 - The relay can observe metadata such as timestamps, identifiers, and ciphertext sizes.
 - Attachment objects in R2 are ciphertext only. They are removed after `notifyg` has advanced past the response and polls again, or when the session expires; an uploaded attachment that is never committed can remain until session expiry.
 - Compromise of the served web application, the browser profile, or the CLI process is outside the end-to-end encryption guarantee.
-- Each app installation or browser profile belongs to at most one device group. Adding or removing a device rotates the group's key generation; removal cannot revoke ciphertext already received by that device.
+- Each app installation or browser profile belongs to at most one device group. Version 4 authenticates its membership and key history as a signed transition chain anchored during pairing. Inherited sessions carry a device-and-group-signed descriptor so the relay cannot substitute the Agent's ECDH public key, and new responses use only the current usable key epoch. Adding a device creates a new transition; removing another device rotates the key immediately. A device leaving by itself signs only its removal marker, after which events pause until a remaining device verifies it and creates the fresh key. Removal cannot revoke ciphertext already received by that device.
 
 See [CONCEPT.md](CONCEPT.md) for the product model and [DESIGN.md](DESIGN.md) for design rationale.
 

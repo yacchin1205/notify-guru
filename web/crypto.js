@@ -84,12 +84,70 @@ export async function deriveSessionKey(groupKey, creatorPublicKey, sessionId, gr
   return hkdfKey(shared, `notify.guru/session/v${protocolVersion}\n${sessionId}\n${groupId}\n${groupKey.timestamp}`);
 }
 
-export async function pairingProof(authSecret, protocolVersion, sessionId, pairingId, groupId, timestamp, groupPublicKey) {
+export async function pairingProof(
+  authSecret, protocolVersion, sessionId, pairingId, groupId, timestamp, groupPublicKey, transitionHash,
+) {
   const key = await crypto.subtle.importKey(
     "raw", decode(authSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
   );
-  const transcript = `v${protocolVersion}\n${sessionId}\n${pairingId}\n${groupId}\n${timestamp}\n${groupPublicKey}`;
+  const transcript = [
+    `v${protocolVersion}`, sessionId, pairingId, groupId, String(timestamp), groupPublicKey,
+    ...(protocolVersion === 4 ? [transitionHash] : []),
+  ].join("\n");
   return encode(await crypto.subtle.sign("HMAC", key, encoder.encode(transcript)));
+}
+
+export function sessionDescriptorTranscript(descriptor) {
+  return [
+    "notify.guru/session-descriptor/v1", descriptor.sessionId, descriptor.groupId,
+    String(descriptor.protocolVersion), descriptor.creatorPublicKey, String(descriptor.keyTimestamp),
+    descriptor.transitionHash, descriptor.actorDeviceId,
+  ].join("\n");
+}
+
+export async function createSessionDescriptor(identity, groupKey, sessionId, groupId, creatorPublicKey) {
+  if (typeof groupKey.transitionHash !== "string" || !/^[a-f0-9]{64}$/.test(groupKey.transitionHash)) {
+    throw new Error("Group key has no authenticated transition hash");
+  }
+  const content = {
+    sessionId, groupId, protocolVersion: 4, creatorPublicKey,
+    keyTimestamp: groupKey.timestamp, transitionHash: groupKey.transitionHash,
+    actorDeviceId: identity.deviceId,
+  };
+  const transcript = sessionDescriptorTranscript(content);
+  return {
+    ...content,
+    actorSignature: await signDevice(identity, transcript),
+    continuitySignature: await signGroupKey(groupKey, transcript),
+  };
+}
+
+export async function verifySessionDescriptor(descriptor, groupId, transitions) {
+  if (descriptor.groupId !== groupId || descriptor.protocolVersion !== 4) return false;
+  const transition = transitions.find((item) => item.timestamp === descriptor.keyTimestamp
+    && item.transitionHash === descriptor.transitionHash);
+  const actor = transition?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
+  if (transition === undefined || actor === undefined) return false;
+  const transcript = sessionDescriptorTranscript(descriptor);
+  return await verifySignature(actor.signingPublicKey, descriptor.actorSignature, transcript)
+    && await verifySignature(transition.publicKey, descriptor.continuitySignature, transcript);
+}
+
+export async function authenticateInheritedSession(descriptor, groupId, transitions) {
+  if (descriptor.protocolVersion !== 4
+    || !await verifySessionDescriptor(descriptor, groupId, transitions)) {
+    throw new Error("Relay supplied an unauthenticated session descriptor");
+  }
+}
+
+export async function authenticatedInheritedSessions(sessions, groupId, transitions) {
+  const authenticated = [];
+  for (const descriptor of sessions) {
+    if (descriptor.protocolVersion !== 4) continue;
+    await authenticateInheritedSession(descriptor, groupId, transitions);
+    authenticated.push(descriptor);
+  }
+  return authenticated;
 }
 
 export function deviceCreateTranscript(signingPublicKey, nonce) {
@@ -146,6 +204,174 @@ export function groupDeviceRemoveTranscript(groupId, actorDeviceId, deviceId) {
 
 export async function signDevice(identity, transcript) {
   return sign(identity.signingKeyPair.privateKey, transcript);
+}
+
+export async function createGroupTransition(groupId, identity, groupKey, previous, members, packages, recreated) {
+  const packageDigests = [];
+  for (const keyPackage of packages) {
+    packageDigests.push({ deviceId: keyPackage.deviceId, sha256: await groupKeyPackageDigest(keyPackage) });
+  }
+  const transition = {
+    transitionId: randomId(),
+    previousHash: previous?.transitionHash ?? "0".repeat(64),
+    timestamp: Math.max(Date.now(), (previous?.timestamp ?? 0) + 1),
+    actorDeviceId: identity.deviceId,
+    publicKey: groupKey.publicKey,
+    recreated,
+    members: members.map((member) => ({
+      deviceId: member.deviceId,
+      signingPublicKey: member.signingPublicKey,
+      encryptionPublicKey: member.encryptionPublicKey,
+    })),
+    packageDigests,
+  };
+  const transcript = groupTransitionTranscript(groupId, transition);
+  const actorSignature = await signDevice(identity, transcript);
+  const continuityKey = previous === null
+    ? groupKey
+    : identity.group.keys[String(previous.timestamp)];
+  if (continuityKey === undefined || continuityKey.publicKey !== (previous?.publicKey ?? groupKey.publicKey)) {
+    throw new Error("Previous group private key is unavailable");
+  }
+  const continuitySignature = await signGroupKey(continuityKey, transcript);
+  const transitionHash = await groupTransitionHash(groupId, transition, actorSignature, continuitySignature);
+  return { ...transition, actorSignature, continuitySignature, transitionHash };
+}
+
+export function groupTransitionTranscript(groupId, transition) {
+  const members = [...transition.members].sort((left, right) => canonicalCompare(left.deviceId, right.deviceId));
+  const packages = [...transition.packageDigests].sort((left, right) => canonicalCompare(left.deviceId, right.deviceId));
+  const lines = [
+    "notify.guru/group-transition/v1", groupId, transition.transitionId, transition.previousHash,
+    String(transition.timestamp), transition.actorDeviceId, transition.publicKey,
+    transition.recreated ? "1" : "0", String(members.length),
+  ];
+  for (const member of members) lines.push(member.deviceId, member.signingPublicKey, member.encryptionPublicKey);
+  lines.push(String(packages.length));
+  for (const item of packages) lines.push(item.deviceId, item.sha256);
+  return lines.join("\n");
+}
+
+export async function groupTransitionHash(groupId, transition, actorSignature, continuitySignature) {
+  return sha256Text([
+    "notify.guru/group-transition-hash/v2",
+    groupTransitionTranscript(groupId, transition),
+  ].join("\n"));
+}
+
+export async function validateGroupTransitions(groupId, transitions, trustedHash) {
+  if (!Array.isArray(transitions) || transitions.length === 0) throw new Error("Group transition chain is empty");
+  let previous = null;
+  let trustedSeen = trustedHash === undefined;
+  for (const transition of transitions) {
+    const expectedPrevious = previous?.transitionHash ?? "0".repeat(64);
+    if (transition.previousHash !== expectedPrevious) throw new Error("Group transition chain is not contiguous");
+    if (previous !== null && transition.timestamp <= previous.timestamp) throw new Error("Group transition timestamp did not advance");
+    const hash = await groupTransitionHash(
+      groupId, transition, transition.actorSignature, transition.continuitySignature,
+    );
+    if (hash !== transition.transitionHash) throw new Error("Group transition hash is invalid");
+    const actorMembers = previous?.members ?? transition.members;
+    const actor = actorMembers.find((member) => member.deviceId === transition.actorDeviceId);
+    if (actor === undefined) throw new Error("Group transition actor is not authorized");
+    const transcript = groupTransitionTranscript(groupId, transition);
+    if (!await verifySignature(actor.signingPublicKey, transition.actorSignature, transcript)) {
+      throw new Error("Group transition actor signature is invalid");
+    }
+    if (!await verifySignature(previous?.publicKey ?? transition.publicKey, transition.continuitySignature, transcript)) {
+      throw new Error("Group transition continuity signature is invalid");
+    }
+    const memberIds = transition.members.map((member) => member.deviceId);
+    const packageIds = transition.packageDigests.map((item) => item.deviceId);
+    if (new Set(memberIds).size !== memberIds.length || new Set(packageIds).size !== packageIds.length
+      || transition.packageDigests.length !== transition.members.length
+      || transition.packageDigests.some((item) => !transition.members.some((member) => member.deviceId === item.deviceId))) {
+      throw new Error("Group transition package set is invalid");
+    }
+    if (previous === null && !transition.recreated) throw new Error("Genesis transition must create a fresh key");
+    if (previous !== null) {
+      const nextMembers = new Set(memberIds);
+      const removed = previous.members.filter((member) => !nextMembers.has(member.deviceId));
+      const previousById = new Map(previous.members.map((member) => [member.deviceId, member]));
+      for (const member of transition.members) {
+        const before = previousById.get(member.deviceId);
+        if (before !== undefined && (before.signingPublicKey !== member.signingPublicKey
+          || before.encryptionPublicKey !== member.encryptionPublicKey)) {
+          throw new Error("A retained group member descriptor changed");
+        }
+      }
+      const actorRemoved = removed.some((member) => member.deviceId === transition.actorDeviceId);
+      if (actorRemoved && (removed.length !== 1 || transition.recreated
+        || transition.publicKey !== previous.publicKey
+        || transition.members.some((member) => !previousById.has(member.deviceId)))) {
+        throw new Error("A self-removal must be a same-key marker removing only its actor");
+      }
+      if (removed.length > 0 && !actorRemoved
+        && (!transition.recreated || transition.publicKey === previous.publicKey)) {
+        throw new Error("Removing another device must create a fresh group key");
+      }
+      const previousMembers = new Set(previous.members.map((member) => member.deviceId));
+      const previousWasMarker = previous.previousHash !== "0".repeat(64)
+        && !previous.recreated
+        && transitions.find((item) => item.transitionHash === previous.previousHash)?.members
+          .some((member) => !previousMembers.has(member.deviceId));
+      if (previousWasMarker && (!transition.recreated || transition.publicKey === previous.publicKey
+        || memberIds.length !== previous.members.length
+        || memberIds.some((id) => !previousMembers.has(id))
+        || transition.members.some((member) => {
+          const before = previous.members.find((item) => item.deviceId === member.deviceId);
+          return before === undefined || before.signingPublicKey !== member.signingPublicKey
+            || before.encryptionPublicKey !== member.encryptionPublicKey;
+        }))) {
+        throw new Error("A removal marker must be followed by a fresh key for the same members");
+      }
+    }
+    if (transition.transitionHash === trustedHash) trustedSeen = true;
+    previous = transition;
+  }
+  if (!trustedSeen) throw new Error("Previously trusted group transition is missing");
+  return previous;
+}
+
+export async function verifyKeyPackageDigest(keyPackage, transition) {
+  const expected = transition.packageDigests.find((item) => item.deviceId === keyPackage.deviceId);
+  if (expected === undefined || expected.sha256 !== await groupKeyPackageDigest(keyPackage)) {
+    throw new Error("Group key package digest is invalid");
+  }
+}
+
+export async function deviceRequestBindingHash(request) {
+  return sha256Text([
+    "notify.guru/device-request-binding/v1",
+    request.requestId,
+    request.deviceId,
+    request.signingPublicKey,
+    request.accessHash,
+    request.encryptionPublicKey,
+    String(request.protocolVersion),
+  ].join("\n"));
+}
+
+export async function deviceApprovalProof(authSecret, requestId, groupId, transitionHash) {
+  const key = await crypto.subtle.importKey(
+    "raw", decode(authSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const transcript = ["notify.guru/device-approval/v1", requestId, groupId, transitionHash].join("\n");
+  return encode(await crypto.subtle.sign("HMAC", key, encoder.encode(transcript)));
+}
+
+export async function verifyDeviceApprovalProof(authSecret, requestId, groupId, transitionHash, proof) {
+  return timingSafeEqual(
+    decode(await deviceApprovalProof(authSecret, requestId, groupId, transitionHash)),
+    decode(proof),
+  );
+}
+
+export async function groupKeyPackageDigest(keyPackage) {
+  return sha256Text([
+    "notify.guru/group-key-package/v1", keyPackage.deviceId, keyPackage.ephemeralPublicKey,
+    keyPackage.nonce, keyPackage.ciphertext,
+  ].join("\n"));
 }
 
 export async function encryptResponse(key, protocolVersion, sessionId, groupId, timestamp, responseId, response) {
@@ -227,6 +453,32 @@ async function groupPrivateKey(groupKey, algorithm, usages) {
     d: groupKey.privateKey, ext: false,
   };
   return crypto.subtle.importKey("jwk", jwk, { name: algorithm, namedCurve: "P-256" }, false, usages);
+}
+
+async function signGroupKey(groupKey, transcript) {
+  return sign(await groupPrivateKey(groupKey, "ECDSA", ["sign"]), transcript);
+}
+
+async function verifySignature(publicKey, signature, transcript) {
+  const key = await importPublic(publicKey, "ECDSA");
+  return crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, key, decode(signature), encoder.encode(transcript),
+  );
+}
+
+async function sha256Text(value) {
+  return sha256BytesHex(encoder.encode(value));
+}
+
+function timingSafeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function canonicalCompare(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 async function importPublic(value, algorithm) {

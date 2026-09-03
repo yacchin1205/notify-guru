@@ -106,6 +106,7 @@ private struct MacStartupErrorView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, minHeight: 220)
     }
 }
 
