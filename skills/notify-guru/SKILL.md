@@ -244,8 +244,11 @@ the mechanism. The accurate picture:
 - Version 4 session inheritance is also authenticated: the joining device signs
   the session ID, group ID, creator ECDH public key, and transition anchor with
   both its device identity and the current group continuity key. Other devices
-  reject an unsigned or altered descriptor. New responses use only the current
-  usable group-key epoch; historical epochs are not accepted for new sends.
+  reject an unsigned or altered descriptor, validate that its creator key is an
+  actual P-256 curve point, require its signer to remain in the
+  latest authenticated group head with the same identity keys, and retire a
+  locally stored session when that signer is removed. New responses use only the
+  current usable group-key epoch; historical epochs are not accepted for new sends.
 - Transition hashes cover the canonical transition transcript, while ECDSA
   signatures are verified separately. Equivalent ECDSA signature encodings
   therefore cannot create distinct transition heads.

@@ -25,6 +25,7 @@ import {
   groupTransitionHash,
   groupTransitionTranscript,
   sessionDescriptorTranscript,
+  validateP256KeyAgreementPublicKey,
   verifyP256Signature,
 } from "./protocol";
 
@@ -212,11 +213,21 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     if (descriptor.groupId !== groupId || descriptor.protocolVersion !== 4) {
       throw new HttpError(400, "invalid_session_descriptor", "Session descriptor targets another group or protocol");
     }
+    if (!(await validateP256KeyAgreementPublicKey(descriptor.creatorPublicKey))) {
+      throw new HttpError(400, "invalid_session_descriptor", "Session descriptor creator key is invalid");
+    }
     const transition = this.getTransitionHistory().find((item) =>
       item.timestamp === descriptor.keyTimestamp && item.transitionHash === descriptor.transitionHash);
     const actor = transition?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
-    if (transition === undefined || actor === undefined) {
-      throw new HttpError(400, "invalid_session_descriptor", "Session descriptor is not anchored to an authorized transition");
+    const currentActor = this.member(descriptor.actorDeviceId);
+    if (transition === undefined || actor === undefined || currentActor === null
+      || currentActor.signing_public_key !== actor.signingPublicKey
+      || currentActor.encryption_public_key !== actor.encryptionPublicKey) {
+      throw new HttpError(
+        400,
+        "invalid_session_descriptor",
+        "Session descriptor is not anchored to a currently authorized device",
+      );
     }
     const transcript = sessionDescriptorTranscript(descriptor);
     if (!(await verifyP256Signature(actor.signingPublicKey, descriptor.actorSignature, transcript))
@@ -646,13 +657,15 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
   }
 
   private sessionsJSON(protocolVersion: number, groupId: string): Array<Record<string, unknown>> {
+    const currentMemberIds = new Set(this.members().map((member) => member.device_id));
     return Array.from(this.state.storage.sql.exec<SessionRow>(
       `SELECT session_id, creator_public_key, expires_at, protocol_version, key_timestamp, transition_hash,
               actor_device_id, actor_signature, continuity_signature
        FROM group_sessions_v3 WHERE expires_at > ? AND protocol_version = ? ORDER BY expires_at`,
       Date.now(),
       protocolVersion,
-    )).map((row) => ({
+    )).filter((row) => protocolVersion !== 4
+      || (row.actor_device_id !== null && currentMemberIds.has(row.actor_device_id))).map((row) => ({
       sessionId: row.session_id,
       creatorPublicKey: row.creator_public_key,
       expiresAt: row.expires_at,

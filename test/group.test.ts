@@ -285,6 +285,12 @@ describe("devices and persistent groups", () => {
       },
     );
     expect(approved.status).toBe(200);
+    const removedActorSession = await createJoinedSession(initial.group, second, {
+      timestamp: addition.transition.timestamp,
+      publicKey: addition.transition.publicKey,
+      transitionHash: addition.transition.transitionHash,
+      continuityKey: addition.continuityKey,
+    }, 4);
 
     const invalidMarker = await createSignedV4Transition(
       initial.group.id, second, addition.transition, [first], addition.continuityKey, false,
@@ -323,6 +329,15 @@ describe("devices and persistent groups", () => {
       status: 201,
       json: { timestamp: recovery.transition.timestamp, transitionHash: recovery.transition.transitionHash },
     });
+    const recoveredState = await api(
+      `/api/groups/${initial.group.id}/state?deviceId=${first.id}&protocolVersion=4`,
+      { token: first.token },
+    );
+    expect(recoveredState.status).toBe(200);
+    expect(recoveredState.json.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual([session.id]);
+    expect(recoveredState.json.sessions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: removedActorSession.id }),
+    ]));
     expect((await postEvent(session, recovery.transition.timestamp)).status).toBe(201);
     const responseAt = (keyTimestamp: number) => api(`/api/sessions/${session.id}/responses`, {
       method: "POST", token: first.token,

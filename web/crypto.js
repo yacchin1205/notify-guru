@@ -109,6 +109,7 @@ export async function createSessionDescriptor(identity, groupKey, sessionId, gro
   if (typeof groupKey.transitionHash !== "string" || !/^[a-f0-9]{64}$/.test(groupKey.transitionHash)) {
     throw new Error("Group key has no authenticated transition hash");
   }
+  await importPublic(creatorPublicKey, "ECDH");
   const content = {
     sessionId, groupId, protocolVersion: 4, creatorPublicKey,
     keyTimestamp: groupKey.timestamp, transitionHash: groupKey.transitionHash,
@@ -124,10 +125,18 @@ export async function createSessionDescriptor(identity, groupKey, sessionId, gro
 
 export async function verifySessionDescriptor(descriptor, groupId, transitions) {
   if (descriptor.groupId !== groupId || descriptor.protocolVersion !== 4) return false;
+  try {
+    await importPublic(descriptor.creatorPublicKey, "ECDH");
+  } catch {
+    return false;
+  }
   const transition = transitions.find((item) => item.timestamp === descriptor.keyTimestamp
     && item.transitionHash === descriptor.transitionHash);
   const actor = transition?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
-  if (transition === undefined || actor === undefined) return false;
+  const currentActor = transitions.at(-1)?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
+  if (transition === undefined || actor === undefined || currentActor === undefined
+    || currentActor.signingPublicKey !== actor.signingPublicKey
+    || currentActor.encryptionPublicKey !== actor.encryptionPublicKey) return false;
   const transcript = sessionDescriptorTranscript(descriptor);
   return await verifySignature(actor.signingPublicKey, descriptor.actorSignature, transcript)
     && await verifySignature(transition.publicKey, descriptor.continuitySignature, transcript);
@@ -144,8 +153,12 @@ export async function authenticatedInheritedSessions(sessions, groupId, transiti
   const authenticated = [];
   for (const descriptor of sessions) {
     if (descriptor.protocolVersion !== 4) continue;
-    await authenticateInheritedSession(descriptor, groupId, transitions);
-    authenticated.push(descriptor);
+    try {
+      if (await verifySessionDescriptor(descriptor, groupId, transitions)) authenticated.push(descriptor);
+    } catch {
+      // A relay-controlled descriptor is rejected per session; it must not keep a
+      // previously stored session active by failing the whole synchronization.
+    }
   }
   return authenticated;
 }

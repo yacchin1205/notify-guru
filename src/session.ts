@@ -18,7 +18,11 @@ import {
   stringField,
 } from "./http";
 import { APNsClient, APNsTransportError, type APNsAlertKind, type APNsEnvironment } from "./apns";
-import { randomIdentifier, type SignedSessionDescriptor } from "./protocol";
+import {
+  randomIdentifier,
+  validateP256KeyAgreementPublicKey,
+  type SignedSessionDescriptor,
+} from "./protocol";
 
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const INITIALIZED_KEY = "initialized";
@@ -272,6 +276,9 @@ export class Session extends DurableObject<SessionEnv> {
     const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
     const managerHash = stringField(body, "managerTokenHash", SHA256_HEX, 64);
     const creatorPublicKey = stringField(body, "creatorPublicKey", BASE64URL, 128);
+    if (!(await validateP256KeyAgreementPublicKey(creatorPublicKey))) {
+      throw new HttpError(400, "invalid_public_key", "Creator public key is not a P-256 key agreement key");
+    }
     const protocolVersion = body.protocolVersion === undefined ? 3 : integerField(body, "protocolVersion");
     if (protocolVersion !== 3 && protocolVersion !== 4) {
       throw new HttpError(400, "unsupported_protocol", "Protocol version is not supported");

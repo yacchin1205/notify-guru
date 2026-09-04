@@ -26,6 +26,8 @@ final class ProtocolTests: XCTestCase {
             4
         )
         XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=2&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(publicKey)&c=ffd6e0"))
+        let invalidCurvePoint = Base64URL.encode(Data(repeating: 0, count: 65))
+        XCTAssertThrowsError(try PairingLink("https://notify.guru/join#v=4&s=session_identifier&p=pairing_identifier&t=\(token)&a=\(secret)&k=\(invalidCurvePoint)&c=ffd6e0"))
     }
 
     func testDeviceRequestLinkAuthenticatesTheRequestAndApproval() throws {
@@ -223,6 +225,11 @@ final class ProtocolTests: XCTestCase {
             identity: identity, key: key, sessionID: "session", groupID: "group",
             creatorPublicKey: draft.publicKey
         )
+        let invalidCurvePoint = Base64URL.encode(Data(repeating: 0, count: 65))
+        XCTAssertThrowsError(try CryptoEngine.createSessionDescriptor(
+            identity: identity, key: key, sessionID: "invalid-key-session", groupID: "group",
+            creatorPublicKey: invalidCurvePoint
+        ))
         let remote = GroupSessionResult(
             protocolVersion: 4, sessionID: descriptor.sessionID, groupID: "group",
             creatorPublicKey: descriptor.creatorPublicKey,
@@ -231,6 +238,16 @@ final class ProtocolTests: XCTestCase {
             continuitySignature: descriptor.continuitySignature
         )
         XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(remote, groupID: "group", transitions: [transition]))
+        let invalidCreator = GroupSessionResult(
+            protocolVersion: 4, sessionID: remote.sessionID, groupID: remote.groupID,
+            creatorPublicKey: invalidCurvePoint, expiresAt: remote.expiresAt,
+            keyTimestamp: remote.keyTimestamp, transitionHash: remote.transitionHash,
+            actorDeviceID: remote.actorDeviceID, actorSignature: remote.actorSignature,
+            continuitySignature: remote.continuitySignature
+        )
+        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(
+            invalidCreator, groupID: "group", transitions: [transition]
+        ))
         XCTAssertNoThrow(try CryptoEngine.authenticateInheritedSession(remote, groupID: "group", transitions: [transition]))
         let tampered = GroupSessionResult(
             protocolVersion: 4, sessionID: remote.sessionID, groupID: remote.groupID,
@@ -272,9 +289,92 @@ final class ProtocolTests: XCTestCase {
             ),
             [remote]
         )
-        XCTAssertThrowsError(try CryptoEngine.authenticatedInheritedSessions(
-            [downgraded, tampered], groupID: "group", transitions: [transition]
+        XCTAssertEqual(
+            try CryptoEngine.authenticatedInheritedSessions(
+                [downgraded, tampered], groupID: "group", transitions: [transition]
+            ),
+            []
+        )
+    }
+
+    func testV4SessionDescriptorRejectsRemovedSigner() throws {
+        var removed = try fixedIdentity()
+        var remaining = try CryptoEngine.createIdentity()
+        remaining.deviceID = "remaining-device"
+        let removedMember = TransitionMember(
+            deviceID: removed.deviceID, signingPublicKey: try CryptoEngine.signingPublicKey(for: removed),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: removed)
+        )
+        let remainingMember = TransitionMember(
+            deviceID: remaining.deviceID, signingPublicKey: try CryptoEngine.signingPublicKey(for: remaining),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: remaining)
+        )
+        let initialDraft = CryptoEngine.createGroupKey()
+        let initialPackages = try [removedMember, remainingMember].map { member in
+            try CryptoEngine.createKeyPackage(
+                groupID: "group", key: initialDraft, deviceID: member.deviceID,
+                encryptionPublicKey: member.encryptionPublicKey
+            )
+        }
+        let initial = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: removed, groupKey: initialDraft, previous: nil,
+            members: [removedMember, remainingMember], packages: initialPackages,
+            recreated: true, now: 10
+        )
+        let initialKey = GroupKey(
+            timestamp: initial.timestamp, publicKey: initialDraft.publicKey,
+            privateKey: initialDraft.privateKey, transitionHash: initial.transitionHash
+        )
+        removed.group = DeviceGroup(groupID: "group", keys: [String(initial.timestamp): initialKey])
+        remaining.group = DeviceGroup(groupID: "group", keys: [String(initial.timestamp): initialKey])
+        let removedDescriptor = try CryptoEngine.createSessionDescriptor(
+            identity: removed, key: initialKey, sessionID: "removed-actor-session",
+            groupID: "group", creatorPublicKey: initialDraft.publicKey
+        )
+        let remainingDescriptor = try CryptoEngine.createSessionDescriptor(
+            identity: remaining, key: initialKey, sessionID: "remaining-actor-session",
+            groupID: "group", creatorPublicKey: initialDraft.publicKey
+        )
+        let currentDraft = CryptoEngine.createGroupKey()
+        let currentPackage = try CryptoEngine.createKeyPackage(
+            groupID: "group", key: currentDraft, deviceID: remainingMember.deviceID,
+            encryptionPublicKey: remainingMember.encryptionPublicKey
+        )
+        let current = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: remaining, groupKey: currentDraft, previous: initial,
+            members: [remainingMember], packages: [currentPackage], recreated: true, now: 11
+        )
+        XCTAssertEqual(
+            try CryptoEngine.validateGroupTransitions(
+                groupID: "group", transitions: [initial, current], trustedHash: initial.transitionHash
+            ),
+            current
+        )
+        func remote(_ descriptor: SignedSessionDescriptor) -> GroupSessionResult {
+            GroupSessionResult(
+                protocolVersion: 4, sessionID: descriptor.sessionID, groupID: descriptor.groupID,
+                creatorPublicKey: descriptor.creatorPublicKey, expiresAt: 100,
+                keyTimestamp: descriptor.keyTimestamp, transitionHash: descriptor.transitionHash,
+                actorDeviceID: descriptor.actorDeviceID, actorSignature: descriptor.actorSignature,
+                continuitySignature: descriptor.continuitySignature
+            )
+        }
+        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(
+            remote(removedDescriptor), groupID: "group", transitions: [initial, current]
         ))
+        XCTAssertThrowsError(try CryptoEngine.authenticateInheritedSession(
+            remote(removedDescriptor), groupID: "group", transitions: [initial, current]
+        ))
+        XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(
+            remote(remainingDescriptor), groupID: "group", transitions: [initial, current]
+        ))
+        XCTAssertEqual(
+            try CryptoEngine.authenticatedInheritedSessions(
+                [remote(removedDescriptor), remote(remainingDescriptor)],
+                groupID: "group", transitions: [initial, current]
+            ),
+            [remote(remainingDescriptor)]
+        )
     }
 
     func testV4TransitionRejectsRecreatedSelfRemoval() throws {
@@ -514,10 +614,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try store.load(), snapshot)
     }
 
-    func testDetachingGroupRemovesOnlyItsV3Sessions() throws {
+    func testDetachingGroupRemovesItsV3AndV4Sessions() throws {
         var identity = try fixedIdentity()
         identity.group = DeviceGroup(groupID: "current-group", keys: [:])
-        let vault = Vault(version: 4, identity: identity, sessions: [session(id: "current", groupID: "current-group"), session(id: "other", groupID: "other-group")])
+        let vault = Vault(version: 4, identity: identity, sessions: [
+            session(id: "current-v3", groupID: "current-group"),
+            session(id: "current-v4", groupID: "current-group", protocolVersion: 4),
+            session(id: "other", groupID: "other-group")
+        ])
         let detached = AppModel.detachingFromDeviceGroup(vault, groupID: "current-group")
         XCTAssertNil(detached.identity.group)
         XCTAssertEqual(detached.sessions.map(\.sessionID), ["other"])
@@ -547,9 +651,13 @@ final class ProtocolTests: XCTestCase {
         )
     }
 
-    private func session(id: String, groupID: String = "group", expiresAt: Int64 = 2_000) -> SessionRecord {
+    private func session(
+        id: String, groupID: String = "group", protocolVersion: Int = 3,
+        expiresAt: Int64 = 2_000
+    ) -> SessionRecord {
         SessionRecord(
-            protocolVersion: 3, sessionID: id, groupID: groupID, creatorPublicKey: "creator-public-key",
+            protocolVersion: protocolVersion, sessionID: id, groupID: groupID,
+            creatorPublicKey: "creator-public-key",
             keys: [:], cursor: 0, title: "Session", status: "Connected", notifications: [],
             request: nil, requestKeyTimestamp: nil, color: nil, updatedAt: nil, expiresAt: expiresAt
         )

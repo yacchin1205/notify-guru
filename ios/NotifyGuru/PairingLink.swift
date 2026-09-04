@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct PairingLink: Equatable {
@@ -49,7 +50,9 @@ struct PairingLink: Equatable {
         guard try Base64URL.decode(authSecret).count == 32 else {
             throw ProtocolError.invalidPairingLink("authentication secret must contain 32 bytes")
         }
-        guard try Base64URL.decode(creatorPublicKey).count == 65 else {
+        guard (try? P256.KeyAgreement.PublicKey(
+            x963Representation: Base64URL.decode(creatorPublicKey)
+        )) != nil else {
             throw ProtocolError.invalidPairingLink("creator public key must be an uncompressed P-256 key")
         }
         let color = fields["c"]!

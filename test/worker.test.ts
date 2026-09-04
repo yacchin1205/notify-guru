@@ -4,6 +4,20 @@ import { afterEach, describe, expect, it } from "vitest";
 afterEach(reset);
 
 describe("session relay", () => {
+  it("rejects a creator key that is not a point on P-256", async () => {
+    const response = await api("/api/sessions", {
+      method: "POST",
+      body: {
+        sessionId: randomId(),
+        managerTokenHash: await hash("manager-token"),
+        creatorPublicKey: "A".repeat(87),
+        pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
+      },
+    });
+    expect(response.status).toBe(400);
+    expect(response.json.error).toBe("invalid_public_key");
+  });
+
   it("rejects unknown protocol fields", async () => {
     const response = await api("/api/sessions", {
       method: "POST",
@@ -106,12 +120,20 @@ async function createSession(): Promise<{ id: string; managerToken: string }> {
     body: {
       sessionId: id,
       managerTokenHash: await hash(managerToken),
-      creatorPublicKey: "A".repeat(87),
+      creatorPublicKey: await creatorPublicKey(),
       pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
     },
   });
   expect(created.status).toBe(201);
   return { id, managerToken };
+}
+
+async function creatorPublicKey(): Promise<string> {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"],
+  );
+  const bytes = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+  return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
 async function api(path: string, options: { method?: string; token?: string; body?: unknown } = {}) {

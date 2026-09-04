@@ -84,6 +84,7 @@ let identity;
 let groupState;
 let managingDevices = false;
 let synchronizing = false;
+let stateActionInProgress = false;
 let requestURL;
 let pendingDeviceRequest = null;
 let sessionRenderSignature = "";
@@ -175,12 +176,15 @@ async function createSoloGroup() {
 }
 
 async function beginDeviceRequest() {
+  return withStateAction(async () => {
   if (pendingDeviceRequest !== null) {
     showDeviceRequest(pendingDeviceRequest);
     return;
   }
   if (identity.group !== null) {
     await syncGroup();
+    await ensureExactGroupKey();
+    await inheritSessions();
     const sessions = (await listSessions()).filter((session) => (session.protocolVersion === 3 || session.protocolVersion === 4) && session.groupId === identity.group.groupId);
     if ((groupState.members.length > 1 || sessions.length > 0)
       && !window.confirm("このデバイスを現在のグループから除外し、表示中のセッションを削除して、別のグループへの追加を続けますか？")) return;
@@ -224,6 +228,7 @@ async function beginDeviceRequest() {
   pendingDeviceRequest = { ...created, authSecret };
   showDeviceRequest(pendingDeviceRequest);
   setDeviceManagement(false);
+  });
 }
 
 function showDeviceRequest(deviceRequest) {
@@ -243,6 +248,7 @@ async function approveScannedRequest(scannedRequest) {
   }
   await syncGroup();
   await ensureExactGroupKey();
+  await inheritSessions();
   const requested = await getDeviceRequestForApproval(identity, scannedRequest.requestId);
   if (await deviceRequestBindingHash(requested) !== scannedRequest.requestHash) {
     throw new Error("追加用リンクと端末要求の内容が一致しません");
@@ -277,6 +283,7 @@ async function approveScannedRequest(scannedRequest) {
   await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
+  await inheritSessions();
   history.replaceState(null, "", "/");
   messageElement.textContent = "デバイスをグループへ追加しました。";
 }
@@ -319,7 +326,7 @@ async function pollDeviceRequest() {
 }
 
 async function syncAll() {
-  if (synchronizing) return;
+  if (synchronizing || stateActionInProgress) return;
   synchronizing = true;
   try {
     await deleteExpiredLocalSessions();
@@ -429,6 +436,7 @@ async function joinFromFragment() {
   if (identity.group === null) await createSoloGroup();
   await syncGroup();
   await ensureExactGroupKey();
+  await inheritSessions();
   const sessionId = parameters.get("s");
   if (await getSession(sessionId) !== undefined) throw new Error("This device group has already joined the session");
   const groupKey = await currentLocalKey();
@@ -461,9 +469,36 @@ async function joinFromFragment() {
 }
 
 async function inheritSessions() {
-  const localSessionIds = new Set((await listSessions()).map((session) => session.sessionId));
-  const candidates = groupState.sessions.filter((remote) => !localSessionIds.has(remote.sessionId));
-  for (const remote of await authenticatedInheritedSessions(candidates, groupState.groupId, groupState.keys)) {
+  const authenticated = await authenticatedInheritedSessions(
+    groupState.sessions, groupState.groupId, groupState.keys,
+  );
+  const authenticatedById = new Map();
+  const duplicateIds = new Set();
+  for (const session of authenticated) {
+    if (authenticatedById.has(session.sessionId)) duplicateIds.add(session.sessionId);
+    else authenticatedById.set(session.sessionId, session);
+  }
+  for (const sessionId of duplicateIds) authenticatedById.delete(sessionId);
+  const localSessions = await listSessions();
+  for (const session of localSessions) {
+    if (session.protocolVersion !== 4 || session.groupId !== groupState.groupId) continue;
+    const remote = authenticatedById.get(session.sessionId);
+    if (remote === undefined || remote.protocolVersion !== session.protocolVersion
+      || remote.groupId !== session.groupId || remote.creatorPublicKey !== session.creatorPublicKey) {
+      await deleteSession(session.sessionId);
+    }
+  }
+  const localSessionIds = new Set(
+    localSessions.filter((session) => {
+      if (session.protocolVersion !== 4 || session.groupId !== groupState.groupId) return true;
+      const remote = authenticatedById.get(session.sessionId);
+      return remote !== undefined && remote.protocolVersion === session.protocolVersion
+        && remote.groupId === session.groupId && remote.creatorPublicKey === session.creatorPublicKey;
+    })
+      .map((session) => session.sessionId),
+  );
+  for (const remote of authenticated.filter((session) => authenticatedById.has(session.sessionId)
+    && !localSessionIds.has(session.sessionId))) {
     await putSession(newSession(remote.protocolVersion, remote.sessionId, groupState.groupId, remote.creatorPublicKey, remote.expiresAt));
   }
 }
@@ -500,6 +535,7 @@ async function dismissRequest(sessionId) {
 }
 
 async function sendRequestResponse(sessionId, type, optionId) {
+  return withStateAction(async () => {
   const session = await getSession(sessionId);
   if (session === undefined || session.request === null) throw new Error("Request disappeared before response");
   const groupKey = await currentLocalKey();
@@ -530,9 +566,11 @@ async function sendRequestResponse(sessionId, type, optionId) {
   session.status = type === "response" ? "応答を送信しました" : "リクエストを閉じました";
   await putSession(session);
   await render();
+  });
 }
 
 async function dismissNotification(sessionId, notificationId) {
+  return withStateAction(async () => {
   const session = await getSession(sessionId);
   if (session === undefined) throw new Error("Session disappeared before notification was dismissed");
   const index = session.notifications.findIndex((notification) => notification.id === notificationId);
@@ -567,9 +605,11 @@ async function dismissNotification(sessionId, notificationId) {
   session.notifications.splice(index, 1);
   await putSession(session);
   await render();
+  });
 }
 
 async function sendFeedback(sessionId, message, imageFile) {
+  return withStateAction(async () => {
   const session = await getSession(sessionId);
   if (session === undefined) throw new Error("Session disappeared before feedback was sent");
   const text = message.trim();
@@ -625,6 +665,17 @@ async function sendFeedback(sessionId, message, imageFile) {
   });
   await putSession(session);
   messageElement.textContent = "メッセージを送信しました。";
+  });
+}
+
+async function withStateAction(action) {
+  if (synchronizing || stateActionInProgress) throw new Error("デバイス状態を同期しています。少し待ってから再試行してください");
+  stateActionInProgress = true;
+  try {
+    return await action();
+  } finally {
+    stateActionInProgress = false;
+  }
 }
 
 async function normalizedJPEG(file) {
@@ -729,6 +780,7 @@ function reconcileActiveItems(session, activeItemIds) {
 }
 
 async function removeGroupDevice(deviceId) {
+  return withStateAction(async () => {
   if (!window.confirm("このデバイスをグループから除外しますか？")) return;
   const remaining = groupState.members.filter((member) => member.deviceId !== deviceId);
   const update = await createMembershipTransition(remaining, true);
@@ -742,10 +794,14 @@ async function removeGroupDevice(deviceId) {
   await putIdentity(identity);
   await syncGroup();
   await ensureExactGroupKey();
+  await inheritSessions();
   await renderGroup();
+  await render();
+  });
 }
 
 async function leaveCurrentGroup() {
+  return withStateAction(async () => {
   if (groupState === undefined || groupState.members.length <= 1) throw new Error("単独利用中のデバイスはグループから除外できません");
   if (!window.confirm("このデバイスをグループから除外しますか？このデバイスに表示されているセッションも削除されます。")) return;
   const groupId = identity.group.groupId;
@@ -758,6 +814,7 @@ async function leaveCurrentGroup() {
   await createSoloGroup();
   setDeviceManagement(false);
   messageElement.textContent = "このデバイスは単独利用に戻りました。";
+  });
 }
 
 async function recoverRemovedDevice() {

@@ -156,7 +156,14 @@ describe("web device-group cryptography", () => {
     const descriptor = await createSessionDescriptor(
       identity, localKey, "session_identifier_1234", "group_identifier_1234", key.publicKey,
     );
+    const invalidCurvePoint = base64url(new Uint8Array(65));
+    await expect(createSessionDescriptor(
+      identity, localKey, "invalid_key_session", "group_identifier_1234", invalidCurvePoint,
+    )).rejects.toThrow();
     expect(await verifySessionDescriptor(descriptor, "group_identifier_1234", [transition])).toBe(true);
+    expect(await verifySessionDescriptor(
+      { ...descriptor, creatorPublicKey: invalidCurvePoint }, "group_identifier_1234", [transition],
+    )).toBe(false);
     await expect(authenticateInheritedSession(
       descriptor, "group_identifier_1234", [transition],
     )).resolves.toBeUndefined();
@@ -179,7 +186,53 @@ describe("web device-group cryptography", () => {
     await expect(authenticatedInheritedSessions(
       [legacy, { ...descriptor, creatorPublicKey: (await createGroupKey()).publicKey }],
       "group_identifier_1234", [transition],
+    )).resolves.toEqual([]);
+  });
+
+  it("rejects session descriptors signed by a device removed from the current head", async () => {
+    const groupId = "group_identifier_1234";
+    const removed = await registeredIdentity("removed_device_identifier");
+    const remaining = await registeredIdentity("remaining_device_identifier");
+    const removedMember = {
+      deviceId: removed.deviceId, signingPublicKey: removed.signingPublicKey,
+      encryptionPublicKey: removed.encryptionPublicKey,
+    };
+    const remainingMember = {
+      deviceId: remaining.deviceId, signingPublicKey: remaining.signingPublicKey,
+      encryptionPublicKey: remaining.encryptionPublicKey,
+    };
+    const initialDraft = await createGroupKey();
+    const initial = await createGroupTransition(
+      groupId, removed, initialDraft, null, [removedMember, remainingMember],
+      await Promise.all([
+        createKeyPackage(groupId, initialDraft, removedMember),
+        createKeyPackage(groupId, initialDraft, remainingMember),
+      ]), true,
+    );
+    const initialKey = {
+      ...initialDraft, timestamp: initial.timestamp, transitionHash: initial.transitionHash,
+    };
+    remaining.group = { groupId, keys: { [String(initial.timestamp)]: initialKey } };
+    const removedDescriptor = await createSessionDescriptor(
+      removed, initialKey, "removed_actor_session", groupId, initialDraft.publicKey,
+    );
+    const remainingDescriptor = await createSessionDescriptor(
+      remaining, initialKey, "remaining_actor_session", groupId, initialDraft.publicKey,
+    );
+    const currentDraft = await createGroupKey();
+    const current = await createGroupTransition(
+      groupId, remaining, currentDraft, initial, [remainingMember],
+      [await createKeyPackage(groupId, currentDraft, remainingMember)], true,
+    );
+    await expect(validateGroupTransitions(groupId, [initial, current], initial.transitionHash)).resolves.toEqual(current);
+    await expect(verifySessionDescriptor(removedDescriptor, groupId, [initial, current])).resolves.toBe(false);
+    await expect(authenticateInheritedSession(
+      removedDescriptor, groupId, [initial, current],
     )).rejects.toThrow("unauthenticated session descriptor");
+    await expect(verifySessionDescriptor(remainingDescriptor, groupId, [initial, current])).resolves.toBe(true);
+    await expect(authenticatedInheritedSessions(
+      [removedDescriptor, remainingDescriptor], groupId, [initial, current],
+    )).resolves.toEqual([remainingDescriptor]);
   });
 
   it("binds device approval to the complete request and accepted transition", async () => {

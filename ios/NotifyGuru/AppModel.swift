@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     private var pendingUniversalLink: URL?
     private var hasFinishedStarting = false
     private var isSyncing = false
+    private var isStateActionInProgress = false
     private var didReportDisabledBadges = false
 
     private var isSessionHistoryUITest: Bool {
@@ -172,6 +173,9 @@ final class AppModel: ObservableObject {
     }
 
     func join(link: String) async -> Bool {
+        guard !isSyncing, !isStateActionInProgress else { return false }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
             if URLComponents(string: value)?.path == "/device" {
@@ -199,8 +203,7 @@ final class AppModel: ObservableObject {
             show(ProtocolError.invalidPairingLink("there is no device addition awaiting approval"))
             return
         }
-        clearPendingDeviceAddition()
-        Task { _ = await approveDeviceAddition(link, clearPendingOnSuccess: false) }
+        Task { _ = await approveDeviceAddition(link, clearPendingOnSuccess: true) }
     }
 
     func approvePendingDeviceAddition() async -> Bool {
@@ -222,6 +225,12 @@ final class AppModel: ObservableObject {
             return true
         }
 #endif
+        guard !isSyncing, !isStateActionInProgress else {
+            show(ProtocolError.invalidResponse("device state is being synchronized; try again shortly"))
+            return false
+        }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             try await approveDeviceRequest(link)
             if clearPendingOnSuccess { clearPendingDeviceAddition() }
@@ -245,6 +254,9 @@ final class AppModel: ObservableObject {
     }
 
     func createDeviceRequest(discardingCurrentState: Bool = false) async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             if let pendingDeviceRequest {
@@ -252,6 +264,7 @@ final class AppModel: ObservableObject {
                 return
             }
             try await synchronizeGroup(&current)
+            if try inheritSessions(&current) { try persist(current) }
             if deviceRequestWouldDiscardCurrentState && !discardingCurrentState {
                 throw ProtocolError.invalidResponse("confirm removing this device from its current group and deleting its saved sessions")
             }
@@ -287,6 +300,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeDevice(_ deviceID: String) async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard let state = groupState else { throw ProtocolError.crypto("group state is unavailable") }
@@ -302,11 +318,15 @@ final class AppModel: ObservableObject {
             try storeTransitionKey(update, in: &current)
             try await synchronizeGroup(&current)
             try await ensureExactGroupKey(&current)
+            _ = try inheritSessions(&current)
             try persist(current)
         } catch { show(error) }
     }
 
     func leaveDeviceGroup() async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard groupDevices.count > 1, let groupID = current.identity.group?.groupID else {
@@ -329,6 +349,9 @@ final class AppModel: ObservableObject {
     }
 
     func respond(sessionID: String, optionID: String) async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -356,6 +379,9 @@ final class AppModel: ObservableObject {
     }
 
     func dismissRequest(sessionID: String) async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -403,6 +429,9 @@ final class AppModel: ObservableObject {
     }
 
     func dismissNotification(sessionID: String, notificationID: String) async {
+        guard !isSyncing, !isStateActionInProgress else { return }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard let sessionIndex = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -432,6 +461,9 @@ final class AppModel: ObservableObject {
     }
 
     func setAttention(sessionID: String, attention: Bool) async -> Bool {
+        guard !isSyncing, !isStateActionInProgress else { return false }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }) else {
@@ -452,6 +484,9 @@ final class AppModel: ObservableObject {
     }
 
     func sendFeedback(sessionID: String, message: String, photo: PreparedPhoto? = nil) async -> Bool {
+        guard !isSyncing, !isStateActionInProgress else { return false }
+        isStateActionInProgress = true
+        defer { isStateActionInProgress = false }
         do {
             let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard text.utf8.count <= 20_000, !text.isEmpty || photo != nil else {
@@ -567,7 +602,7 @@ final class AppModel: ObservableObject {
     func sync() async {
         guard !isSessionHistoryUITest, !isRecoverableStartupFailureUITest, !isMixedSessionInheritanceUITest,
               !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
-        guard isReady, !isSyncing else { return }
+        guard isReady, !isSyncing, !isStateActionInProgress else { return }
         isSyncing = true; connectionState = .syncing
         defer { isSyncing = false }
         do {
@@ -581,7 +616,7 @@ final class AppModel: ObservableObject {
             if current.identity.group != nil {
                 try await synchronizeGroup(&current)
                 try await ensureExactGroupKey(&current)
-                try inheritSessions(&current)
+                if try inheritSessions(&current) { try persist(current) }
                 let sessionIDs = current.sessions.filter { $0.groupID == current.identity.group?.groupID }.map(\.sessionID)
                 for sessionID in sessionIDs {
                     guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }) else {
@@ -635,6 +670,7 @@ final class AppModel: ObservableObject {
         }
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
+        if try inheritSessions(&current) { try persist(current) }
         let request = try await api.deviceRequestForApproval(identity: current.identity, requestID: link.requestID)
         let requestHash = CryptoEngine.deviceRequestBindingHash(
             requestID: request.requestID, deviceID: request.deviceID,
@@ -663,6 +699,7 @@ final class AppModel: ObservableObject {
         try storeTransitionKey(update, in: &current)
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
+        _ = try inheritSessions(&current)
         try persist(current)
     }
 
@@ -684,6 +721,7 @@ final class AppModel: ObservableObject {
         if current.identity.group == nil { try await createSoloGroup(&current) }
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
+        if try inheritSessions(&current) { try persist(current) }
         guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }),
               let group = current.identity.group,
               let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
@@ -832,13 +870,29 @@ final class AppModel: ObservableObject {
         return key
     }
 
-    private func inheritSessions(_ current: inout Vault) throws {
-        guard let group = current.identity.group, let state = groupState else { return }
-        let localSessionIDs = Set(current.sessions.map(\.sessionID))
-        let candidates = state.sessions.filter { !localSessionIDs.contains($0.sessionID) }
-        for remote in try CryptoEngine.authenticatedInheritedSessions(
-            candidates, groupID: group.groupID, transitions: state.keys
-        ) {
+    private func inheritSessions(_ current: inout Vault) throws -> Bool {
+        guard let group = current.identity.group, let state = groupState else { return false }
+        let previousSessions = current.sessions
+        let authenticated = try CryptoEngine.authenticatedInheritedSessions(
+            state.sessions, groupID: group.groupID, transitions: state.keys
+        )
+        var authenticatedByID: [String: GroupSessionResult] = [:]
+        var duplicateIDs = Set<String>()
+        for remote in authenticated {
+            if authenticatedByID.updateValue(remote, forKey: remote.sessionID) != nil {
+                duplicateIDs.insert(remote.sessionID)
+            }
+        }
+        for sessionID in duplicateIDs { authenticatedByID.removeValue(forKey: sessionID) }
+        var nextSessions = current.sessions.filter {
+            guard $0.protocolVersion == 4 && $0.groupID == group.groupID else { return true }
+            guard let remote = authenticatedByID[$0.sessionID] else { return false }
+            return remote.protocolVersion == $0.protocolVersion && remote.groupID == $0.groupID
+                && remote.creatorPublicKey == $0.creatorPublicKey
+        }
+        var localSessionIDs = Set(nextSessions.map(\.sessionID))
+        for remote in authenticated
+            where authenticatedByID[remote.sessionID] != nil && !localSessionIDs.contains(remote.sessionID) {
             var record = SessionRecord(
                 protocolVersion: remote.protocolVersion, sessionID: remote.sessionID, groupID: group.groupID,
                 creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
@@ -846,9 +900,18 @@ final class AppModel: ObservableObject {
                 request: nil, requestKeyTimestamp: nil, color: nil,
                 updatedAt: Self.currentTimeMilliseconds(), expiresAt: remote.expiresAt
             )
-            try populateSessionKeys(&record, group: group)
-            current.sessions.append(record)
+            do {
+                try populateSessionKeys(&record, group: group)
+                nextSessions.append(record)
+                localSessionIDs.insert(remote.sessionID)
+            } catch {
+                // A single relay-controlled session must not block retirement of
+                // other stale sessions or persistence of the authenticated set.
+                continue
+            }
         }
+        current.sessions = nextSessions
+        return current.sessions != previousSessions
     }
 
     private func populateSessionKeys(_ session: inout SessionRecord, group: DeviceGroup) throws {
@@ -1107,21 +1170,30 @@ final class AppModel: ObservableObject {
             actorDeviceID: descriptor.actorDeviceID, actorSignature: descriptor.actorSignature,
             continuitySignature: descriptor.continuitySignature
         )
-        let inherited = try CryptoEngine.authenticatedInheritedSessions(
-            [legacy, signed], groupID: groupID, transitions: [transition]
+        groupState = DeviceGroupStateResult(
+            groupID: groupID,
+            members: [GroupDevice(
+                deviceID: member.deviceID, encryptionPublicKey: member.encryptionPublicKey,
+                signingPublicKey: member.signingPublicKey, addedAt: 0
+            )],
+            keys: [transition], packages: [], sessions: [legacy, signed]
         )
-        let records = try inherited.map { remote in
-            var record = SessionRecord(
-                protocolVersion: remote.protocolVersion, sessionID: remote.sessionID, groupID: groupID,
-                creatorPublicKey: remote.creatorPublicKey, keys: [:], cursor: 0,
-                title: "Authenticated v4 session", status: "Connected securely",
-                notifications: [], request: nil, requestKeyTimestamp: nil, color: "#d9f2d0",
-                updatedAt: Self.currentTimeMilliseconds(), expiresAt: remote.expiresAt
-            )
-            try populateSessionKeys(&record, group: identity.group!)
-            return record
+        let attackerKey = CryptoEngine.createGroupKey()
+        let stale = SessionRecord(
+            protocolVersion: 4, sessionID: signed.sessionID, groupID: groupID,
+            creatorPublicKey: attackerKey.publicKey, keys: [:], cursor: 0,
+            title: "Tampered local session", status: "Unsafe", notifications: [],
+            request: nil, requestKeyTimestamp: nil, color: nil,
+            updatedAt: Self.currentTimeMilliseconds(), expiresAt: signed.expiresAt
+        )
+        var current = Vault(version: 4, identity: identity, sessions: [stale])
+        guard try inheritSessions(&current), current.sessions.count == 1,
+              current.sessions[0].creatorPublicKey == signed.creatorPublicKey else {
+            throw ProtocolError.crypto("authenticated session did not replace the stale local creator key")
         }
-        let current = Vault(version: 4, identity: identity, sessions: records)
+        current.sessions[0].title = "Authenticated v4 session"
+        current.sessions[0].status = "Connected securely"
+        current.sessions[0].color = "#d9f2d0"
         vault = current
         publish(current)
         groupDevices = [GroupDevice(
@@ -1209,7 +1281,9 @@ final class AppModel: ObservableObject {
     nonisolated static func detachingFromDeviceGroup(_ vault: Vault, groupID: String) -> Vault {
         var result = vault
         result.identity.group = nil
-        result.sessions.removeAll { $0.protocolVersion == 3 && $0.groupID == groupID }
+        result.sessions.removeAll {
+            ($0.protocolVersion == 3 || $0.protocolVersion == 4) && $0.groupID == groupID
+        }
         return result
     }
 

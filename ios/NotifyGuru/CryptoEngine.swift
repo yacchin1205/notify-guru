@@ -115,6 +115,7 @@ enum CryptoEngine {
         identity: DeviceIdentity, key: GroupKey, sessionID: String, groupID: String, creatorPublicKey: String
     ) throws -> SignedSessionDescriptor {
         guard let transitionHash = key.transitionHash else { throw ProtocolError.crypto("group key has no transition hash") }
+        _ = try P256.KeyAgreement.PublicKey(x963Representation: Base64URL.decode(creatorPublicKey))
         let transcript = sessionDescriptorTranscript(
             sessionID: sessionID, groupID: groupID, protocolVersion: 4, creatorPublicKey: creatorPublicKey,
             keyTimestamp: key.timestamp, transitionHash: transitionHash, actorDeviceID: identity.deviceID
@@ -131,12 +132,18 @@ enum CryptoEngine {
     static func verifySessionDescriptor(
         _ remote: GroupSessionResult, groupID: String, transitions: [GroupKeyRecord]
     ) throws -> Bool {
+        guard (try? P256.KeyAgreement.PublicKey(
+            x963Representation: Base64URL.decode(remote.creatorPublicKey)
+        )) != nil else { return false }
         guard remote.protocolVersion == 4, remote.groupID == groupID, let keyTimestamp = remote.keyTimestamp,
               let transitionHash = remote.transitionHash, let actorDeviceID = remote.actorDeviceID,
               let actorSignature = remote.actorSignature, let continuitySignature = remote.continuitySignature,
               let transition = transitions.first(where: {
                   $0.timestamp == keyTimestamp && $0.transitionHash == transitionHash
-              }), let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }) else { return false }
+              }), let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }),
+              let currentActor = transitions.last?.members.first(where: { $0.deviceID == actorDeviceID }),
+              currentActor.signingPublicKey == actor.signingPublicKey,
+              currentActor.encryptionPublicKey == actor.encryptionPublicKey else { return false }
         let transcript = sessionDescriptorTranscript(
             sessionID: remote.sessionID, groupID: groupID, protocolVersion: 4,
             creatorPublicKey: remote.creatorPublicKey, keyTimestamp: keyTimestamp,
@@ -160,10 +167,10 @@ enum CryptoEngine {
     static func authenticatedInheritedSessions(
         _ sessions: [GroupSessionResult], groupID: String, transitions: [GroupKeyRecord]
     ) throws -> [GroupSessionResult] {
-        try sessions.compactMap { remote in
+        sessions.compactMap { remote in
             guard remote.protocolVersion == 4 else { return nil }
-            try authenticateInheritedSession(remote, groupID: groupID, transitions: transitions)
-            return remote
+            return (try? verifySessionDescriptor(remote, groupID: groupID, transitions: transitions)) == true
+                ? remote : nil
         }
     }
 

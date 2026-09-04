@@ -85,6 +85,21 @@ export async function verifyP256Signature(
   );
 }
 
+export async function validateP256KeyAgreementPublicKey(publicKey: string): Promise<boolean> {
+  try {
+    await crypto.subtle.importKey(
+      "raw",
+      decodeBase64URL(publicKey),
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      [],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function randomIdentifier(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   let binary = "";

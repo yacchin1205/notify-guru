@@ -51,7 +51,7 @@
 
 - 有効なメンバー一覧、署名済みの鍵・メンバー遷移履歴、そのデバイス向けの暗号化鍵パッケージ、および参加中のセッションを返す。
 - 遷移には直前hash、timestamp、操作端末、共有公開鍵、全メンバーの端末公開鍵、鍵パッケージdigest、および操作端末・鍵連続性の署名を含める。
-- v4の参加中セッションには、`sessionId`、`groupId`、`protocolVersion`、`creatorPublicKey`、鍵timestamp、遷移hash、署名端末を結び付けたsession descriptorと、その端末identity・グループ継続鍵の署名を含める。クライアントは継承前に両署名を検証する。
+- v4の参加中セッションには、`sessionId`、`groupId`、`protocolVersion`、`creatorPublicKey`、鍵timestamp、遷移hash、署名端末を結び付けたsession descriptorと、その端末identity・グループ継続鍵の署名を含める。クライアントは継承前に`creatorPublicKey`が実際のP-256 ECDH公開鍵であることと両署名を検証し、署名端末が最新headにも同じidentity公開鍵で残っていることを要求する。
 
 ### `POST /api/groups/:groupId/keys`
 
@@ -80,7 +80,7 @@
 - デバイスグループがワンショット鍵交換を使ってセッションへ参加する。
 - セッション作成元による承認待ち状態は作らず、鍵交換の成立をもって参加とする。
 - v4ではワンショットHMACが共有公開鍵だけでなく、その時点の署名済み遷移hashも認証する。
-- v4では参加端末がsession descriptorをidentity鍵と現在のグループ継続鍵で署名する。後から追加された端末は、この署名が検証できないセッションを継承しない。descriptorを持たないv3セッションも新しいv4端末へは継承せず、認証済みv4セッションだけを候補にする。
+- v4では参加端末がsession descriptorをidentity鍵と現在のグループ継続鍵で署名する。各端末は同期のたびに、この署名が検証できない、または署名端末がすでに削除されているセッションをローカルでも失効させ、継承しない。descriptorを持たないv3セッションも新しいv4端末へは継承せず、認証済みv4セッションだけを候補にする。
 - セッションとデバイスグループの関係は、以後のグループ鍵更新から独立して維持する。
 
 ### `GET /api/sessions/:sessionId/joins`
