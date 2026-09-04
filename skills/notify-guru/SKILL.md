@@ -145,6 +145,21 @@ handed over once — if you ignore the field, nothing will surface them again, a
 a message written while you worked is lost to you until the person repeats it.
 Act on what comes back, or at minimum tell the user what they sent.
 
+An attachment is not necessarily nested in the structured `responses` value.
+After `notifyg` verifies and decrypts a photo, the MCP result carries the local
+file as a separate `resource_link` content block with a `file:` URI. Because
+responses piggyback on sends, that block can arrive on `status`, `notify`,
+`session_color`, `request`, or `request_close`, as well as on
+`responses_wait`. It is handed over once with the feedback, just like the
+response metadata.
+
+Inspect **every content block in the complete tool result before making another
+call**. Preserve or surface `resource_link` blocks as well as text, images, and
+structured content; a result with no text output can still contain the only
+copy of an attachment link. When wrapping a tool call, do not write a handler
+that forwards only `text` and `image` blocks and silently drops every other
+content type.
+
 ### `status` — silent by default, overwritten, safe to miss
 
 No OS notification unless the person chose one: on iOS and macOS they can
@@ -352,6 +367,8 @@ closed, so do not close defensively.
 - Writing `status` as an append-only history when it is a single overwritten line.
 - Picking one response out of several device groups and not saying you did.
 - Ignoring the `responses` a send hands back, so a message goes unread.
+- Reading only text or structured fields and dropping a one-shot attachment
+  `resource_link` returned by any send.
 - Leaving a request open after acting on it.
 - Writing the card in a language the person does not use with you.
 - `session_close` on normal exit, or to force a fresh session for yourself.
