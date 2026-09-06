@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DeviceRegistry, DevicePushTarget } from "./device";
-import type { DeviceGroup, GroupCurrentState } from "./group";
+import type {
+  DeviceGroup,
+  GroupCurrentState,
+  SessionDeviceAuthorization,
+  SessionParticipationAnchor,
+} from "./group";
 import {
   BASE64URL,
   HttpError,
@@ -47,7 +52,7 @@ interface SessionEnv {
 
 interface MetaRow extends Record<string, SqlStorageValue> {
   session_id: string;
-  manager_hash: string;
+  session_token_hash: string;
   creator_public_key: string;
   expires_at: number;
   protocol_version: number;
@@ -75,7 +80,13 @@ interface GroupRow extends Record<string, SqlStorageValue> {
   initial_public_key: string;
   initial_transition_hash: string | null;
   join_proof: string;
+  join_hash: string | null;
+  actor_device_id: string | null;
   joined_at: number;
+}
+
+export interface SessionGroupParticipation {
+  expiresAt: number;
 }
 
 interface EventRow extends Record<string, SqlStorageValue> {
@@ -219,22 +230,36 @@ export class Session extends DurableObject<SessionEnv> {
     await this.scheduleNextAlarm(this.metaRow().expires_at);
   }
 
+  async getGroupParticipation(groupId: string): Promise<SessionGroupParticipation | null> {
+    if ((await this.state.storage.get<boolean>(INITIALIZED_KEY)) !== true) return null;
+    const meta = this.metaRow();
+    if (Date.now() >= meta.expires_at) return null;
+    const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key,
+              initial_transition_hash, join_proof, join_hash, actor_device_id, joined_at
+       FROM session_groups_v3 WHERE id = ?`,
+      groupId,
+    ));
+    if (rows.length === 0) return null;
+    return { expiresAt: meta.expires_at };
+  }
+
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/create") return this.create(request);
 
     const meta = await this.activeMeta();
     if (request.method === "POST" && url.pathname === "/pairings") {
-      await this.requireManager(request, meta);
+      await this.requireSessionToken(request, meta);
       return this.addPairing(request);
     }
     if (request.method === "POST" && url.pathname === "/join") return this.join(request, meta);
-    if (request.method === "GET" && url.pathname === "/joins") {
-      await this.requireManager(request, meta);
-      return this.joins(meta);
+    if (request.method === "GET" && url.pathname === "/") {
+      await this.requireSessionToken(request, meta);
+      return this.sessionState(meta);
     }
     if (request.method === "POST" && url.pathname === "/events") {
-      await this.requireManager(request, meta);
+      await this.requireSessionToken(request, meta);
       return this.addEvent(request, meta);
     }
     if (request.method === "GET" && url.pathname === "/events") return this.events(request, url, meta);
@@ -245,23 +270,23 @@ export class Session extends DurableObject<SessionEnv> {
       const attachmentId = stringField({ attachmentId: attachmentMatch[1] }, "attachmentId", IDENTIFIER, 64);
       if (request.method === "PUT") return this.uploadAttachment(request, meta, attachmentId);
       if (request.method === "GET") {
-        await this.requireManager(request, meta);
+        await this.requireSessionToken(request, meta);
         return this.downloadAttachment(attachmentId);
       }
     }
     if (request.method === "POST" && url.pathname === "/responses") return this.addResponse(request, meta);
     if (request.method === "GET" && url.pathname === "/responses") {
-      await this.requireManager(request, meta);
+      await this.requireSessionToken(request, meta);
       return this.responses(url, meta);
     }
     if (request.method === "DELETE" && url.pathname === "/") {
-      await this.requireManager(request, meta);
+      await this.requireSessionToken(request, meta);
       const groupIds = Array.from(this.state.storage.sql.exec<{ id: string }>(
         "SELECT id FROM session_groups_v3 ORDER BY sequence",
       )).map((row) => row.id);
       await this.expireSession(meta.session_id);
-      await Promise.all(groupIds.map((groupId) => this.removeGroupSession(groupId, meta.session_id)));
       await this.state.storage.deleteAll();
+      await Promise.all(groupIds.map((groupId) => this.removeGroupSession(groupId, meta.session_id)));
       return new Response(null, { status: 204 });
     }
     throw new HttpError(404, "not_found", "Endpoint not found");
@@ -272,9 +297,9 @@ export class Session extends DurableObject<SessionEnv> {
       throw new HttpError(409, "session_exists", "Session already exists");
     }
     const body = await readObject(request);
-    expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
+    expectKeys(body, ["sessionId", "sessionTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
     const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
-    const managerHash = stringField(body, "managerTokenHash", SHA256_HEX, 64);
+    const sessionTokenHash = stringField(body, "sessionTokenHash", SHA256_HEX, 64);
     const creatorPublicKey = stringField(body, "creatorPublicKey", BASE64URL, 128);
     if (!(await validateP256KeyAgreementPublicKey(creatorPublicKey))) {
       throw new HttpError(400, "invalid_public_key", "Creator public key is not a P-256 key agreement key");
@@ -288,10 +313,10 @@ export class Session extends DurableObject<SessionEnv> {
     const expiresAt = now + SESSION_LIFETIME_MS;
     this.createSchema();
     this.state.storage.sql.exec(
-      `INSERT INTO meta (singleton, session_id, manager_hash, creator_public_key, expires_at, protocol_version)
+      `INSERT INTO meta (singleton, session_id, session_token_hash, creator_public_key, expires_at, protocol_version)
        VALUES (1, ?, ?, ?, ?, ?)`,
       sessionId,
-      managerHash,
+      sessionTokenHash,
       creatorPublicKey,
       expiresAt,
       protocolVersion,
@@ -342,18 +367,19 @@ export class Session extends DurableObject<SessionEnv> {
       ? stringField(body, "transitionHash", SHA256_HEX, 64)
       : null;
     const descriptor = meta.protocol_version === 4 ? sessionDescriptor(body.sessionDescriptor) : null;
-    const pairing = this.unusedPairing(pairingId);
+    const joinHash = await sessionJoinHash(meta.session_id, pairingId, groupId, deviceId, keyTimestamp,
+      groupPublicKey, transitionHash, proof);
+    const pairing = this.pairing(pairingId);
     if (!equalHex(pairing.token_hash, await sha256Hex(pairingToken))) {
       throw new HttpError(401, "invalid_pairing_token", "Pairing token is invalid");
     }
     await this.authorizeGroupDevice(groupId, deviceId, deviceAccessToken);
-    if (!(await this.groupStub(groupId).supportsProtocolVersion(meta.protocol_version))) {
-      throw new HttpError(409, "protocol_upgrade_required", "Every device in the group must support this session protocol");
+    const joined = this.groupByPairing(pairingId);
+    if (joined !== null && !this.sameJoin(joined, joinHash, deviceId)) {
+      throw new HttpError(409, "pairing_consumed", "Pairing has already been consumed");
     }
-    const current = await this.groupCurrent(groupId);
-    if (current.key === null || current.key.timestamp !== keyTimestamp || current.key.publicKey !== groupPublicKey
-      || meta.protocol_version === 4 && current.key.transitionHash !== transitionHash) {
-      throw new HttpError(409, "group_key_changed", "Device group key has changed");
+    if (pairing.consumed_at !== null && joined === null) {
+      throw new Error("Consumed SessionPairing must identify its Group participation");
     }
     if (descriptor !== null && (descriptor.sessionId !== meta.session_id || descriptor.groupId !== groupId
       || descriptor.creatorPublicKey !== meta.creator_public_key || descriptor.protocolVersion !== 4
@@ -361,33 +387,70 @@ export class Session extends DurableObject<SessionEnv> {
       || descriptor.actorDeviceId !== deviceId)) {
       throw new HttpError(400, "invalid_session_descriptor", "Session descriptor does not match the authenticated join");
     }
-    await this.putGroupSession(groupId, meta, meta.expires_at, descriptor);
+    if (descriptor !== null) await this.groupStub(groupId).validateSessionDescriptor(descriptor);
+    if (joined === null) {
+      if (!(await this.groupStub(groupId).supportsProtocolVersion(meta.protocol_version))) {
+        throw new HttpError(409, "protocol_upgrade_required", "Every device in the group must support this session protocol");
+      }
+      const current = await this.groupCurrent(groupId);
+      if (current.key === null || current.key.timestamp !== keyTimestamp || current.key.publicKey !== groupPublicKey
+        || meta.protocol_version === 4 && current.key.transitionHash !== transitionHash) {
+        throw new HttpError(409, "group_key_changed", "Device group key has changed");
+      }
+    }
     const now = Date.now();
     this.state.storage.transactionSync(() => {
-      this.state.storage.sql.exec("UPDATE pairings SET consumed_at = ? WHERE id = ?", now, pairingId);
+      const currentPairing = this.pairing(pairingId);
+      const currentJoin = this.groupByPairing(pairingId);
+      if (currentJoin !== null) {
+        if (this.sameJoin(currentJoin, joinHash, deviceId)) return;
+        throw new HttpError(409, "pairing_consumed", "Pairing has already been consumed");
+      }
+      if (currentPairing.consumed_at !== null) {
+        throw new Error("Consumed SessionPairing must identify its Group participation");
+      }
+      if (this.group(groupId) !== null) {
+        throw new HttpError(409, "group_joined", "Device group has already joined the session");
+      }
       this.state.storage.sql.exec(
         `INSERT INTO session_groups_v3
-           (id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash,
+            join_proof, join_hash, actor_device_id, joined_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         groupId,
         pairingId,
         keyTimestamp,
         groupPublicKey,
         transitionHash,
         proof,
+        joinHash,
+        deviceId,
         now,
       );
+    });
+    await this.putGroupSession(groupId, meta, meta.expires_at, descriptor);
+    this.state.storage.transactionSync(() => {
+      const currentJoin = this.groupByPairing(pairingId);
+      if (currentJoin === null || !this.sameJoin(currentJoin, joinHash, deviceId)) {
+        throw new Error("SessionPairing join changed before it was consumed");
+      }
+      const currentPairing = this.pairing(pairingId);
+      if (currentPairing.consumed_at === null) {
+        this.state.storage.sql.exec("UPDATE pairings SET consumed_at = ? WHERE id = ?", Date.now(), pairingId);
+      }
     });
     return json({ joined: true, expiresAt: meta.expires_at }, 201);
   }
 
-  private async joins(meta: MetaRow): Promise<Response> {
+  private async sessionState(meta: MetaRow): Promise<Response> {
     const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
-      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash,
+              join_proof, join_hash, actor_device_id, joined_at
        FROM session_groups_v3 ORDER BY sequence`,
     ));
     const groups = await Promise.all(rows.map(async (row) => {
-      const current = await this.groupCurrent(row.id);
+      const participation = this.sessionParticipation(row, meta.protocol_version);
+      const current = await this.groupCurrentForSession(row.id, participation);
       const transitions = meta.protocol_version === 4
         ? (await this.groupStub(row.id).getTransitionHistory()).filter((transition) => transition.timestamp >= row.initial_key_timestamp)
         : undefined;
@@ -423,7 +486,7 @@ export class Session extends DurableObject<SessionEnv> {
     if (tracked && (notificationKind === "none" || notificationKind === "status")) {
       throw new HttpError(400, "invalid_field", "Status events cannot contain an item ID");
     }
-    this.requireGroup(groupId);
+    const group = this.requireGroup(groupId);
     if (itemId !== null) {
       const existing = this.eventById(eventId);
       if (existing !== null) {
@@ -449,10 +512,10 @@ export class Session extends DurableObject<SessionEnv> {
         return json({ expiresAt: meta.expires_at }, 201);
       }
     }
-    const recipients = await this.groupKeyRecipients(groupId, keyTimestamp, meta.protocol_version);
+    const recipients = await this.groupKeyRecipients(group, keyTimestamp, meta.protocol_version);
     const now = Date.now();
     const expiresAt = now + SESSION_LIFETIME_MS;
-    await this.putGroupSession(groupId, meta, expiresAt);
+    if (meta.protocol_version !== 4) await this.putGroupSession(groupId, meta, expiresAt);
     const attentive = this.attentiveDevices();
     let activeItem = false;
     this.state.storage.transactionSync(() => {
@@ -505,8 +568,8 @@ export class Session extends DurableObject<SessionEnv> {
   private async events(request: Request, url: URL, meta: MetaRow): Promise<Response> {
     const groupId = queryIdentifier(url, "groupId");
     const deviceId = queryIdentifier(url, "deviceId");
-    this.requireGroup(groupId);
-    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
+    const group = this.requireGroup(groupId);
+    await this.authorizeSessionDevice(group, deviceId, bearerToken(request), meta.protocol_version);
     const after = integerQuery(url, "after");
     const includeActive = url.searchParams.get("includeActive") === "1";
     const includeAttention = url.searchParams.get("includeAttention") === "1";
@@ -555,8 +618,8 @@ export class Session extends DurableObject<SessionEnv> {
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
     const deviceId = stringField(body, "deviceId", IDENTIFIER, 64);
     const attention = booleanField(body, "attention");
-    this.requireGroup(groupId);
-    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
+    const group = this.requireGroup(groupId);
+    await this.authorizeSessionDevice(group, deviceId, bearerToken(request), meta.protocol_version);
     if (attention) {
       this.state.storage.sql.exec(
         `INSERT INTO session_attention_v1 (device_id, created_at) VALUES (?, ?)
@@ -596,9 +659,14 @@ export class Session extends DurableObject<SessionEnv> {
     if (ciphertextLength === 0 || ciphertextLength > ATTACHMENT_MAX_CIPHERTEXT_BYTES) {
       throw new HttpError(413, "attachment_too_large", "Attachment ciphertext exceeds the current service limit");
     }
-    this.requireGroup(groupId);
-    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
-    await this.groupKeyDevice(groupId, keyTimestamp, deviceId);
+    const group = this.requireGroup(groupId);
+    await this.authorizeSessionKeyDevice(
+      group,
+      keyTimestamp,
+      deviceId,
+      bearerToken(request),
+      meta.protocol_version,
+    );
     if (this.responseExists(responseId)) {
       throw new HttpError(409, "response_exists", "Response already exists");
     }
@@ -716,9 +784,14 @@ export class Session extends DurableObject<SessionEnv> {
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
     const attachmentId = hasAttachment ? stringField(body, "attachmentId", IDENTIFIER, 64) : null;
     if (hasAttachment) this.requireV4(meta);
-    this.requireGroup(groupId);
-    await this.authorizeGroupDevice(groupId, deviceId, bearerToken(request));
-    await this.groupKeyDevice(groupId, keyTimestamp, deviceId);
+    const group = this.requireGroup(groupId);
+    await this.authorizeSessionKeyDevice(
+      group,
+      keyTimestamp,
+      deviceId,
+      bearerToken(request),
+      meta.protocol_version,
+    );
     if (this.responseExists(responseId)) {
       throw new HttpError(409, "response_exists", "Response already exists");
     }
@@ -868,27 +941,53 @@ export class Session extends DurableObject<SessionEnv> {
 
   private metaRow(): MetaRow {
     const rows = Array.from(this.state.storage.sql.exec<MetaRow>(
-      "SELECT session_id, manager_hash, creator_public_key, expires_at, protocol_version FROM meta WHERE singleton = 1",
+      "SELECT session_id, session_token_hash, creator_public_key, expires_at, protocol_version FROM meta WHERE singleton = 1",
     ));
     if (rows.length !== 1) throw new Error("Initialized session must contain exactly one meta row");
     return rows[0];
   }
 
-  private unusedPairing(pairingId: string): { token_hash: string } {
+  private pairing(pairingId: string): { token_hash: string; consumed_at: number | null } {
     const rows = Array.from(this.state.storage.sql.exec<{ token_hash: string; consumed_at: number | null }>(
       "SELECT token_hash, consumed_at FROM pairings WHERE id = ?",
       pairingId,
     ));
     if (rows.length === 0) throw new HttpError(404, "pairing_not_found", "Pairing not found");
-    if (rows[0].consumed_at !== null) {
-      throw new HttpError(409, "pairing_consumed", "Pairing has already been consumed");
-    }
     return rows[0];
+  }
+
+  private group(groupId: string): GroupRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key,
+              initial_transition_hash, join_proof, join_hash, actor_device_id, joined_at
+       FROM session_groups_v3 WHERE id = ?`,
+      groupId,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private groupByPairing(pairingId: string): GroupRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key,
+              initial_transition_hash, join_proof, join_hash, actor_device_id, joined_at
+       FROM session_groups_v3 WHERE pairing_id = ?`,
+      pairingId,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private sameJoin(
+    joined: GroupRow,
+    joinHash: string,
+    deviceId: string,
+  ): boolean {
+    return joined.join_hash === joinHash && joined.actor_device_id === deviceId;
   }
 
   private requireGroup(groupId: string): GroupRow {
     const rows = Array.from(this.state.storage.sql.exec<GroupRow>(
-      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash, join_proof, joined_at
+      `SELECT sequence, id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash,
+              join_proof, join_hash, actor_device_id, joined_at
        FROM session_groups_v3 WHERE id = ?`,
       groupId,
     ));
@@ -896,9 +995,9 @@ export class Session extends DurableObject<SessionEnv> {
     return rows[0];
   }
 
-  private async requireManager(request: Request, meta: MetaRow): Promise<void> {
-    if (!equalHex(meta.manager_hash, await sha256Hex(bearerToken(request)))) {
-      throw new HttpError(401, "invalid_manager_token", "Manager token is invalid");
+  private async requireSessionToken(request: Request, meta: MetaRow): Promise<void> {
+    if (!equalHex(meta.session_token_hash, await sha256Hex(bearerToken(request)))) {
+      throw new HttpError(401, "invalid_session_token", "Session token is invalid");
     }
   }
 
@@ -919,23 +1018,80 @@ export class Session extends DurableObject<SessionEnv> {
     return result;
   }
 
-  private async groupKeyRecipients(groupId: string, timestamp: number, protocolVersion = 3): Promise<string[]> {
-    const result = await this.groupStub(groupId).getKeyRecipients(timestamp, protocolVersion);
+  private async groupCurrentForSession(
+    groupId: string,
+    participation: SessionParticipationAnchor,
+  ): Promise<GroupCurrentState> {
+    const result = await this.groupStub(groupId).getCurrentStateForSession(participation);
+    if (result === null) throw new HttpError(404, "group_not_found", "Device group not found");
+    if (result.groupId !== groupId) throw new Error("Device group returned another group ID");
+    return result;
+  }
+
+  private async groupKeyRecipients(
+    group: GroupRow,
+    timestamp: number,
+    protocolVersion: number,
+  ): Promise<string[]> {
+    const result = await this.groupStub(group.id).getSessionKeyRecipients(
+      this.sessionParticipation(group, protocolVersion),
+      timestamp,
+    );
     if (result.status === "unavailable") {
       throw new HttpError(409, "group_key_unavailable", "Group key is not valid for new events");
     }
     return result.deviceIds;
   }
 
-  private async groupKeyDevice(groupId: string, timestamp: number, deviceId: string): Promise<void> {
-    const meta = this.metaRow();
-    const result = await this.groupStub(groupId).authorizeKeyForDevice(timestamp, deviceId, meta.protocol_version);
+  private async authorizeSessionDevice(
+    group: GroupRow,
+    deviceId: string,
+    token: string,
+    protocolVersion: number,
+  ): Promise<void> {
+    const result = await this.groupStub(group.id).authorizeSessionDevice(
+      this.sessionParticipation(group, protocolVersion),
+      deviceId,
+      token,
+    );
+    this.requireSessionDeviceAuthorization(result);
+  }
+
+  private async authorizeSessionKeyDevice(
+    group: GroupRow,
+    timestamp: number,
+    deviceId: string,
+    token: string,
+    protocolVersion: number,
+  ): Promise<void> {
+    const result = await this.groupStub(group.id).authorizeSessionKeyForDevice(
+      this.sessionParticipation(group, protocolVersion),
+      timestamp,
+      deviceId,
+      token,
+    );
+    this.requireSessionDeviceAuthorization(result);
+  }
+
+  private requireSessionDeviceAuthorization(result: SessionDeviceAuthorization): void {
     if (result === "device_removed") {
       throw new HttpError(403, "device_removed", "Device is not an active member of the group");
     }
-    if (result === "unavailable") {
-      throw new HttpError(403, "key_not_available", "Group key was not shared with this device");
+    if (result === "invalid_token") {
+      throw new HttpError(401, "invalid_device_token", "Device token is invalid");
     }
+    if (result === "unavailable") {
+      throw new HttpError(403, "key_not_available", "Group state is not available to this Session");
+    }
+  }
+
+  private sessionParticipation(group: GroupRow, protocolVersion: number): SessionParticipationAnchor {
+    return {
+      protocolVersion,
+      keyTimestamp: group.initial_key_timestamp,
+      transitionHash: group.initial_transition_hash,
+      actorDeviceId: group.actor_device_id,
+    };
   }
 
   private async putGroupSession(
@@ -1061,7 +1217,7 @@ export class Session extends DurableObject<SessionEnv> {
       CREATE TABLE IF NOT EXISTS meta (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL,
-        manager_hash TEXT NOT NULL,
+        session_token_hash TEXT NOT NULL,
         creator_public_key TEXT NOT NULL,
         expires_at INTEGER NOT NULL,
         protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
@@ -1080,6 +1236,8 @@ export class Session extends DurableObject<SessionEnv> {
         initial_public_key TEXT NOT NULL,
         initial_transition_hash TEXT,
         join_proof TEXT NOT NULL,
+        join_hash TEXT,
+        actor_device_id TEXT,
         joined_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS session_events_v3 (
@@ -1147,6 +1305,12 @@ export class Session extends DurableObject<SessionEnv> {
     if (!groupColumns.some((column) => column.name === "initial_transition_hash")) {
       this.state.storage.sql.exec("ALTER TABLE session_groups_v3 ADD COLUMN initial_transition_hash TEXT");
     }
+    if (!groupColumns.some((column) => column.name === "join_hash")) {
+      this.state.storage.sql.exec("ALTER TABLE session_groups_v3 ADD COLUMN join_hash TEXT");
+    }
+    if (!groupColumns.some((column) => column.name === "actor_device_id")) {
+      this.state.storage.sql.exec("ALTER TABLE session_groups_v3 ADD COLUMN actor_device_id TEXT");
+    }
     const eventColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(session_events_v3)"));
     if (!eventColumns.some((column) => column.name === "item_id")) {
       this.state.storage.sql.exec("ALTER TABLE session_events_v3 ADD COLUMN item_id TEXT");
@@ -1163,6 +1327,10 @@ export class Session extends DurableObject<SessionEnv> {
       this.state.storage.sql.exec("ALTER TABLE session_responses_v3 ADD COLUMN attachment_id TEXT");
     }
     const metaColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(meta)"));
+    if (metaColumns.some((column) => column.name === "manager_hash")
+      && !metaColumns.some((column) => column.name === "session_token_hash")) {
+      this.state.storage.sql.exec("ALTER TABLE meta RENAME COLUMN manager_hash TO session_token_hash");
+    }
     if (!metaColumns.some((column) => column.name === "protocol_version")) {
       this.state.storage.sql.exec("ALTER TABLE meta ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
     }
@@ -1249,6 +1417,29 @@ function sessionDescriptor(value: unknown): SignedSessionDescriptor {
     actorSignature: stringField(object, "actorSignature", BASE64URL, 128),
     continuitySignature: stringField(object, "continuitySignature", BASE64URL, 128),
   };
+}
+
+async function sessionJoinHash(
+  sessionId: string,
+  pairingId: string,
+  groupId: string,
+  deviceId: string,
+  keyTimestamp: number,
+  groupPublicKey: string,
+  transitionHash: string | null,
+  proof: string,
+): Promise<string> {
+  return sha256Hex([
+    "notify.guru/session-join-operation/v1",
+    sessionId,
+    pairingId,
+    groupId,
+    deviceId,
+    String(keyTimestamp),
+    groupPublicKey,
+    transitionHash ?? "",
+    proof,
+  ].join("\n"));
 }
 
 function queryIdentifier(url: URL, name: string): string {

@@ -186,7 +186,7 @@ func TestV4ResponsesSkipStaleEpochAndAdvanceCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	managerPrivateKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	sessionPrivateKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestV4ResponsesSkipStaleEpochAndAdvanceCursor(t *testing.T) {
 	transition.TransitionHash = groupTransitionHash(groupID, transition)
 
 	currentKey, err := deriveGroupKey(
-		managerPrivateKey, groupPublicKey, 4, sessionID, groupID, timestamp,
+		sessionPrivateKey, groupPublicKey, 4, sessionID, groupID, timestamp,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func TestV4ResponsesSkipStaleEpochAndAdvanceCursor(t *testing.T) {
 	api.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		var payload any
 		switch request.URL.Path {
-		case "/api/sessions/session/joins":
+		case "/api/sessions/session":
 			payload = joinsResult{Groups: []joinedGroup{joined}}
 		case "/api/sessions/session/responses":
 			requestedAfter = append(requestedAfter, request.URL.Query().Get("after"))
@@ -274,7 +274,7 @@ func TestV4ResponsesSkipStaleEpochAndAdvanceCursor(t *testing.T) {
 	})
 
 	session := &managedSession{
-		id: sessionID, managerToken: "manager", privateKey: managerPrivateKey,
+		id: sessionID, sessionToken: "session-token", privateKey: sessionPrivateKey,
 		groups: map[string]*Group{groupID: {
 			ID: groupID, PairingID: joined.PairingID, InitialTimestamp: timestamp,
 			InitialPublicKey: groupPublicKey, InitialTransitionHash: transition.TransitionHash,

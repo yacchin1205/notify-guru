@@ -375,6 +375,35 @@ final class ProtocolTests: XCTestCase {
             ),
             [remote(remainingDescriptor)]
         )
+
+        remaining.group?.keys[String(current.timestamp)] = GroupKey(
+            timestamp: current.timestamp, publicKey: currentDraft.publicKey,
+            privateKey: currentDraft.privateKey, transitionHash: current.transitionHash
+        )
+        let readdedDraft = CryptoEngine.createGroupKey()
+        let readdedPackages = try [removedMember, remainingMember].map { member in
+            try CryptoEngine.createKeyPackage(
+                groupID: "group", key: readdedDraft, deviceID: member.deviceID,
+                encryptionPublicKey: member.encryptionPublicKey
+            )
+        }
+        let readded = try CryptoEngine.createGroupTransition(
+            groupID: "group", identity: remaining, groupKey: readdedDraft, previous: current,
+            members: [removedMember, remainingMember], packages: readdedPackages,
+            recreated: false, now: 12
+        )
+        XCTAssertEqual(
+            try CryptoEngine.validateGroupTransitions(
+                groupID: "group", transitions: [initial, current, readded], trustedHash: current.transitionHash
+            ),
+            readded
+        )
+        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(
+            remote(removedDescriptor), groupID: "group", transitions: [initial, current, readded]
+        ))
+        XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(
+            remote(remainingDescriptor), groupID: "group", transitions: [initial, current, readded]
+        ))
     }
 
     func testV4TransitionRejectsRecreatedSelfRemoval() throws {

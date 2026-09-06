@@ -233,6 +233,27 @@ describe("web device-group cryptography", () => {
     await expect(authenticatedInheritedSessions(
       [removedDescriptor, remainingDescriptor], groupId, [initial, current],
     )).resolves.toEqual([remainingDescriptor]);
+
+    remaining.group.keys[String(current.timestamp)] = {
+      ...currentDraft, timestamp: current.timestamp, transitionHash: current.transitionHash,
+    };
+    const readdedDraft = await createGroupKey();
+    const readded = await createGroupTransition(
+      groupId, remaining, readdedDraft, current, [removedMember, remainingMember],
+      await Promise.all([
+        createKeyPackage(groupId, readdedDraft, removedMember),
+        createKeyPackage(groupId, readdedDraft, remainingMember),
+      ]), false,
+    );
+    await expect(validateGroupTransitions(
+      groupId, [initial, current, readded], current.transitionHash,
+    )).resolves.toEqual(readded);
+    await expect(verifySessionDescriptor(
+      removedDescriptor, groupId, [initial, current, readded],
+    )).resolves.toBe(false);
+    await expect(verifySessionDescriptor(
+      remainingDescriptor, groupId, [initial, current, readded],
+    )).resolves.toBe(true);
   });
 
   it("binds device approval to the complete request and accepted transition", async () => {

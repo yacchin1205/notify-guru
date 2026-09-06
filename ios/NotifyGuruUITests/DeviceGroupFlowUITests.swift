@@ -65,8 +65,9 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Authenticated v4 session"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Connected securely"].exists)
         XCTAssertFalse(app.staticTexts["Legacy v3 session"].exists)
+        XCTAssertFalse(app.staticTexts["Removed signer session"].exists)
         XCTAssertFalse(app.staticTexts["Unable to start"].exists)
-        attachScreenshot(named: "36-mixed-inheritance-v4-only", app: app)
+        attachScreenshot(named: "36-only-continuously-attested-v4-session", app: app)
     }
 
     func testIPhoneKeepsSessionCardsInOneColumn() throws {
@@ -120,7 +121,13 @@ final class DeviceGroupFlowUITests: XCTestCase {
         app.buttons["Done"].tap()
 
         XCUIDevice.shared.orientation = .landscapeLeft
-        Thread.sleep(forTimeInterval: 1)
+        let landscape = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let frame = app.windows.firstMatch.frame
+                return frame.width > frame.height
+            }, object: nil
+        )
+        XCTAssertEqual(XCTWaiter().wait(for: [landscape], timeout: 10), .completed)
         XCTAssertEqual(newest.frame.minY, middle.frame.minY, accuracy: 4)
         XCTAssertEqual(middle.frame.minY, oldest.frame.minY, accuracy: 4)
         XCTAssertLessThan(newest.frame.minX, middle.frame.minX)
@@ -286,7 +293,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         choosePhoto.tap()
         let photoThumbnail = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
-        XCTAssertTrue(photoThumbnail.waitForExistence(timeout: 5))
+        XCTAssertTrue(photoThumbnail.waitForExistence(timeout: 20))
         attachScreenshot(named: "51-v4-feedback-photo-library", app: app)
 
         let onboardingClose = app.buttons.matching(
@@ -329,8 +336,10 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertEqual(buttons.count, 2)
         buttons.element(boundBy: 1).tap()
         XCTAssertTrue(app.staticTexts["3 unresolved items"].waitForExistence(timeout: 5))
-        let icon = springboard.icons["notify.guru"]
+        let icon = springboard.icons["notify.guru"].firstMatch
         showHomeScreen(icon: icon)
+        let badgeThree = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value MATCHES %@", "3[^0-9].*"), object: icon)
+        XCTAssertEqual(XCTWaiter().wait(for: [badgeThree], timeout: 10), .completed)
         attachScreenshot(named: "14-app-icon-badge-three", screen: .main)
 
         icon.tap()
@@ -338,6 +347,8 @@ final class DeviceGroupFlowUITests: XCTestCase {
         app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["2 unresolved items"].waitForExistence(timeout: 5))
         showHomeScreen(icon: icon)
+        let badgeTwo = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value MATCHES %@", "2[^0-9].*"), object: icon)
+        XCTAssertEqual(XCTWaiter().wait(for: [badgeTwo], timeout: 10), .completed)
         attachScreenshot(named: "15-app-icon-badge-two", screen: .main)
 
         icon.tap()
@@ -346,6 +357,8 @@ final class DeviceGroupFlowUITests: XCTestCase {
         app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
         XCTAssertFalse(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 2))
         showHomeScreen(icon: icon)
+        let badgeCleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == ''"), object: icon)
+        XCTAssertEqual(XCTWaiter().wait(for: [badgeCleared], timeout: 10), .completed)
         attachScreenshot(named: "16-app-icon-badge-cleared", screen: .main)
     }
 
@@ -367,7 +380,10 @@ final class DeviceGroupFlowUITests: XCTestCase {
             // outside-tap dismissal instead of an accessibility button.
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.2)).tap()
         }
-        XCTAssertFalse(app.staticTexts["Add a device to this group?"].exists)
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [absence(of: app.staticTexts["Add a device to this group?"])], timeout: 5),
+            .completed
+        )
         attachScreenshot(named: "21-device-addition-cancelled", app: app)
     }
 
@@ -424,8 +440,8 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
     private var sessionLinkFixture: String {
         let secret = String(repeating: "A", count: 43)
-        let publicKey = String(repeating: "A", count: 87)
-        return "https://notify.guru/join#v=3&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
+        let publicKey = "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+        return "https://notify.guru/join#v=4&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
     }
 
     private func attachScreenshot(named name: String, app: XCUIApplication) {
@@ -443,7 +459,6 @@ final class DeviceGroupFlowUITests: XCTestCase {
     }
 
     private func showHomeScreen(icon: XCUIElement) {
-        Thread.sleep(forTimeInterval: 1)
         XCUIDevice.shared.press(.home)
         if !icon.waitForExistence(timeout: 2) {
             XCUIDevice.shared.press(.home)

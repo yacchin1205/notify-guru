@@ -9,7 +9,7 @@ describe("session relay", () => {
       method: "POST",
       body: {
         sessionId: randomId(),
-        managerTokenHash: await hash("manager-token"),
+        sessionTokenHash: await hash("session-token"),
         creatorPublicKey: "A".repeat(87),
         pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
       },
@@ -23,7 +23,7 @@ describe("session relay", () => {
       method: "POST",
       body: {
         sessionId: randomId(),
-        managerTokenHash: await hash("manager-token"),
+        sessionTokenHash: await hash("session-token"),
         creatorPublicKey: "A".repeat(87),
         pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
         typo: true,
@@ -44,17 +44,17 @@ describe("session relay", () => {
 
     const session = await createSession();
     const unsafeCursor = await api(`/api/sessions/${session.id}/responses?after=9007199254740992`, {
-      token: session.managerToken,
+      token: session.sessionToken,
     });
     expect(unsafeCursor.status).toBe(400);
     expect(unsafeCursor.json.error).toBe("invalid_query");
   });
 
-  it("requires the exact manager capability", async () => {
+  it("requires the exact Session capability", async () => {
     const session = await createSession();
     const response = await api(`/api/sessions/${session.id}/responses?after=0`, { token: "wrong-token" });
     expect(response.status).toBe(401);
-    expect(response.json.error).toBe("invalid_manager_token");
+    expect(response.json.error).toBe("invalid_session_token");
   });
 
   it("deallocates all session storage when its alarm fires", async () => {
@@ -66,7 +66,7 @@ describe("session relay", () => {
     expect(await runDurableObjectAlarm(stub)).toBe(true);
 
     const response = await api(`/api/sessions/${session.id}/responses?after=0`, {
-      token: session.managerToken,
+      token: session.sessionToken,
     });
     expect(response.status).toBe(404);
     expect(response.json.error).toBe("session_not_found");
@@ -76,12 +76,12 @@ describe("session relay", () => {
     const session = await createSession();
     const closed = await api(`/api/sessions/${session.id}`, {
       method: "DELETE",
-      token: session.managerToken,
+      token: session.sessionToken,
     });
     expect(closed.status).toBe(204);
 
     const response = await api(`/api/sessions/${session.id}/responses?after=0`, {
-      token: session.managerToken,
+      token: session.sessionToken,
     });
     expect(response.status).toBe(404);
   });
@@ -112,20 +112,20 @@ describe("session relay", () => {
   });
 });
 
-async function createSession(): Promise<{ id: string; managerToken: string }> {
+async function createSession(): Promise<{ id: string; sessionToken: string }> {
   const id = randomId();
-  const managerToken = "manager-token";
+  const sessionToken = "session-token";
   const created = await api("/api/sessions", {
     method: "POST",
     body: {
       sessionId: id,
-      managerTokenHash: await hash(managerToken),
+      sessionTokenHash: await hash(sessionToken),
       creatorPublicKey: await creatorPublicKey(),
       pairing: { id: randomId(), tokenHash: await hash("pairing-token") },
     },
   });
   expect(created.status).toBe(201);
-  return { id, managerToken };
+  return { id, sessionToken };
 }
 
 async function creatorPublicKey(): Promise<string> {

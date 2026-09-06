@@ -11,6 +11,7 @@
     "predev": "npm run build:web",
     "pretest": "npm run build:web",
     "test": "vitest run",
+    "test:all": "scripts/test-all.sh",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

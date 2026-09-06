@@ -1,5 +1,6 @@
 import { HttpError, IDENTIFIER, expectKeys, json, readObject, stringField } from "./http";
 import { DeviceRegistry } from "./device";
+import { DeviceRequest } from "./device-request";
 import { DeviceGroup } from "./group";
 import { Session } from "./session";
 
@@ -7,11 +8,12 @@ interface Env {
   SESSIONS: DurableObjectNamespace<Session>;
   GROUPS: DurableObjectNamespace<DeviceGroup>;
   DEVICES: DurableObjectNamespace<DeviceRegistry>;
+  DEVICE_REQUESTS: DurableObjectNamespace<DeviceRequest>;
   ASSETS: Fetcher;
   ATTACHMENTS: R2Bucket;
 }
 
-export { DeviceGroup, DeviceRegistry, Session };
+export { DeviceGroup, DeviceRegistry, DeviceRequest, Session };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -53,13 +55,13 @@ export default {
       const deviceRequestMatch = /^\/api\/device-requests\/([^/]+)$/.exec(url.pathname);
       if (request.method === "GET" && deviceRequestMatch !== null) {
         const requestId = stringField({ requestId: deviceRequestMatch[1] }, "requestId", IDENTIFIER, 64);
-        const internalUrl = new URL(`https://devices.internal/device-requests/${requestId}`);
+        const internalUrl = new URL("https://device-request.internal/");
         internalUrl.search = url.search;
-        return deviceRegistry(env).fetch(publicRequest(internalUrl, request));
+        return deviceRequestStub(env, requestId).fetch(publicRequest(internalUrl, request));
       }
       if (request.method === "POST" && url.pathname === "/api/sessions") {
         const body = await readObject(request);
-        expectKeys(body, ["sessionId", "managerTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
+        expectKeys(body, ["sessionId", "sessionTokenHash", "creatorPublicKey", "pairing"], ["protocolVersion"]);
         const sessionId = stringField(body, "sessionId", IDENTIFIER, 64);
         return sessionStub(env, sessionId).fetch(
           forwardedRequest("/create", request, JSON.stringify(body)),
@@ -72,6 +74,16 @@ export default {
         return groupStub(env, groupId).fetch(
           forwardedRequest("/create", request, JSON.stringify(body)),
         );
+      }
+
+      const groupDeviceRequestMatch = /^\/api\/groups\/([^/]+)\/device-requests\/([^/]+)(\/approve)?$/.exec(url.pathname);
+      if (groupDeviceRequestMatch !== null) {
+        const groupId = stringField({ groupId: groupDeviceRequestMatch[1] }, "groupId", IDENTIFIER, 64);
+        const requestId = stringField({ requestId: groupDeviceRequestMatch[2] }, "requestId", IDENTIFIER, 64);
+        const suffix = groupDeviceRequestMatch[3] ?? "";
+        const internalUrl = new URL(`https://device-request.internal/groups/${groupId}${suffix}`);
+        internalUrl.search = url.search;
+        return deviceRequestStub(env, requestId).fetch(publicRequest(internalUrl, request));
       }
 
       const groupMatch = /^\/api\/groups\/([^/]+)(\/.*)?$/.exec(url.pathname);
@@ -109,6 +121,10 @@ function groupStub(env: Env, groupId: string): DurableObjectStub<DeviceGroup> {
 
 function deviceRegistry(env: Env): DurableObjectStub<DeviceRegistry> {
   return env.DEVICES.get(env.DEVICES.idFromName("registry"));
+}
+
+function deviceRequestStub(env: Env, requestId: string): DurableObjectStub<DeviceRequest> {
+  return env.DEVICE_REQUESTS.get(env.DEVICE_REQUESTS.idFromName(requestId));
 }
 
 function forwardedRequest(path: string, original: Request, body: string): Request {

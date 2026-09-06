@@ -294,7 +294,7 @@ async function pollDeviceRequest() {
   const requestId = pendingDeviceRequest.requestId;
   const signature = await signDevice(identity, deviceRequestReadTranscript(requestId, identity.deviceId));
   const state = await getDeviceRequest(identity, requestId, signature);
-  if (state.status === "waiting") {
+  if (state.status === "waiting" || state.status === "approving") {
     showDeviceRequest(pendingDeviceRequest);
     return;
   }
@@ -438,7 +438,11 @@ async function joinFromFragment() {
   await ensureExactGroupKey();
   await inheritSessions();
   const sessionId = parameters.get("s");
-  if (await getSession(sessionId) !== undefined) throw new Error("This device group has already joined the session");
+  const existing = await getSession(sessionId);
+  if (existing !== undefined && (existing.protocolVersion !== protocolVersion
+    || existing.groupId !== identity.group.groupId || existing.creatorPublicKey !== parameters.get("k"))) {
+    throw new Error("Session identifier conflicts with the joined session");
+  }
   const groupKey = await currentLocalKey();
   const pairingId = parameters.get("p");
   const proof = await pairingProof(
@@ -451,19 +455,31 @@ async function joinFromFragment() {
       identity, groupKey, sessionId, identity.group.groupId, creatorPublicKey,
     )
     : undefined;
-  const expiresAt = await joinSession(sessionId, {
-    pairingId,
-    pairingToken: parameters.get("t"),
-    groupId: identity.group.groupId,
-    deviceId: identity.deviceId,
-    deviceAccessToken: identity.accessToken,
-    keyTimestamp: groupKey.timestamp,
-    groupPublicKey: groupKey.publicKey,
-    transitionHash: groupKey.transitionHash,
-    proof,
-    ...(sessionDescriptor === undefined ? {} : { sessionDescriptor }),
-  });
-  await putSession(newSession(protocolVersion, sessionId, identity.group.groupId, creatorPublicKey, expiresAt, colorValue(`#${parameters.get("c")}`)));
+  let expiresAt;
+  try {
+    expiresAt = await joinSession(sessionId, {
+      pairingId,
+      pairingToken: parameters.get("t"),
+      groupId: identity.group.groupId,
+      deviceId: identity.deviceId,
+      deviceAccessToken: identity.accessToken,
+      keyTimestamp: groupKey.timestamp,
+      groupPublicKey: groupKey.publicKey,
+      transitionHash: groupKey.transitionHash,
+      proof,
+      ...(sessionDescriptor === undefined ? {} : { sessionDescriptor }),
+    });
+  } catch (error) {
+    if (!(existing !== undefined && error instanceof ApiError && error.status === 409 && error.code === "group_joined")) {
+      throw error;
+    }
+  }
+  if (existing === undefined) {
+    await putSession(newSession(protocolVersion, sessionId, identity.group.groupId, creatorPublicKey, expiresAt, colorValue(`#${parameters.get("c")}`)));
+  } else if (expiresAt !== undefined && expiresAt > existing.expiresAt) {
+    existing.expiresAt = expiresAt;
+    await putSession(existing);
+  }
   history.replaceState(null, "", "/");
   messageElement.textContent = "セッションへ参加しました。";
 }
