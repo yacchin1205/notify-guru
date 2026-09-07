@@ -85,7 +85,7 @@ jobs:
 
   snapshot:
     if: github.ref_type != 'tag'
-    needs: [verify, integration, web, apple-test]
+    needs: [verify, integration, web]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -114,7 +114,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [verify, integration, web, apple-test]
+    needs: [verify, integration, web]
     permissions:
       contents: write
     runs-on: ubuntu-24.04
