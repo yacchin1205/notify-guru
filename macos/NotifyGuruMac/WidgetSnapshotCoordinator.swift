@@ -7,8 +7,9 @@ final class WidgetSnapshotCoordinator {
     private var store: WidgetSnapshotStore?
     private var subscription: AnyCancellable?
 
-    init(model: AppModel) {
+    init(model: AppModel, store: WidgetSnapshotStore? = nil) {
         self.model = model
+        self.store = store
         subscription = model.$sessions
             .combineLatest(model.$isReady)
             .compactMap { sessions, isReady in isReady ? sessions : nil }

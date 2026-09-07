@@ -4,19 +4,21 @@ import {
   HttpError,
   IDENTIFIER,
   SHA256_HEX,
-  bearerToken,
   expectKeys,
   json,
   readObject,
   stringField,
 } from "./http";
 import { deviceRequestBindingHash, randomIdentifier, verifyP256Signature } from "./protocol";
+import type { DeviceRequest, DeviceRequestCreation } from "./device-request";
 
 const DEVICE_REQUEST_LIFETIME_MS = 10 * 60 * 1000;
 const PUBLIC_KEY = BASE64URL;
 const SIGNATURE = BASE64URL;
 
-interface DeviceEnv {}
+interface DeviceEnv {
+  DEVICE_REQUESTS: DurableObjectNamespace<DeviceRequest>;
+}
 
 interface DeviceRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -29,32 +31,6 @@ interface DevicePushRow extends DeviceRow {
   badge_count: number;
 }
 
-interface DeviceRequestRow extends Record<string, SqlStorageValue> {
-  id: string;
-  device_id: string;
-  access_hash: string;
-  encryption_public_key: string;
-  expires_at: number;
-  claimed_group_id: string | null;
-  approved_group_id: string | null;
-  protocol_version: number;
-  approval_transition_hash: string | null;
-  approval_proof: string | null;
-}
-
-export type DeviceRequestClaim =
-  | ({ status: "claimed" } & ClaimedDeviceRequest)
-  | { status: "not_found" | "expired" | "used" | "claimed_by_another_group" };
-
-export interface ClaimedDeviceRequest {
-  requestId: string;
-  deviceId: string;
-  deviceAccessTokenHash: string;
-  deviceEncryptionPublicKey: string;
-  deviceSigningPublicKey: string;
-  protocolVersion: number;
-}
-
 export interface DevicePushTarget {
   deviceId: string;
   token: string;
@@ -64,10 +40,12 @@ export interface DevicePushTarget {
 
 export class DeviceRegistry extends DurableObject<DeviceEnv> {
   private readonly state: DurableObjectState;
+  private readonly deviceRequests: DurableObjectNamespace<DeviceRequest>;
 
   constructor(state: DurableObjectState, env: DeviceEnv) {
     super(state, env);
     this.state = state;
+    this.deviceRequests = env.DEVICE_REQUESTS;
     this.state.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS devices (
         id TEXT PRIMARY KEY,
@@ -76,20 +54,6 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
         push_environment TEXT CHECK (push_environment IN ('sandbox', 'production')),
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS device_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL REFERENCES devices(id),
-        access_hash TEXT NOT NULL,
-        encryption_public_key TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,
-        claimed_group_id TEXT,
-        approved_group_id TEXT,
-        created_at INTEGER NOT NULL,
-        approved_at INTEGER,
-        approval_transition_hash TEXT,
-        approval_proof TEXT,
-        protocol_version INTEGER NOT NULL DEFAULT 3 CHECK (protocol_version IN (3, 4))
       );
       CREATE TABLE IF NOT EXISTS device_active_items_v1 (
         device_id TEXT NOT NULL REFERENCES devices(id),
@@ -103,17 +67,8 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
         ON device_active_items_v1(session_id, item_id);
       CREATE INDEX IF NOT EXISTS device_active_items_v1_group_device
         ON device_active_items_v1(group_id, device_id);
+      DROP TABLE IF EXISTS device_requests;
     `);
-    const requestColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(device_requests)"));
-    if (!requestColumns.some((column) => column.name === "protocol_version")) {
-      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 3");
-    }
-    if (!requestColumns.some((column) => column.name === "approval_transition_hash")) {
-      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN approval_transition_hash TEXT");
-    }
-    if (!requestColumns.some((column) => column.name === "approval_proof")) {
-      this.state.storage.sql.exec("ALTER TABLE device_requests ADD COLUMN approval_proof TEXT");
-    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -139,83 +94,12 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
     if (request.method === "POST" && url.pathname === "/device-requests") {
       return this.createDeviceRequest(request);
     }
-    const requestMatch = /^\/device-requests\/([^/]+)$/.exec(url.pathname);
-    if (request.method === "GET" && requestMatch !== null) {
-      return this.deviceRequest(request, identifier(requestMatch[1], "requestId"));
-    }
-
     throw new HttpError(404, "not_found", "Endpoint not found");
   }
 
   getRegisteredDevice(deviceId: string): { deviceId: string; signingPublicKey: string } | null {
     const device = this.device(deviceId);
     return device === null ? null : { deviceId: device.id, signingPublicKey: device.signing_public_key };
-  }
-
-  claimDeviceRequest(requestId: string, groupId: string): DeviceRequestClaim {
-    const row = this.deviceRequestRow(requestId);
-    if (row === null) return { status: "not_found" };
-    if (Date.now() >= row.expires_at) return { status: "expired" };
-    if (row.approved_group_id !== null) return { status: "used" };
-    if (row.claimed_group_id !== null && row.claimed_group_id !== groupId) {
-      return { status: "claimed_by_another_group" };
-    }
-    if (row.claimed_group_id === null) {
-      this.state.storage.sql.exec("UPDATE device_requests SET claimed_group_id = ? WHERE id = ?", groupId, requestId);
-    }
-    return {
-      status: "claimed",
-      requestId: row.id,
-      deviceId: row.device_id,
-      deviceAccessTokenHash: row.access_hash,
-      deviceEncryptionPublicKey: row.encryption_public_key,
-      deviceSigningPublicKey: this.requiredDevice(row.device_id).signing_public_key,
-      protocolVersion: row.protocol_version,
-    };
-  }
-
-  getDeviceRequestForApproval(requestId: string): ClaimedDeviceRequest | null {
-    const row = this.deviceRequestRow(requestId);
-    if (row === null || Date.now() >= row.expires_at || row.approved_group_id !== null) return null;
-    return {
-      requestId: row.id,
-      deviceId: row.device_id,
-      deviceAccessTokenHash: row.access_hash,
-      deviceEncryptionPublicKey: row.encryption_public_key,
-      deviceSigningPublicKey: this.requiredDevice(row.device_id).signing_public_key,
-      protocolVersion: row.protocol_version,
-    };
-  }
-
-  completeDeviceRequest(
-    requestId: string,
-    groupId: string,
-    approvalTransitionHash: string,
-    approvalProof: string,
-  ): "approved" | "not_claimed" | "used" {
-    const row = this.deviceRequestRow(requestId);
-    if (row === null || row.claimed_group_id !== groupId) return "not_claimed";
-    if (row.approved_group_id !== null && row.approved_group_id !== groupId) return "used";
-    this.state.storage.sql.exec(
-      `UPDATE device_requests
-       SET approved_group_id = ?, approved_at = ?, approval_transition_hash = ?, approval_proof = ?
-       WHERE id = ?`,
-      groupId,
-      Date.now(),
-      approvalTransitionHash,
-      approvalProof,
-      requestId,
-    );
-    return "approved";
-  }
-
-  releaseDeviceRequestClaim(requestId: string, groupId: string): void {
-    this.state.storage.sql.exec(
-      `UPDATE device_requests SET claimed_group_id = NULL
-       WHERE id = ? AND claimed_group_id = ? AND approved_group_id IS NULL`,
-      requestId,
-      groupId,
-    );
   }
 
   getPushTargets(deviceIds: string[]): DevicePushTarget[] {
@@ -354,18 +238,6 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       throw new HttpError(401, "invalid_device_signature", "Device request signature is invalid");
     }
     const expiresAt = Date.now() + DEVICE_REQUEST_LIFETIME_MS;
-    this.state.storage.sql.exec(
-      `INSERT INTO device_requests
-         (id, device_id, access_hash, encryption_public_key, expires_at, created_at, protocol_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      requestId,
-      deviceId,
-      accessHash,
-      encryptionPublicKey,
-      expiresAt,
-      Date.now(),
-      protocolVersion,
-    );
     const requestHash = await deviceRequestBindingHash({
       requestId,
       deviceId,
@@ -374,35 +246,18 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
       encryptionPublicKey,
       protocolVersion,
     });
+    const creation: DeviceRequestCreation = {
+      requestId,
+      deviceId,
+      deviceAccessTokenHash: accessHash,
+      deviceEncryptionPublicKey: encryptionPublicKey,
+      deviceSigningPublicKey: device.signing_public_key,
+      protocolVersion,
+      expiresAt,
+      requestHash,
+    };
+    await this.deviceRequestStub(requestId).create(creation);
     return json({ requestId, expiresAt, ...(protocolVersion === 4 ? { requestHash } : {}) }, 201);
-  }
-
-  private async deviceRequest(request: Request, requestId: string): Promise<Response> {
-    const row = this.requiredDeviceRequest(requestId);
-    const deviceId = identifier(new URL(request.url).searchParams.get("deviceId"), "deviceId");
-    if (deviceId !== row.device_id) {
-      throw new HttpError(403, "wrong_device", "Device request belongs to another device");
-    }
-    const device = this.requiredDevice(deviceId);
-    const transcript = ["notify.guru/device-request-read/v1", requestId, deviceId].join("\n");
-    if (!(await verifyP256Signature(device.signing_public_key, bearerToken(request), transcript))) {
-      throw new HttpError(401, "invalid_device_signature", "Device request signature is invalid");
-    }
-    if (row.approved_group_id !== null) {
-      return json({
-        status: "approved",
-        groupId: row.approved_group_id,
-        expiresAt: row.expires_at,
-        ...(row.protocol_version === 4 ? {
-          transitionHash: row.approval_transition_hash,
-          approvalProof: row.approval_proof,
-        } : {}),
-      });
-    }
-    if (Date.now() >= row.expires_at) {
-      return json({ status: "expired", expiresAt: row.expires_at });
-    }
-    return json({ status: "waiting", expiresAt: row.expires_at });
   }
 
   private requiredDevice(deviceId: string): DeviceRow {
@@ -441,21 +296,8 @@ export class DeviceRegistry extends DurableObject<DeviceEnv> {
     return rows.length === 0 ? null : rows[0];
   }
 
-  private requiredDeviceRequest(requestId: string): DeviceRequestRow {
-    const row = this.deviceRequestRow(requestId);
-    if (row === null) throw new HttpError(404, "device_request_not_found", "Device request not found");
-    return row;
-  }
-
-  private deviceRequestRow(requestId: string): DeviceRequestRow | null {
-    const rows = Array.from(this.state.storage.sql.exec<DeviceRequestRow>(
-      `SELECT id, device_id, access_hash, encryption_public_key, expires_at,
-              claimed_group_id, approved_group_id, protocol_version,
-              approval_transition_hash, approval_proof
-       FROM device_requests WHERE id = ?`,
-      requestId,
-    ));
-    return rows.length === 0 ? null : rows[0];
+  private deviceRequestStub(requestId: string): DurableObjectStub<DeviceRequest> {
+    return this.deviceRequests.get(this.deviceRequests.idFromName(requestId));
   }
 }
 

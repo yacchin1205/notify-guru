@@ -43,7 +43,7 @@ type managedSession struct {
 	id              string
 	title           string
 	color           string
-	managerToken    string
+	sessionToken    string
 	privateKey      *ecdh.PrivateKey
 	publicKey       string
 	pairings        map[string]Pairing
@@ -70,7 +70,7 @@ func (s *Store) Create(ctx context.Context, title, color string) (sessionID, pai
 	if err != nil {
 		return "", "", err
 	}
-	managerToken, err := randomValue(32)
+	sessionToken, err := randomValue(32)
 	if err != nil {
 		return "", "", err
 	}
@@ -84,14 +84,14 @@ func (s *Store) Create(ctx context.Context, title, color string) (sessionID, pai
 	}
 	publicKey := encode(privateKey.PublicKey().Bytes())
 	const protocolVersion = 4
-	if err := s.api.createSession(ctx, sessionID, tokenHash(managerToken), publicKey, pairing, protocolVersion); err != nil {
+	if err := s.api.createSession(ctx, sessionID, tokenHash(sessionToken), publicKey, pairing, protocolVersion); err != nil {
 		return "", "", err
 	}
 	session := &managedSession{
 		id:              sessionID,
 		title:           title,
 		color:           color,
-		managerToken:    managerToken,
+		sessionToken:    sessionToken,
 		privateKey:      privateKey,
 		publicKey:       publicKey,
 		pairings:        map[string]Pairing{pairing.ID: pairing},
@@ -213,7 +213,7 @@ func (s *Store) AddPairing(ctx context.Context, sessionID string) (string, error
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if err := s.api.addPairing(ctx, session.id, session.managerToken, pairing); err != nil {
+	if err := s.api.addPairing(ctx, session.id, session.sessionToken, pairing); err != nil {
 		return "", err
 	}
 	session.pairings[pairing.ID] = pairing
@@ -231,7 +231,7 @@ func (s *Store) RefreshGroups(ctx context.Context, sessionID string) (int, error
 }
 
 func (s *Store) refreshGroupsLocked(ctx context.Context, session *managedSession) (int, error) {
-	result, err := s.api.joins(ctx, session.id, session.managerToken)
+	result, err := s.api.joins(ctx, session.id, session.sessionToken)
 	if err != nil {
 		return 0, err
 	}
@@ -522,7 +522,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	result, err := s.api.responses(ctx, session.id, session.managerToken, session.responseCursor)
+	result, err := s.api.responses(ctx, session.id, session.sessionToken, session.responseCursor)
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +649,7 @@ func (s *Store) receiveAttachment(
 	ciphertext, err := s.api.attachment(
 		ctx,
 		session.id,
-		session.managerToken,
+		session.sessionToken,
 		manifest.ID,
 		manifest.CiphertextLength,
 	)
@@ -830,7 +830,7 @@ func (s *Store) Close(ctx context.Context, sessionID string) error {
 		_ = os.RemoveAll(session.tempDir)
 	}
 	session.mu.Lock()
-	err = s.api.closeSession(ctx, session.id, session.managerToken)
+	err = s.api.closeSession(ctx, session.id, session.sessionToken)
 	session.mu.Unlock()
 	if err != nil {
 		return err
@@ -931,7 +931,7 @@ func (s *Store) sendToGroupOnce(ctx context.Context, session *managedSession, gr
 	return s.api.addEvent(
 		ctx,
 		session.id,
-		session.managerToken,
+		session.sessionToken,
 		envelopeID,
 		itemID,
 		group.ID,

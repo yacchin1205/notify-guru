@@ -35,7 +35,7 @@ export async function getDeviceRequest(identity, requestId, signature) {
       approvalProof: stringValue(result.approvalProof, "approvalProof"),
     };
   }
-  if (status !== "waiting" && status !== "expired") throw new Error("Unknown device request status");
+  if (status !== "waiting" && status !== "approving" && status !== "expired") throw new Error("Unknown device request status");
   requireExactKeys(result, ["status", "expiresAt"]);
   return { status, expiresAt: integerValue(result.expiresAt, "expiresAt") };
 }

@@ -15,6 +15,7 @@ struct EventsResult: Equatable { let events: [EventEnvelope]; let activeItemIDs:
 
 enum DeviceRequestStatus: Equatable {
     case waiting(expiresAt: Int64)
+    case approving(expiresAt: Int64)
     case expired(expiresAt: Int64)
     case approved(groupID: String, expiresAt: Int64, transitionHash: String, approvalProof: String)
 }
@@ -143,6 +144,9 @@ struct APIClient {
         case "waiting":
             try requireKeys(fields, ["status", "expiresAt"])
             return .waiting(expiresAt: try integer(fields, "expiresAt"))
+        case "approving":
+            try requireKeys(fields, ["status", "expiresAt"])
+            return .approving(expiresAt: try integer(fields, "expiresAt"))
         case "expired":
             try requireKeys(fields, ["status", "expiresAt"])
             return .expired(expiresAt: try integer(fields, "expiresAt"))

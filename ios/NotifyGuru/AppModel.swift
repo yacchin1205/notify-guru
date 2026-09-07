@@ -23,7 +23,8 @@ final class AppModel: ObservableObject {
     private var groupState: DeviceGroupStateResult?
     private var pendingDeviceRequest: DeviceRequestRecord?
     private var pendingDeviceAddition: DeviceRequestLink?
-    private var pendingUniversalLink: URL?
+    private var pendingUniversalLinks: [URL] = []
+    private var pendingUniversalLinkTask: Task<Void, Never>?
     private var hasFinishedStarting = false
     private var isSyncing = false
     private var isStateActionInProgress = false
@@ -175,7 +176,7 @@ final class AppModel: ObservableObject {
     func join(link: String) async -> Bool {
         guard !isSyncing, !isStateActionInProgress else { return false }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
             if URLComponents(string: value)?.path == "/device" {
@@ -230,7 +231,7 @@ final class AppModel: ObservableObject {
             return false
         }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             try await approveDeviceRequest(link)
             if clearPendingOnSuccess { clearPendingDeviceAddition() }
@@ -246,17 +247,14 @@ final class AppModel: ObservableObject {
     func cancelDeviceAddition() { clearPendingDeviceAddition() }
 
     func openUniversalLink(_ url: URL) async {
-        guard !hasFinishedStarting else {
-            _ = await join(link: url.absoluteString)
-            return
-        }
-        pendingUniversalLink = url
+        pendingUniversalLinks.append(url)
+        schedulePendingUniversalLink()
     }
 
     func createDeviceRequest(discardingCurrentState: Bool = false) async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             if let pendingDeviceRequest {
@@ -302,7 +300,7 @@ final class AppModel: ObservableObject {
     func removeDevice(_ deviceID: String) async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard let state = groupState else { throw ProtocolError.crypto("group state is unavailable") }
@@ -326,7 +324,7 @@ final class AppModel: ObservableObject {
     func leaveDeviceGroup() async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard groupDevices.count > 1, let groupID = current.identity.group?.groupID else {
@@ -351,7 +349,7 @@ final class AppModel: ObservableObject {
     func respond(sessionID: String, optionID: String) async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -381,7 +379,7 @@ final class AppModel: ObservableObject {
     func dismissRequest(sessionID: String) async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -431,7 +429,7 @@ final class AppModel: ObservableObject {
     func dismissNotification(sessionID: String, notificationID: String) async {
         guard !isSyncing, !isStateActionInProgress else { return }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard let sessionIndex = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
@@ -463,7 +461,7 @@ final class AppModel: ObservableObject {
     func setAttention(sessionID: String, attention: Bool) async -> Bool {
         guard !isSyncing, !isStateActionInProgress else { return false }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             var current = try requiredVault()
             guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }) else {
@@ -486,7 +484,7 @@ final class AppModel: ObservableObject {
     func sendFeedback(sessionID: String, message: String, photo: PreparedPhoto? = nil) async -> Bool {
         guard !isSyncing, !isStateActionInProgress else { return false }
         isStateActionInProgress = true
-        defer { isStateActionInProgress = false }
+        defer { finishStateAction() }
         do {
             let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard text.utf8.count <= 20_000, !text.isEmpty || photo != nil else {
@@ -560,9 +558,26 @@ final class AppModel: ObservableObject {
 #endif
 
     private func openPendingUniversalLink() async {
-        guard let url = pendingUniversalLink else { return }
-        pendingUniversalLink = nil
+        guard hasFinishedStarting, !isSyncing, !isStateActionInProgress,
+              !pendingUniversalLinks.isEmpty else { return }
+        let url = pendingUniversalLinks.removeFirst()
         _ = await join(link: url.absoluteString)
+        schedulePendingUniversalLink()
+    }
+
+    private func schedulePendingUniversalLink() {
+        guard hasFinishedStarting, !isSyncing, !isStateActionInProgress,
+              !pendingUniversalLinks.isEmpty, pendingUniversalLinkTask == nil else { return }
+        pendingUniversalLinkTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.pendingUniversalLinkTask = nil
+            await self.openPendingUniversalLink()
+        }
+    }
+
+    private func finishStateAction() {
+        isStateActionInProgress = false
+        schedulePendingUniversalLink()
     }
 
     func resetLocalData() async {
@@ -604,7 +619,10 @@ final class AppModel: ObservableObject {
               !isDeviceAdditionApprovalUITest, !isSessionLinkUITest else { return }
         guard isReady, !isSyncing, !isStateActionInProgress else { return }
         isSyncing = true; connectionState = .syncing
-        defer { isSyncing = false }
+        defer {
+            isSyncing = false
+            schedulePendingUniversalLink()
+        }
         do {
             var current = try requiredVault()
             let pruned = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
@@ -722,12 +740,32 @@ final class AppModel: ObservableObject {
         try await synchronizeGroup(&current)
         try await ensureExactGroupKey(&current)
         if try inheritSessions(&current) { try persist(current) }
-        guard !current.sessions.contains(where: { $0.sessionID == pairing.sessionID }),
-              let group = current.identity.group,
-              let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
-            throw ProtocolError.invalidPairingLink("session is already joined or the current group key is unavailable")
+        guard let group = current.identity.group else {
+            throw ProtocolError.invalidPairingLink("device group is unavailable")
         }
-        let expiresAt = try await api.join(pairing, identity: current.identity, key: key)
+        let existingIndex = current.sessions.firstIndex(where: { $0.sessionID == pairing.sessionID })
+        if let existingIndex {
+            let existing = current.sessions[existingIndex]
+            guard existing.protocolVersion == pairing.protocolVersion,
+                  existing.groupID == group.groupID,
+                  existing.creatorPublicKey == pairing.creatorPublicKey else {
+                throw ProtocolError.invalidPairingLink("session identifier conflicts with the joined session")
+            }
+        }
+        guard let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
+            throw ProtocolError.invalidPairingLink("the current group key is unavailable")
+        }
+        let expiresAt: Int64
+        do {
+            expiresAt = try await api.join(pairing, identity: current.identity, key: key)
+        } catch let error as APIError where existingIndex != nil && error.status == 409 && error.code == "group_joined" {
+            return
+        }
+        if let existingIndex {
+            current.sessions[existingIndex].expiresAt = max(current.sessions[existingIndex].expiresAt, expiresAt)
+            try persist(current)
+            return
+        }
         var record = SessionRecord(
             protocolVersion: pairing.protocolVersion, sessionID: pairing.sessionID, groupID: group.groupID,
             creatorPublicKey: pairing.creatorPublicKey, keys: [:], cursor: 0,
@@ -775,7 +813,7 @@ final class AppModel: ObservableObject {
     private func pollDeviceRequest(_ current: inout Vault) async throws {
         guard let pending = pendingDeviceRequest else { return }
         switch try await api.deviceRequestStatus(identity: current.identity, requestID: pending.requestID) {
-        case .waiting:
+        case .waiting, .approving:
             deviceRequestLink = try deviceRequestURL(pending)
         case .expired:
             pendingDeviceRequest = nil; deviceRequestLink = nil
@@ -1130,19 +1168,28 @@ final class AppModel: ObservableObject {
         let groupID = "ui-test-mixed-group"
         var identity = try CryptoEngine.createIdentity()
         identity.deviceID = "ui-test-mixed-device"
+        var removedIdentity = try CryptoEngine.createIdentity()
+        removedIdentity.deviceID = "ui-test-removed-device"
         let member = TransitionMember(
             deviceID: identity.deviceID,
             signingPublicKey: try CryptoEngine.signingPublicKey(for: identity),
             encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: identity)
         )
-        let draft = CryptoEngine.createGroupKey()
-        let package = try CryptoEngine.createKeyPackage(
-            groupID: groupID, key: draft, deviceID: member.deviceID,
-            encryptionPublicKey: member.encryptionPublicKey
+        let removedMember = TransitionMember(
+            deviceID: removedIdentity.deviceID,
+            signingPublicKey: try CryptoEngine.signingPublicKey(for: removedIdentity),
+            encryptionPublicKey: try CryptoEngine.encryptionPublicKey(for: removedIdentity)
         )
+        let draft = CryptoEngine.createGroupKey()
+        let packages = try [member, removedMember].map { value in
+            try CryptoEngine.createKeyPackage(
+                groupID: groupID, key: draft, deviceID: value.deviceID,
+                encryptionPublicKey: value.encryptionPublicKey
+            )
+        }
         let transition = try CryptoEngine.createGroupTransition(
             groupID: groupID, identity: identity, groupKey: draft, previous: nil,
-            members: [member], packages: [package], recreated: true, now: 10
+            members: [member, removedMember], packages: packages, recreated: true, now: 10
         )
         let key = GroupKey(
             timestamp: transition.timestamp, publicKey: draft.publicKey,
@@ -1152,10 +1199,47 @@ final class AppModel: ObservableObject {
             groupID: groupID, keys: [String(key.timestamp): key],
             rootTransitionHash: transition.transitionHash, headTransitionHash: transition.transitionHash
         )
+        removedIdentity.group = DeviceGroup(
+            groupID: groupID, keys: [String(key.timestamp): key],
+            rootTransitionHash: transition.transitionHash, headTransitionHash: transition.transitionHash
+        )
         let descriptor = try CryptoEngine.createSessionDescriptor(
             identity: identity, key: key, sessionID: "authenticated-v4-session",
             groupID: groupID, creatorPublicKey: draft.publicKey
         )
+        let removedDescriptor = try CryptoEngine.createSessionDescriptor(
+            identity: removedIdentity, key: key, sessionID: "removed-actor-session",
+            groupID: groupID, creatorPublicKey: draft.publicKey
+        )
+        let removalDraft = CryptoEngine.createGroupKey()
+        let removalPackage = try CryptoEngine.createKeyPackage(
+            groupID: groupID, key: removalDraft, deviceID: member.deviceID,
+            encryptionPublicKey: member.encryptionPublicKey
+        )
+        let removal = try CryptoEngine.createGroupTransition(
+            groupID: groupID, identity: identity, groupKey: removalDraft, previous: transition,
+            members: [member], packages: [removalPackage], recreated: true, now: 11
+        )
+        identity.group?.keys[String(removal.timestamp)] = GroupKey(
+            timestamp: removal.timestamp, publicKey: removalDraft.publicKey,
+            privateKey: removalDraft.privateKey, transitionHash: removal.transitionHash
+        )
+        let readdedDraft = CryptoEngine.createGroupKey()
+        let readdedPackages = try [member, removedMember].map { value in
+            try CryptoEngine.createKeyPackage(
+                groupID: groupID, key: readdedDraft, deviceID: value.deviceID,
+                encryptionPublicKey: value.encryptionPublicKey
+            )
+        }
+        let readded = try CryptoEngine.createGroupTransition(
+            groupID: groupID, identity: identity, groupKey: readdedDraft, previous: removal,
+            members: [member, removedMember], packages: readdedPackages, recreated: false, now: 12
+        )
+        identity.group?.keys[String(readded.timestamp)] = GroupKey(
+            timestamp: readded.timestamp, publicKey: readdedDraft.publicKey,
+            privateKey: readdedDraft.privateKey, transitionHash: readded.transitionHash
+        )
+        identity.group?.headTransitionHash = readded.transitionHash
         let legacy = GroupSessionResult(
             protocolVersion: 3, sessionID: "legacy-v3-session", groupID: groupID,
             creatorPublicKey: draft.publicKey,
@@ -1170,13 +1254,23 @@ final class AppModel: ObservableObject {
             actorDeviceID: descriptor.actorDeviceID, actorSignature: descriptor.actorSignature,
             continuitySignature: descriptor.continuitySignature
         )
+        let removedSigned = GroupSessionResult(
+            protocolVersion: 4, sessionID: removedDescriptor.sessionID, groupID: removedDescriptor.groupID,
+            creatorPublicKey: removedDescriptor.creatorPublicKey,
+            expiresAt: Self.currentTimeMilliseconds() + 86_400_000,
+            keyTimestamp: removedDescriptor.keyTimestamp, transitionHash: removedDescriptor.transitionHash,
+            actorDeviceID: removedDescriptor.actorDeviceID, actorSignature: removedDescriptor.actorSignature,
+            continuitySignature: removedDescriptor.continuitySignature
+        )
         groupState = DeviceGroupStateResult(
             groupID: groupID,
-            members: [GroupDevice(
-                deviceID: member.deviceID, encryptionPublicKey: member.encryptionPublicKey,
-                signingPublicKey: member.signingPublicKey, addedAt: 0
-            )],
-            keys: [transition], packages: [], sessions: [legacy, signed]
+            members: [member, removedMember].map { value in
+                GroupDevice(
+                    deviceID: value.deviceID, encryptionPublicKey: value.encryptionPublicKey,
+                    signingPublicKey: value.signingPublicKey, addedAt: 0
+                )
+            },
+            keys: [transition, removal, readded], packages: [], sessions: [legacy, signed, removedSigned]
         )
         let attackerKey = CryptoEngine.createGroupKey()
         let stale = SessionRecord(
@@ -1186,7 +1280,14 @@ final class AppModel: ObservableObject {
             request: nil, requestKeyTimestamp: nil, color: nil,
             updatedAt: Self.currentTimeMilliseconds(), expiresAt: signed.expiresAt
         )
-        var current = Vault(version: 4, identity: identity, sessions: [stale])
+        let removedStale = SessionRecord(
+            protocolVersion: 4, sessionID: removedSigned.sessionID, groupID: groupID,
+            creatorPublicKey: removedSigned.creatorPublicKey, keys: [:], cursor: 0,
+            title: "Removed signer session", status: "Must not remain", notifications: [],
+            request: nil, requestKeyTimestamp: nil, color: nil,
+            updatedAt: Self.currentTimeMilliseconds(), expiresAt: removedSigned.expiresAt
+        )
+        var current = Vault(version: 4, identity: identity, sessions: [stale, removedStale])
         guard try inheritSessions(&current), current.sessions.count == 1,
               current.sessions[0].creatorPublicKey == signed.creatorPublicKey else {
             throw ProtocolError.crypto("authenticated session did not replace the stale local creator key")
@@ -1196,10 +1297,7 @@ final class AppModel: ObservableObject {
         current.sessions[0].color = "#d9f2d0"
         vault = current
         publish(current)
-        groupDevices = [GroupDevice(
-            deviceID: member.deviceID, encryptionPublicKey: member.encryptionPublicKey,
-            signingPublicKey: member.signingPublicKey, addedAt: 0
-        )]
+        groupDevices = groupState!.members
         connectionState = .current
         isReady = true
         hasFinishedStarting = true
@@ -1255,11 +1353,14 @@ final class AppModel: ObservableObject {
                 ),
             ])
         }
+        let groupKey = GroupKey(
+            timestamp: 42, publicKey: "unused", privateKey: Data(repeating: 7, count: 32), transitionHash: ""
+        )
         let identity = DeviceIdentity(
             deviceID: "ui-test-device", accessToken: "unused",
             encryptionPrivateKey: Data(repeating: 1, count: 32),
             signingPrivateKey: Data(repeating: 2, count: 32),
-            group: DeviceGroup(groupID: "ui-test-group", keys: [:])
+            group: DeviceGroup(groupID: "ui-test-group", keys: ["42": groupKey])
         )
         let current = Vault(version: 4, identity: identity, sessions: uiTestSessions)
         vault = current
@@ -1268,6 +1369,11 @@ final class AppModel: ObservableObject {
             sessionSyncErrors[session.sessionID] = "Invalid server response: object fields do not match the protocol"
         }
         groupDevices = [GroupDevice(deviceID: identity.deviceID, encryptionPublicKey: "unused", addedAt: 0)]
+        groupState = DeviceGroupStateResult(
+            groupID: "ui-test-group", members: groupDevices,
+            keys: [GroupKeyRecord(timestamp: 42, publicKey: "unused", recreated: true, members: [identity.deviceID])],
+            packages: [], sessions: []
+        )
         connectionState = .current
         isReady = true
         hasFinishedStarting = true

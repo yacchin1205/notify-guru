@@ -130,13 +130,16 @@ export async function verifySessionDescriptor(descriptor, groupId, transitions) 
   } catch {
     return false;
   }
-  const transition = transitions.find((item) => item.timestamp === descriptor.keyTimestamp
+  const transitionIndex = transitions.findIndex((item) => item.timestamp === descriptor.keyTimestamp
     && item.transitionHash === descriptor.transitionHash);
+  const transition = transitions[transitionIndex];
   const actor = transition?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
-  const currentActor = transitions.at(-1)?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
-  if (transition === undefined || actor === undefined || currentActor === undefined
-    || currentActor.signingPublicKey !== actor.signingPublicKey
-    || currentActor.encryptionPublicKey !== actor.encryptionPublicKey) return false;
+  const actorRemains = transitionIndex >= 0 && actor !== undefined
+    && transitions.slice(transitionIndex).every((item) => item.members.some((member) =>
+      member.deviceId === actor.deviceId
+      && member.signingPublicKey === actor.signingPublicKey
+      && member.encryptionPublicKey === actor.encryptionPublicKey));
+  if (!actorRemains) return false;
   const transcript = sessionDescriptorTranscript(descriptor);
   return await verifySignature(actor.signingPublicKey, descriptor.actorSignature, transcript)
     && await verifySignature(transition.publicKey, descriptor.continuitySignature, transcript);

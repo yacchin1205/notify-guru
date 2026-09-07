@@ -1,0 +1,8 @@
+// GUI tests do not require Apple services or access to the shared Widget container.
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM =
+PROVISIONING_PROFILE_SPECIFIER =
+MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMacUITests/App.entitlements
+MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacUITests/Widget.entitlements
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_GUI_TESTING

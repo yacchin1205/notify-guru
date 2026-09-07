@@ -21,7 +21,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - run: go test ./...
+      - run: go test -count=1 ./...
       - run: go vet ./...
       - run: go vet -tags integration ./...
 
@@ -36,6 +36,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
       - run: npm ci
       # The MCP round trip needs a running relay, so the worker runs locally.
       # Address it as 127.0.0.1: wrangler answers localhost with a redirect loop.
@@ -43,13 +47,45 @@ jobs:
         run: |
           npm run dev -- --ip 127.0.0.1 --port 8787 > wrangler.log 2>&1 &
           curl -sSf --retry 60 --retry-delay 2 --retry-all-errors --retry-connrefused "$NOTIFY_INTEGRATION_BASE_URL/api/health"
-      - run: go test -tags integration ./internal/notify
+      - run: go test -count=1 -tags integration ./internal/notify
       - if: always()
         run: cat wrangler.log
 
+  web:
+    runs-on: ubuntu-24.04
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  apple-test:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [ios-unit, iphone, ipad, macos]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: scripts/test-all.sh "${{ matrix.suite }}"
+        env:
+          TEST_RESULTS_DIR: ${{ runner.temp }}/notify-guru-test-results
+      - if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: test-results-${{ matrix.suite }}
+          path: ${{ runner.temp }}/notify-guru-test-results
+          if-no-files-found: error
+          retention-days: 14
+
   snapshot:
     if: github.ref_type != 'tag'
-    needs: [verify, integration]
+    needs: [verify, integration, web]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -78,7 +114,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [verify, integration]
+    needs: [verify, integration, web]
     permissions:
       contents: write
     runs-on: ubuntu-24.04

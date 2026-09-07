@@ -138,12 +138,18 @@ enum CryptoEngine {
         guard remote.protocolVersion == 4, remote.groupID == groupID, let keyTimestamp = remote.keyTimestamp,
               let transitionHash = remote.transitionHash, let actorDeviceID = remote.actorDeviceID,
               let actorSignature = remote.actorSignature, let continuitySignature = remote.continuitySignature,
-              let transition = transitions.first(where: {
+              let transitionIndex = transitions.firstIndex(where: {
                   $0.timestamp == keyTimestamp && $0.transitionHash == transitionHash
-              }), let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }),
-              let currentActor = transitions.last?.members.first(where: { $0.deviceID == actorDeviceID }),
-              currentActor.signingPublicKey == actor.signingPublicKey,
-              currentActor.encryptionPublicKey == actor.encryptionPublicKey else { return false }
+              }) else { return false }
+        let transition = transitions[transitionIndex]
+        guard let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }),
+              transitions[transitionIndex...].allSatisfy({ item in
+                  item.members.contains { member in
+                      member.deviceID == actor.deviceID
+                          && member.signingPublicKey == actor.signingPublicKey
+                          && member.encryptionPublicKey == actor.encryptionPublicKey
+                  }
+              }) else { return false }
         let transcript = sessionDescriptorTranscript(
             sessionID: remote.sessionID, groupID: groupID, protocolVersion: 4,
             creatorPublicKey: remote.creatorPublicKey, keyTimestamp: keyTimestamp,

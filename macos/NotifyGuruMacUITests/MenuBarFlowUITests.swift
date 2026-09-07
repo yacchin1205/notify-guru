@@ -224,7 +224,7 @@ final class MenuBarFlowUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.menuBars.statusItems["notify.guru, 3 unresolved items"].waitForExistence(timeout: 5))
-        XCTAssertTrue(NSWorkspace.shared.open(try XCTUnwrap(URL(string: "notifyguru://sessions"))))
+        app.open(try XCTUnwrap(URL(string: "notifyguru://sessions")))
 
         XCTAssertTrue(app.windows["Sessions"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.windows["Sessions"].staticTexts["UI improvement test"].exists)
@@ -285,7 +285,10 @@ final class MenuBarFlowUITests: XCTestCase {
         let linkField = app.textFields.firstMatch
         XCTAssertTrue(linkField.waitForExistence(timeout: 5))
         linkField.click()
-        linkField.typeText(sessionLinkFixture)
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(NSPasteboard.general.setString(sessionLinkFixture, forType: .string))
+        linkField.typeKey("v", modifierFlags: .command)
+        XCTAssertEqual(linkField.value as? String, sessionLinkFixture)
         app.buttons["Continue"].click()
 
         XCTAssertFalse(app.staticTexts["Add Session"].waitForExistence(timeout: 2))
@@ -295,8 +298,8 @@ final class MenuBarFlowUITests: XCTestCase {
 
     private var sessionLinkFixture: String {
         let secret = String(repeating: "A", count: 43)
-        let publicKey = String(repeating: "A", count: 87)
-        return "https://notify.guru/join#v=3&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
+        let publicKey = "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+        return "https://notify.guru/join#v=4&s=ui-test-session01&p=ui-test-pairing01&t=\(secret)&a=\(secret)&k=\(publicKey)&c=aabbcc"
     }
 
     private func absence(of element: XCUIElement) -> XCTestExpectation {

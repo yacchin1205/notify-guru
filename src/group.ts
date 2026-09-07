@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DeviceRegistry } from "./device";
+import type { Session } from "./session";
 import {
   BASE64URL,
   HttpError,
@@ -33,6 +34,7 @@ const PUBLIC_KEY = BASE64URL;
 
 interface GroupEnv {
   DEVICES: DurableObjectNamespace<DeviceRegistry>;
+  SESSIONS: DurableObjectNamespace<Session>;
 }
 
 interface MetaRow extends Record<string, SqlStorageValue> {
@@ -88,14 +90,14 @@ interface SessionRow extends Record<string, SqlStorageValue> {
   continuity_signature: string | null;
 }
 
-interface KeyPackage {
+export interface KeyPackage {
   deviceId: string;
   ephemeralPublicKey: string;
   nonce: string;
   ciphertext: string;
 }
 
-interface ClaimedRequest {
+export interface DeviceRequestDescriptor {
   requestId: string;
   deviceId: string;
   deviceAccessTokenHash: string;
@@ -103,6 +105,27 @@ interface ClaimedRequest {
   deviceSigningPublicKey: string;
   protocolVersion: number;
 }
+
+export interface DeviceApprovalIntent {
+  request: DeviceRequestDescriptor;
+  groupId: string;
+  actorDeviceId: string;
+  transitionHash: string;
+  approvalProof: string;
+  transition: SignedGroupTransition | null;
+  packages: KeyPackage[];
+  actorSignature: string | null;
+}
+
+interface ApprovalRejection {
+  status: "rejected";
+  httpStatus: number;
+  code: string;
+  message: string;
+}
+
+export type DeviceApprovalPreparation = { status: "prepared"; intent: DeviceApprovalIntent } | ApprovalRejection;
+export type DeviceApprovalCommitResult = { status: "committed" } | ApprovalRejection;
 
 export interface GroupCurrentState {
   groupId: string;
@@ -112,9 +135,19 @@ export interface GroupCurrentState {
 
 export type GroupAuthorization = "authorized" | "device_removed" | "invalid_token";
 
+export interface SessionParticipationAnchor {
+  protocolVersion: number;
+  keyTimestamp: number | null;
+  transitionHash: string | null;
+  actorDeviceId: string | null;
+}
+
+export type SessionDeviceAuthorization = GroupAuthorization | "unavailable";
+
 export class DeviceGroup extends DurableObject<GroupEnv> {
   private readonly state: DurableObjectState;
   private readonly devices: DurableObjectStub<DeviceRegistry>;
+  private readonly sessions: DurableObjectNamespace<Session>;
 
   constructor(
     state: DurableObjectState,
@@ -123,6 +156,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     super(state, env);
     this.state = state;
     this.devices = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    this.sessions = env.SESSIONS;
     this.createSchema();
   }
 
@@ -143,9 +177,176 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return equalHex(member.access_hash, await sha256Hex(token)) ? "authorized" : "invalid_token";
   }
 
+  async prepareDeviceRequestApproval(
+    request: DeviceRequestDescriptor,
+    actorDeviceId: string,
+    groupToken: string,
+    body: Record<string, unknown>,
+  ): Promise<DeviceApprovalPreparation> {
+    try {
+      const actor = await this.memberWithToken(actorDeviceId, groupToken);
+      const groupId = this.requiredMeta().group_id;
+      if (this.getTransitionHistory().length > 0) {
+        expectKeys(body, ["transition", "packages", "approvalProof"]);
+        const transition = signedTransition(body.transition);
+        const packages = packageArray(body.packages);
+        const approvalProof = stringField(body, "approvalProof", BASE64URL, 128);
+        const existing = this.memberByRequest(request.requestId);
+        if (existing !== null) {
+          if (existing.device_id !== request.deviceId || this.keyByTransitionHash(transition.transitionHash) === null) {
+            throw new HttpError(409, "device_request_used", "Device request was approved by another Operation");
+          }
+        } else {
+          const previous = this.latestTransition();
+          if (previous !== null && this.transitionNeedsRecreation(previous)) {
+            throw new HttpError(409, "recreated_required", "The pending device removal must be followed by a fresh group key");
+          }
+          if (request.protocolVersion !== 4) {
+            throw new HttpError(409, "protocol_upgrade_required", "This device group requires version 4 device approval");
+          }
+          if (this.member(request.deviceId) !== null) {
+            throw new HttpError(409, "device_exists", "Device already belongs to the group");
+          }
+          await validateTransitionMaterial(
+            groupId,
+            transition,
+            packages,
+            previous,
+            [
+              ...this.transitionMembers(),
+              {
+                deviceId: request.deviceId,
+                signingPublicKey: request.deviceSigningPublicKey,
+                encryptionPublicKey: request.deviceEncryptionPublicKey,
+              },
+            ],
+            this.memberDescriptor(actor),
+          );
+        }
+        return {
+          status: "prepared",
+          intent: {
+            request,
+            groupId,
+            actorDeviceId,
+            transitionHash: transition.transitionHash,
+            approvalProof,
+            transition,
+            packages,
+            actorSignature: null,
+          },
+        };
+      }
+
+      expectKeys(body, ["actorSignature"]);
+      const actorSignature = stringField(body, "actorSignature", BASE64URL, 128);
+      await this.requireManagementSignature(
+        actor.device_id,
+        actorSignature,
+        ["notify.guru/group-device-approve/v1", groupId, actor.device_id, request.requestId].join("\n"),
+      );
+      if (this.memberByRequest(request.requestId) === null) {
+        if (request.protocolVersion < 4 && await this.hasActiveV4Sessions(groupId)) {
+          throw new HttpError(409, "protocol_upgrade_required", "This device group has version 4 sessions");
+        }
+        if (this.member(request.deviceId) !== null) {
+          throw new HttpError(409, "device_exists", "Device already belongs to the group");
+        }
+      }
+      return {
+        status: "prepared",
+        intent: {
+          request,
+          groupId,
+          actorDeviceId,
+          transitionHash: GENESIS_TRANSITION_HASH,
+          approvalProof: "",
+          transition: null,
+          packages: [],
+          actorSignature,
+        },
+      };
+    } catch (error) {
+      if (error instanceof HttpError) return approvalRejection(error);
+      throw error;
+    }
+  }
+
+  commitDeviceRequestApproval(intent: DeviceApprovalIntent): DeviceApprovalCommitResult {
+    try {
+      const meta = this.requiredMeta();
+      if (meta.group_id !== intent.groupId) {
+        throw new HttpError(409, "wrong_group", "Device approval targets another group");
+      }
+      if (intent.transition !== null) {
+        const committedKey = this.keyByTransitionHash(intent.transitionHash);
+        const committedTransition = committedKey === null ? null : this.transition(committedKey);
+        if (committedTransition !== null
+          && sameMembers(committedTransition.members, intent.transition.members)
+          && committedTransition.members.some((member) => member.deviceId === intent.request.deviceId)) {
+          return { status: "committed" };
+        }
+      }
+      const existing = this.memberByRequest(intent.request.requestId);
+      if (existing !== null) {
+        if (existing.device_id !== intent.request.deviceId) {
+          throw new HttpError(409, "device_request_used", "Device request was approved by another Operation");
+        }
+        return { status: "committed" };
+      }
+      const actor = this.member(intent.actorDeviceId);
+      if (actor === null) {
+        throw new HttpError(403, "device_removed", "Device is not an active member of the group");
+      }
+      if (this.member(intent.request.deviceId) !== null) {
+        throw new HttpError(409, "device_exists", "Device already belongs to the group");
+      }
+
+      if (intent.transition !== null) {
+        const previous = this.latestTransition();
+        if (previous !== null && this.transitionNeedsRecreation(previous)) {
+          throw new HttpError(409, "recreated_required", "The pending device removal must be followed by a fresh group key");
+        }
+        if (intent.request.protocolVersion !== 4
+          || intent.transition.transitionHash !== intent.transitionHash
+          || intent.transition.actorDeviceId !== actor.device_id
+          || intent.transition.previousHash !== (previous?.transitionHash ?? GENESIS_TRANSITION_HASH)
+          || !sameMembers(intent.transition.members, [
+            ...this.transitionMembers(),
+            {
+              deviceId: intent.request.deviceId,
+              signingPublicKey: intent.request.deviceSigningPublicKey,
+              encryptionPublicKey: intent.request.deviceEncryptionPublicKey,
+            },
+          ])) {
+          throw new HttpError(409, "group_transition_changed", "Group state changed before device approval completed");
+        }
+        this.state.storage.transactionSync(() => {
+          this.insertApprovedMember(intent.request);
+          this.insertTransition(intent.transition!, intent.packages);
+        });
+      } else {
+        if (this.getTransitionHistory().length > 0) {
+          throw new HttpError(409, "group_transition_changed", "Group protocol changed before device approval completed");
+        }
+        this.insertApprovedMember(intent.request);
+      }
+      return { status: "committed" };
+    } catch (error) {
+      if (error instanceof HttpError) return approvalRejection(error);
+      throw error;
+    }
+  }
+
   getCurrentState(): GroupCurrentState | null {
     const meta = this.meta();
     return meta === null ? null : this.current(meta);
+  }
+
+  getCurrentStateForSession(participation: SessionParticipationAnchor): GroupCurrentState | null {
+    const current = this.getCurrentState();
+    if (current === null || this.isSessionParticipationUsable(participation)) return current;
+    return { ...current, key: null };
   }
 
   supportsProtocolVersion(protocolVersion: number): boolean {
@@ -176,6 +377,14 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return { status: "ok", deviceIds: this.keyMemberIds(timestamp) };
   }
 
+  getSessionKeyRecipients(
+    participation: SessionParticipationAnchor,
+    timestamp: number,
+  ): { status: "ok"; deviceIds: string[] } | { status: "unavailable" } {
+    if (!this.isSessionParticipationUsable(participation)) return { status: "unavailable" };
+    return this.getKeyRecipients(timestamp, participation.protocolVersion);
+  }
+
   authorizeKeyForDevice(timestamp: number, deviceId: string, protocolVersion = 3): "authorized" | "device_removed" | "unavailable" {
     if (this.member(deviceId) === null) return "device_removed";
     if (protocolVersion === 4) {
@@ -185,17 +394,60 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return this.keyMemberIds(timestamp).includes(deviceId) ? "authorized" : "unavailable";
   }
 
+  async authorizeSessionDevice(
+    participation: SessionParticipationAnchor,
+    deviceId: string,
+    groupToken: string,
+  ): Promise<SessionDeviceAuthorization> {
+    const authorization = await this.authorizeDevice(deviceId, groupToken);
+    if (authorization !== "authorized") return authorization;
+    const current = this.getCurrentState();
+    return current !== null && current.key !== null && this.isSessionParticipationUsable(participation)
+      ? "authorized"
+      : "unavailable";
+  }
+
+  async authorizeSessionKeyForDevice(
+    participation: SessionParticipationAnchor,
+    timestamp: number,
+    deviceId: string,
+    groupToken: string,
+  ): Promise<SessionDeviceAuthorization> {
+    const authorization = await this.authorizeDevice(deviceId, groupToken);
+    if (authorization !== "authorized" || !this.isSessionParticipationUsable(participation)) {
+      return authorization === "authorized" ? "unavailable" : authorization;
+    }
+    return this.authorizeKeyForDevice(timestamp, deviceId, participation.protocolVersion);
+  }
+
   async storeSession(
     sessionId: string, creatorPublicKey: string, expiresAt: number, protocolVersion = 3,
     descriptor: SignedSessionDescriptor | null = null,
   ): Promise<void> {
-    if (protocolVersion === 4 && descriptor !== null) await this.validateSessionDescriptor(descriptor);
+    if (protocolVersion === 4 && (descriptor === null
+      || descriptor.sessionId !== sessionId || descriptor.creatorPublicKey !== creatorPublicKey)) {
+      throw new Error("Stored session descriptor does not match its Session");
+    }
+    const existing = this.session(sessionId);
+    if (existing !== null) {
+      if (existing.creator_public_key !== creatorPublicKey || existing.protocol_version !== protocolVersion
+        || existing.key_timestamp !== (descriptor?.keyTimestamp ?? null)
+        || existing.transition_hash !== (descriptor?.transitionHash ?? null)
+        || existing.actor_device_id !== (descriptor?.actorDeviceId ?? null)) {
+        throw new Error("Stored Session does not match the established Group participation");
+      }
+      this.state.storage.sql.exec(
+        "UPDATE group_sessions_v3 SET expires_at = MAX(expires_at, ?) WHERE session_id = ?",
+        expiresAt,
+        sessionId,
+      );
+      return;
+    }
     this.state.storage.sql.exec(
       `INSERT INTO group_sessions_v3
          (session_id, creator_public_key, expires_at, protocol_version, key_timestamp, transition_hash,
           actor_device_id, actor_signature, continuity_signature)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(session_id) DO UPDATE SET expires_at = excluded.expires_at`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       sessionId,
       creatorPublicKey,
       expiresAt,
@@ -208,7 +460,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     );
   }
 
-  private async validateSessionDescriptor(descriptor: SignedSessionDescriptor): Promise<void> {
+  async validateSessionDescriptor(descriptor: SignedSessionDescriptor): Promise<void> {
     const groupId = this.requiredMeta().group_id;
     if (descriptor.groupId !== groupId || descriptor.protocolVersion !== 4) {
       throw new HttpError(400, "invalid_session_descriptor", "Session descriptor targets another group or protocol");
@@ -256,16 +508,6 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     if (request.method === "POST" && url.pathname === "/keys") {
       const member = await this.requireMember(request);
       return this.createKey(request, member);
-    }
-    const requestStateMatch = /^\/device-requests\/([^/]+)$/.exec(url.pathname);
-    if (request.method === "GET" && requestStateMatch !== null) {
-      await this.requireMember(request);
-      return this.deviceRequestForApproval(identifier(requestStateMatch[1], "requestId"));
-    }
-    const approveMatch = /^\/device-requests\/([^/]+)\/approve$/.exec(url.pathname);
-    if (request.method === "POST" && approveMatch !== null) {
-      const member = await this.requireMember(request);
-      return this.approveDeviceRequest(request, meta, member, identifier(approveMatch[1], "requestId"));
     }
     const deviceMatch = /^\/devices\/([^/]+)$/.exec(url.pathname);
     if (request.method === "DELETE" && deviceMatch !== null) {
@@ -326,130 +568,6 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       if (transition !== null) this.insertTransition(transition, packages);
     });
     return json({ created: true, groupId }, 201);
-  }
-
-  private async deviceRequestForApproval(requestId: string): Promise<Response> {
-    const request = await this.devices.getDeviceRequestForApproval(requestId);
-    if (request === null) throw new HttpError(404, "device_request_not_found", "Device request is unavailable");
-    return json({
-      requestId: request.requestId,
-      deviceId: request.deviceId,
-      accessHash: request.deviceAccessTokenHash,
-      signingPublicKey: request.deviceSigningPublicKey,
-      encryptionPublicKey: request.deviceEncryptionPublicKey,
-      protocolVersion: request.protocolVersion,
-    });
-  }
-
-  private async approveDeviceRequest(
-    request: Request,
-    meta: MetaRow,
-    actor: MemberRow,
-    requestId: string,
-  ): Promise<Response> {
-    const body = await readObject(request);
-    if (this.getTransitionHistory().length > 0) {
-      expectKeys(body, ["transition", "packages", "approvalProof"]);
-      const transition = signedTransition(body.transition);
-      const packages = packageArray(body.packages);
-      const approvalProof = stringField(body, "approvalProof", BASE64URL, 128);
-      const existing = this.memberByRequest(requestId);
-      if (existing !== null) {
-        const latest = this.latestTransition();
-        if (latest === null || transition.transitionHash !== latest.transitionHash) {
-          throw new HttpError(409, "group_transition_changed", "Approved device transition no longer matches the group head");
-        }
-        await this.completeRequest(requestId, meta.group_id, latest.transitionHash, approvalProof);
-        return json({
-          approved: true,
-          deviceId: existing.device_id,
-          approvedByDeviceId: actor.device_id,
-          transitionHash: latest.transitionHash,
-        });
-      }
-      const currentTransition = this.latestTransition();
-      if (currentTransition !== null && this.transitionNeedsRecreation(currentTransition)) {
-        throw new HttpError(409, "recreated_required", "The pending device removal must be followed by a fresh group key");
-      }
-      const claimed = await this.claimRequest(requestId, meta.group_id);
-      if (claimed.protocolVersion !== 4) {
-        await this.devices.releaseDeviceRequestClaim(requestId, meta.group_id);
-        throw new HttpError(409, "protocol_upgrade_required", "This device group requires version 4 device approval");
-      }
-      if (this.member(claimed.deviceId) !== null) {
-        throw new HttpError(409, "device_exists", "Device already belongs to the group");
-      }
-      const expected = [
-        ...this.transitionMembers(),
-        {
-          deviceId: claimed.deviceId,
-          signingPublicKey: claimed.deviceSigningPublicKey,
-          encryptionPublicKey: claimed.deviceEncryptionPublicKey,
-        },
-      ];
-      const previous = this.latestTransition();
-      await validateTransitionMaterial(
-        meta.group_id,
-        transition,
-        packages,
-        previous,
-        expected,
-        this.memberDescriptor(actor),
-      );
-      this.state.storage.transactionSync(() => {
-        this.state.storage.sql.exec(
-          `INSERT INTO group_members_v3
-             (device_id, access_hash, encryption_public_key, signing_public_key, request_id, added_at, supports_v4)
-           VALUES (?, ?, ?, ?, ?, ?, 1)`,
-          claimed.deviceId,
-          claimed.deviceAccessTokenHash,
-          claimed.deviceEncryptionPublicKey,
-          claimed.deviceSigningPublicKey,
-          requestId,
-          Date.now(),
-        );
-        this.insertTransition(transition, packages);
-      });
-      await this.completeRequest(requestId, meta.group_id, transition.transitionHash, approvalProof);
-      return json({
-        approved: true,
-        deviceId: claimed.deviceId,
-        approvedByDeviceId: actor.device_id,
-        transitionHash: transition.transitionHash,
-      });
-    }
-    expectKeys(body, ["actorSignature"]);
-    await this.requireManagementSignature(
-      actor.device_id,
-      stringField(body, "actorSignature", BASE64URL, 128),
-      ["notify.guru/group-device-approve/v1", meta.group_id, actor.device_id, requestId].join("\n"),
-    );
-    const requestMember = this.memberByRequest(requestId);
-    if (requestMember !== null) {
-      await this.completeRequest(requestId, meta.group_id, GENESIS_TRANSITION_HASH, "");
-      return json({ approved: true, deviceId: requestMember.device_id, approvedByDeviceId: actor.device_id });
-    }
-    const claimed = await this.claimRequest(requestId, meta.group_id);
-    if (claimed.protocolVersion < 4 && this.hasActiveV4Sessions()) {
-      await this.devices.releaseDeviceRequestClaim(requestId, meta.group_id);
-      throw new HttpError(409, "protocol_upgrade_required", "This device group has version 4 sessions");
-    }
-    if (this.member(claimed.deviceId) !== null) {
-      throw new HttpError(409, "device_exists", "Device already belongs to the group");
-    }
-    this.state.storage.sql.exec(
-      `INSERT INTO group_members_v3
-         (device_id, access_hash, encryption_public_key, request_id, added_at, supports_v4)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      claimed.deviceId,
-      claimed.deviceAccessTokenHash,
-      claimed.deviceEncryptionPublicKey,
-      requestId,
-      Date.now(),
-      claimed.protocolVersion >= 4 ? 1 : 0,
-    );
-    await this.completeRequest(requestId, meta.group_id, GENESIS_TRANSITION_HASH, "");
-    return json({ approved: true, deviceId: claimed.deviceId, approvedByDeviceId: actor.device_id });
   }
 
   private async createKey(request: Request, actor: MemberRow): Promise<Response> {
@@ -605,7 +723,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     return json({ removed: true });
   }
 
-  private groupState(meta: MetaRow, deviceId: string, protocolVersion: number): Response {
+  private async groupState(meta: MetaRow, deviceId: string, protocolVersion: number): Promise<Response> {
     const members = this.members().map((member) => ({
       deviceId: member.device_id,
       encryptionPublicKey: member.encryption_public_key,
@@ -636,7 +754,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       members,
       keys,
       packages,
-      sessions: this.sessionsJSON(protocolVersion, meta.group_id),
+      sessions: await this.sessionsJSON(protocolVersion, meta.group_id),
     });
   }
 
@@ -656,45 +774,89 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     };
   }
 
-  private sessionsJSON(protocolVersion: number, groupId: string): Array<Record<string, unknown>> {
-    const currentMemberIds = new Set(this.members().map((member) => member.device_id));
-    return Array.from(this.state.storage.sql.exec<SessionRow>(
+  private async sessionsJSON(protocolVersion: number, groupId: string): Promise<Array<Record<string, unknown>>> {
+    const stored = Array.from(this.state.storage.sql.exec<SessionRow>(
       `SELECT session_id, creator_public_key, expires_at, protocol_version, key_timestamp, transition_hash,
               actor_device_id, actor_signature, continuity_signature
-       FROM group_sessions_v3 WHERE expires_at > ? AND protocol_version = ? ORDER BY expires_at`,
-      Date.now(),
+       FROM group_sessions_v3 WHERE protocol_version = ? ORDER BY expires_at`,
       protocolVersion,
-    )).filter((row) => protocolVersion !== 4
-      || (row.actor_device_id !== null && currentMemberIds.has(row.actor_device_id))).map((row) => ({
+    ));
+    if (protocolVersion !== 4) return stored.filter((row) => row.expires_at > Date.now()).map((row) => ({
       sessionId: row.session_id,
       creatorPublicKey: row.creator_public_key,
       expiresAt: row.expires_at,
-      ...(protocolVersion === 4 ? { protocolVersion: row.protocol_version } : {}),
-      ...(protocolVersion === 4 ? {
+    }));
+
+    const sessions = stored.filter((row) => this.isSessionParticipationUsable({
+      protocolVersion: row.protocol_version,
+      keyTimestamp: row.key_timestamp,
+      transitionHash: row.transition_hash,
+      actorDeviceId: row.actor_device_id,
+    }));
+    return (await Promise.all(sessions.map(async (row) => {
+      const participation = await this.sessionStub(row.session_id).getGroupParticipation(groupId);
+      if (participation === null) {
+        this.removeSession(row.session_id);
+        return null;
+      }
+      return {
+        sessionId: row.session_id,
+        creatorPublicKey: row.creator_public_key,
+        expiresAt: participation.expiresAt,
+        protocolVersion: 4,
         groupId,
         keyTimestamp: row.key_timestamp,
         transitionHash: row.transition_hash,
         actorDeviceId: row.actor_device_id,
         actorSignature: row.actor_signature,
         continuitySignature: row.continuity_signature,
-      } : {}),
-    }));
+      };
+    }))).filter((session) => session !== null);
   }
 
-  private hasActiveV4Sessions(): boolean {
-    return Array.from(this.state.storage.sql.exec<{ found: number }>(
-      "SELECT 1 AS found FROM group_sessions_v3 WHERE expires_at > ? AND protocol_version = 4 LIMIT 1",
-      Date.now(),
-    )).length > 0;
+  private isSessionParticipationUsable(participation: SessionParticipationAnchor): boolean {
+    if (participation.protocolVersion !== 4) return true;
+    if (participation.keyTimestamp === null
+      || participation.transitionHash === null
+      || participation.actorDeviceId === null) return false;
+    const history = this.getTransitionHistory();
+    const joinedIndex = history.findIndex((transition) =>
+      transition.timestamp === participation.keyTimestamp
+      && transition.transitionHash === participation.transitionHash);
+    if (joinedIndex < 0) return false;
+    const actor = history[joinedIndex].members.find((member) => member.deviceId === participation.actorDeviceId);
+    if (actor === undefined) return false;
+    const currentActor = this.member(participation.actorDeviceId);
+    if (currentActor === null
+      || currentActor.signing_public_key !== actor.signingPublicKey
+      || currentActor.encryption_public_key !== actor.encryptionPublicKey) {
+      return false;
+    }
+    return history.slice(joinedIndex).every((transition) => transition.members.some((member) =>
+      member.deviceId === actor.deviceId
+      && member.signingPublicKey === actor.signingPublicKey
+      && member.encryptionPublicKey === actor.encryptionPublicKey));
+  }
+
+  private async hasActiveV4Sessions(groupId: string): Promise<boolean> {
+    return (await this.sessionsJSON(4, groupId)).length > 0;
+  }
+
+  private sessionStub(sessionId: string): DurableObjectStub<Session> {
+    return this.sessions.get(this.sessions.idFromName(sessionId));
   }
 
   private async requireMember(request: Request): Promise<MemberRow> {
     const deviceId = identifier(new URL(request.url).searchParams.get("deviceId"), "deviceId");
+    return this.memberWithToken(deviceId, bearerToken(request));
+  }
+
+  private async memberWithToken(deviceId: string, token: string): Promise<MemberRow> {
     const member = this.member(deviceId);
     if (member === null) {
       throw new HttpError(403, "device_removed", "Device is not an active member of the group");
     }
-    if (!equalHex(member.access_hash, await sha256Hex(bearerToken(request)))) {
+    if (!equalHex(member.access_hash, await sha256Hex(token))) {
       throw new HttpError(401, "invalid_device_token", "Device token is invalid");
     }
     return member;
@@ -711,6 +873,16 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       "SELECT group_id FROM group_meta_v3 WHERE singleton = 1",
     ));
     if (rows.length > 1) throw new Error("Device group must contain at most one meta row");
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private session(sessionId: string): SessionRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<SessionRow>(
+      `SELECT session_id, creator_public_key, expires_at, protocol_version, key_timestamp, transition_hash,
+              actor_device_id, actor_signature, continuity_signature
+       FROM group_sessions_v3 WHERE session_id = ?`,
+      sessionId,
+    ));
     return rows.length === 0 ? null : rows[0];
   }
 
@@ -755,6 +927,17 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
               continuity_signature, members_json, package_digests_json
        FROM group_keys_v3 WHERE timestamp = ?`,
       timestamp,
+    ));
+    return rows.length === 0 ? null : rows[0];
+  }
+
+  private keyByTransitionHash(transitionHash: string): KeyRow | null {
+    const rows = Array.from(this.state.storage.sql.exec<KeyRow>(
+      `SELECT timestamp, public_key, recreated, created_by_device_id,
+              transition_id, previous_hash, transition_hash, actor_signature,
+              continuity_signature, members_json, package_digests_json
+       FROM group_keys_v3 WHERE transition_hash = ?`,
+      transitionHash,
     ));
     return rows.length === 0 ? null : rows[0];
   }
@@ -887,31 +1070,19 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
     }
   }
 
-  private async claimRequest(requestId: string, groupId: string): Promise<ClaimedRequest> {
-    const result = await this.devices.claimDeviceRequest(requestId, groupId);
-    switch (result.status) {
-      case "claimed":
-        return result;
-      case "not_found":
-        throw new HttpError(404, "device_request_not_found", "Device request not found");
-      case "expired":
-        throw new HttpError(410, "device_request_expired", "Device request has expired");
-      case "used":
-        throw new HttpError(409, "device_request_used", "Device request has already been approved");
-      case "claimed_by_another_group":
-        throw new HttpError(409, "device_request_claimed", "Device request is being approved by another group");
-    }
-  }
-
-  private async completeRequest(
-    requestId: string,
-    groupId: string,
-    transitionHash: string,
-    approvalProof: string,
-  ): Promise<void> {
-    const result = await this.devices.completeDeviceRequest(requestId, groupId, transitionHash, approvalProof);
-    if (result === "not_claimed") throw new Error("Device request was not claimed before completion");
-    if (result === "used") throw new Error("Device request approval changed groups during completion");
+  private insertApprovedMember(request: DeviceRequestDescriptor): void {
+    this.state.storage.sql.exec(
+      `INSERT INTO group_members_v3
+         (device_id, access_hash, encryption_public_key, signing_public_key, request_id, added_at, supports_v4)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      request.deviceId,
+      request.deviceAccessTokenHash,
+      request.deviceEncryptionPublicKey,
+      request.deviceSigningPublicKey,
+      request.requestId,
+      Date.now(),
+      request.protocolVersion >= 4 ? 1 : 0,
+    );
   }
 
   private createSchema(): void {
@@ -966,6 +1137,8 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
         actor_signature TEXT,
         continuity_signature TEXT
       );
+      DROP TABLE IF EXISTS group_session_candidates_v4;
+      DROP TABLE IF EXISTS group_device_request_approvals_v4;
     `);
     const memberColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(group_members_v3)"));
     if (!memberColumns.some((column) => column.name === "supports_v4")) {
@@ -1008,6 +1181,10 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
 
 function identifier(value: string | null, name: string): string {
   return stringField({ [name]: value }, name, IDENTIFIER, 64);
+}
+
+function approvalRejection(error: HttpError): ApprovalRejection {
+  return { status: "rejected", httpStatus: error.status, code: error.code, message: error.message };
 }
 
 function booleanField(value: Record<string, unknown>, name: string): boolean {

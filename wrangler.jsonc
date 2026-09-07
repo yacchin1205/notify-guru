@@ -38,6 +38,10 @@
       {
         "name": "DEVICES",
         "class_name": "DeviceRegistry"
+      },
+      {
+        "name": "DEVICE_REQUESTS",
+        "class_name": "DeviceRequest"
       }
     ]
   },
@@ -51,6 +55,10 @@
       "storage": "sqlite"
     },
     "DeviceRegistry": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "DeviceRequest": {
       "type": "durable-object",
       "storage": "sqlite"
     }

@@ -90,17 +90,17 @@ func (a *API) JoinURL(sessionID string, pairing Pairing, creatorPublicKey, color
 	return joinURL.String()
 }
 
-func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicKey string, pairing Pairing, protocolVersion int) error {
+func (a *API) createSession(ctx context.Context, sessionID, sessionTokenHash, publicKey string, pairing Pairing, protocolVersion int) error {
 	request := struct {
 		SessionID        string `json:"sessionId"`
-		ManagerTokenHash string `json:"managerTokenHash"`
+		SessionTokenHash string `json:"sessionTokenHash"`
 		CreatorPublicKey string `json:"creatorPublicKey"`
 		Pairing          struct {
 			ID        string `json:"id"`
 			TokenHash string `json:"tokenHash"`
 		} `json:"pairing"`
 		ProtocolVersion int `json:"protocolVersion"`
-	}{SessionID: sessionID, ManagerTokenHash: managerHash, CreatorPublicKey: publicKey, ProtocolVersion: protocolVersion}
+	}{SessionID: sessionID, SessionTokenHash: sessionTokenHash, CreatorPublicKey: publicKey, ProtocolVersion: protocolVersion}
 	request.Pairing.ID = pairing.ID
 	request.Pairing.TokenHash = tokenHash(pairing.Token)
 	return a.do(ctx, http.MethodPost, "/api/sessions", "", request, &struct {
@@ -108,12 +108,12 @@ func (a *API) createSession(ctx context.Context, sessionID, managerHash, publicK
 	}{})
 }
 
-func (a *API) addPairing(ctx context.Context, sessionID, managerToken string, pairing Pairing) error {
+func (a *API) addPairing(ctx context.Context, sessionID, sessionToken string, pairing Pairing) error {
 	request := struct {
 		ID        string `json:"id"`
 		TokenHash string `json:"tokenHash"`
 	}{ID: pairing.ID, TokenHash: tokenHash(pairing.Token)}
-	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/pairings", managerToken, request, &struct {
+	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/pairings", sessionToken, request, &struct {
 		Created bool `json:"created"`
 	}{})
 }
@@ -172,13 +172,13 @@ type joinsResult struct {
 	ExpiresAt int64         `json:"expiresAt"`
 }
 
-func (a *API) joins(ctx context.Context, sessionID, managerToken string) (joinsResult, error) {
+func (a *API) joins(ctx context.Context, sessionID, sessionToken string) (joinsResult, error) {
 	var result joinsResult
-	err := a.do(ctx, http.MethodGet, "/api/sessions/"+sessionID+"/joins", managerToken, nil, &result)
+	err := a.do(ctx, http.MethodGet, "/api/sessions/"+sessionID, sessionToken, nil, &result)
 	return result, err
 }
 
-func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, itemID, groupID string, timestamp int64, nonce, ciphertext, notificationKind string) error {
+func (a *API) addEvent(ctx context.Context, sessionID, sessionToken, eventID, itemID, groupID string, timestamp int64, nonce, ciphertext, notificationKind string) error {
 	request := struct {
 		EventID          string `json:"eventId"`
 		ItemID           string `json:"itemId,omitempty"`
@@ -188,7 +188,7 @@ func (a *API) addEvent(ctx context.Context, sessionID, managerToken, eventID, it
 		Ciphertext       string `json:"ciphertext"`
 		NotificationKind string `json:"notificationKind"`
 	}{eventID, itemID, groupID, timestamp, nonce, ciphertext, notificationKind}
-	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", managerToken, request, &struct {
+	return a.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/events", sessionToken, request, &struct {
 		ExpiresAt int64 `json:"expiresAt"`
 	}{})
 }
@@ -210,7 +210,7 @@ type responsesResult struct {
 	ExpiresAt int64              `json:"expiresAt"`
 }
 
-func (a *API) attachment(ctx context.Context, sessionID, managerToken, attachmentID string, maximumBytes int64) ([]byte, error) {
+func (a *API) attachment(ctx context.Context, sessionID, sessionToken, attachmentID string, maximumBytes int64) ([]byte, error) {
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -220,7 +220,7 @@ func (a *API) attachment(ctx context.Context, sessionID, managerToken, attachmen
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+managerToken)
+	request.Header.Set("Authorization", "Bearer "+sessionToken)
 	response, err := a.client.Do(request)
 	if err != nil {
 		return nil, &transientAPIError{err: err}
@@ -254,14 +254,14 @@ func (a *API) attachment(ctx context.Context, sessionID, managerToken, attachmen
 	return content, nil
 }
 
-func (a *API) responses(ctx context.Context, sessionID, managerToken string, after int64) (responsesResult, error) {
+func (a *API) responses(ctx context.Context, sessionID, sessionToken string, after int64) (responsesResult, error) {
 	var result responsesResult
-	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/responses?after=%d", sessionID, after), managerToken, nil, &result)
+	err := a.do(ctx, http.MethodGet, fmt.Sprintf("/api/sessions/%s/responses?after=%d", sessionID, after), sessionToken, nil, &result)
 	return result, err
 }
 
-func (a *API) closeSession(ctx context.Context, sessionID, managerToken string) error {
-	return a.do(ctx, http.MethodDelete, "/api/sessions/"+sessionID, managerToken, nil, nil)
+func (a *API) closeSession(ctx context.Context, sessionID, sessionToken string) error {
+	return a.do(ctx, http.MethodDelete, "/api/sessions/"+sessionID, sessionToken, nil, nil)
 }
 
 func (a *API) do(ctx context.Context, method, path, token string, input, output any) error {

@@ -1,4 +1,4 @@
-import { env, reset, runInDurableObject, SELF } from "cloudflare:test";
+import { env, reset, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 afterEach(reset);
@@ -88,7 +88,7 @@ describe("devices and persistent groups", () => {
 
     const trackedStatus = await api(`/api/sessions/${session.id}/events`, {
       method: "POST",
-      token: session.managerToken,
+      token: session.sessionToken,
       body: {
         eventId: randomId(),
         itemId: randomId(),
@@ -144,7 +144,7 @@ describe("devices and persistent groups", () => {
 
     const trackedStatus = await api(`/api/sessions/${session.id}/events`, {
       method: "POST",
-      token: session.managerToken,
+      token: session.sessionToken,
       body: {
         eventId: randomId(),
         itemId: randomId(),
@@ -248,26 +248,26 @@ describe("devices and persistent groups", () => {
 
     const downloaded = await SELF.fetch(
       `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
-      { headers: { authorization: `Bearer ${session.managerToken}` } },
+      { headers: { authorization: `Bearer ${session.sessionToken}` } },
     );
     expect(downloaded.status).toBe(200);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(ciphertext);
 
-    const received = await api(`/api/sessions/${session.id}/responses?after=0`, { token: session.managerToken });
+    const received = await api(`/api/sessions/${session.id}/responses?after=0`, { token: session.sessionToken });
     expect(received.json.responses).toEqual([
       expect.objectContaining({ responseId, attachmentId }),
     ]);
     const sequence = received.json.responses[0].sequence;
     expect((await api(`/api/sessions/${session.id}/responses?after=${sequence}`, {
-      token: session.managerToken,
+      token: session.sessionToken,
     })).status).toBe(200);
     expect((await SELF.fetch(
       `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
-      { headers: { authorization: `Bearer ${session.managerToken}` } },
+      { headers: { authorization: `Bearer ${session.sessionToken}` } },
     )).status).toBe(404);
   });
 
-  it("pauses v4 events after self-removal until a remaining device signs a fresh key", async () => {
+  it("keeps only continuously attested v4 Session participation usable after self-removal", async () => {
     const first = await newDevice();
     const second = await newDevice();
     const initial = await createV4Group(first);
@@ -339,6 +339,43 @@ describe("devices and persistent groups", () => {
       expect.objectContaining({ sessionId: removedActorSession.id }),
     ]));
     expect((await postEvent(session, recovery.transition.timestamp)).status).toBe(201);
+    const removedActorSessionState = await api(`/api/sessions/${removedActorSession.id}`, {
+      token: removedActorSession.sessionToken,
+    });
+    expect(removedActorSessionState.status).toBe(200);
+    expect(removedActorSessionState.json.groups).toEqual([
+      expect.objectContaining({ groupId: initial.group.id, key: null }),
+    ]);
+    const removedActorEvent = await postEvent(removedActorSession, recovery.transition.timestamp);
+    expect(removedActorEvent.status).toBe(409);
+    expect(removedActorEvent.json.error).toBe("group_key_unavailable");
+    const removedActorEvents = await events(removedActorSession, first);
+    expect(removedActorEvents.status).toBe(403);
+    expect(removedActorEvents.json.error).toBe("key_not_available");
+    const removedActorAttention = await setAttention(removedActorSession, first, true);
+    expect(removedActorAttention.status).toBe(403);
+    expect(removedActorAttention.json.error).toBe("key_not_available");
+    const removedActorAttachment = await api(`/api/sessions/${removedActorSession.id}/attachments`, {
+      method: "POST",
+      token: first.token,
+      body: {
+        attachmentId: randomId(), responseId: randomId(), groupId: initial.group.id,
+        deviceId: first.id, keyTimestamp: recovery.transition.timestamp,
+        ciphertextLength: 32, ciphertextSha256: "a".repeat(64),
+      },
+    });
+    expect(removedActorAttachment.status).toBe(403);
+    expect(removedActorAttachment.json.error).toBe("key_not_available");
+    const removedActorResponse = await api(`/api/sessions/${removedActorSession.id}/responses`, {
+      method: "POST",
+      token: first.token,
+      body: {
+        responseId: randomId(), groupId: initial.group.id, deviceId: first.id,
+        keyTimestamp: recovery.transition.timestamp, nonce: "A".repeat(16), ciphertext: randomToken(),
+      },
+    });
+    expect(removedActorResponse.status).toBe(403);
+    expect(removedActorResponse.json.error).toBe("key_not_available");
     const responseAt = (keyTimestamp: number) => api(`/api/sessions/${session.id}/responses`, {
       method: "POST", token: first.token,
       body: {
@@ -353,9 +390,177 @@ describe("devices and persistent groups", () => {
     expect((await api(`/api/groups/${initial.group.id}/state?deviceId=${second.id}&protocolVersion=4`, {
       token: second.token,
     })).status).toBe(403);
+
+    const repeatedRequest = await createV4DeviceRequest(second);
+    const readdition = await createSignedV4Transition(
+      initial.group.id, first, recovery.transition, [first, second], recovery.continuityKey, false,
+    );
+    expect((await api(
+      `/api/groups/${initial.group.id}/device-requests/${repeatedRequest.id}/approve?deviceId=${first.id}`,
+      {
+        method: "POST",
+        token: first.token,
+        body: { transition: readdition.transition, packages: readdition.packages, approvalProof: randomToken() },
+      },
+    )).status).toBe(200);
+    const readdedState = await api(
+      `/api/groups/${initial.group.id}/state?deviceId=${second.id}&protocolVersion=4`,
+      { token: second.token },
+    );
+    expect(readdedState.status).toBe(200);
+    expect(readdedState.json.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual([session.id]);
+    expect((await postEvent(removedActorSession, readdition.transition.timestamp)).status).toBe(409);
   });
 
-  it("does not leave a claim behind when a version 3 device is rejected from a version 4 session group", async () => {
+  it("recovers an accepted DeviceRequest approval from its approving state", async () => {
+    const first = await newDevice();
+    const second = await newDevice();
+    const initial = await createV4Group(first);
+    const request = await createV4DeviceRequest(second);
+    const addition = await createSignedV4Transition(
+      initial.group.id,
+      first,
+      initial.transition,
+      [first, second],
+      initial.continuityKey,
+      false,
+    );
+    const approvalProof = randomToken();
+    const groupStub = env.GROUPS.get(env.GROUPS.idFromName(initial.group.id));
+    const preparation = await groupStub.prepareDeviceRequestApproval(
+      {
+        requestId: request.id,
+        deviceId: second.id,
+        deviceAccessTokenHash: await hash(second.token),
+        deviceEncryptionPublicKey: second.encryptionPublicKey,
+        deviceSigningPublicKey: second.signingPublicKey,
+        protocolVersion: 4,
+      },
+      first.id,
+      first.token,
+      { transition: addition.transition, packages: addition.packages, approvalProof },
+    );
+    expect(preparation.status).toBe("prepared");
+    if (preparation.status !== "prepared") throw new Error("DeviceRequest approval was not prepared");
+
+    const requestStub = env.DEVICE_REQUESTS.get(env.DEVICE_REQUESTS.idFromName(request.id));
+    const registry = env.DEVICES.get(env.DEVICES.idFromName("registry"));
+    expect(await runInDurableObject(registry, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'device_requests'",
+      ))
+    )).toEqual([]);
+    await runInDurableObject(requestStub, async (_instance, state) => {
+      expect(Array.from(state.storage.sql.exec<{ status: string }>(
+        "SELECT status FROM device_requests WHERE singleton = 1",
+      ))).toEqual([{ status: "waiting" }]);
+      state.storage.sql.exec(
+        `UPDATE device_requests
+         SET status = 'approving', approval_group_id = ?, approval_actor_device_id = ?,
+             approval_transition_hash = ?, approval_proof = ?, approval_intent_json = ?
+         WHERE singleton = 1`,
+        preparation.intent.groupId,
+        preparation.intent.actorDeviceId,
+        preparation.intent.transitionHash,
+        preparation.intent.approvalProof,
+        JSON.stringify(preparation.intent),
+      );
+      await state.storage.setAlarm(Date.now() + 1_000);
+    });
+    expect(await getDeviceRequest(second, request.id)).toEqual({
+      status: "approving",
+      expiresAt: expect.any(Number),
+    });
+
+    expect(await runDurableObjectAlarm(requestStub)).toBe(true);
+    expect(await getDeviceRequest(second, request.id)).toEqual({
+      status: "approved",
+      groupId: initial.group.id,
+      expiresAt: expect.any(Number),
+      transitionHash: addition.transition.transitionHash,
+      approvalProof,
+    });
+    expect((await groupState(initial.group.id, first)).members.map(
+      (member: { deviceId: string }) => member.deviceId,
+    )).toEqual([first.id, second.id]);
+    expect(await runInDurableObject(groupStub, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'group_device_request_approvals_v4'",
+      ))
+    )).toEqual([]);
+  });
+
+  it("adds a Device using the public DeviceRequest descriptor", async () => {
+    const first = await newDevice();
+    const second = await newDevice();
+    const initial = await createV4Group(first);
+    const request = await createV4DeviceRequest(second);
+    const described = await api(
+      `/api/groups/${initial.group.id}/device-requests/${request.id}?deviceId=${first.id}`,
+      { token: first.token },
+    );
+    expect(described).toEqual({
+      status: 200,
+      json: {
+        requestId: request.id,
+        deviceId: second.id,
+        accessHash: await hash(second.token),
+        signingPublicKey: second.signingPublicKey,
+        encryptionPublicKey: second.encryptionPublicKey,
+        protocolVersion: 4,
+      },
+    });
+    const requestedDevice = {
+      ...second,
+      id: described.json.deviceId,
+      signingPublicKey: described.json.signingPublicKey,
+      encryptionPublicKey: described.json.encryptionPublicKey,
+    };
+    const addition = await createSignedV4Transition(
+      initial.group.id,
+      first,
+      initial.transition,
+      [first, requestedDevice],
+      initial.continuityKey,
+      false,
+    );
+    const approvalProof = randomToken();
+    const approved = await api(
+      `/api/groups/${initial.group.id}/device-requests/${request.id}/approve?deviceId=${first.id}`,
+      {
+        method: "POST",
+        token: first.token,
+        body: { transition: addition.transition, packages: addition.packages, approvalProof },
+      },
+    );
+    expect(approved).toEqual({
+      status: 200,
+      json: {
+        approved: true,
+        deviceId: second.id,
+        approvedByDeviceId: first.id,
+        transitionHash: addition.transition.transitionHash,
+      },
+    });
+    expect(await getDeviceRequest(second, request.id)).toEqual({
+      status: "approved",
+      groupId: initial.group.id,
+      expiresAt: expect.any(Number),
+      transitionHash: addition.transition.transitionHash,
+      approvalProof,
+    });
+    const state = await api(
+      `/api/groups/${initial.group.id}/state?deviceId=${second.id}&protocolVersion=4`,
+      { token: second.token },
+    );
+    expect(state.status).toBe(200);
+    expect(state.json.members.map((member: { deviceId: string }) => member.deviceId)).toEqual([
+      first.id,
+      second.id,
+    ]);
+  });
+
+  it("leaves a DeviceRequest waiting when its approval is rejected", async () => {
     const first = await newDevice();
     const second = await newDevice();
     const { group, key } = await createV4Group(first);
@@ -380,13 +585,10 @@ describe("devices and persistent groups", () => {
     expect(rejected.status).toBe(409);
     expect(rejected.json.error).toBe("protocol_upgrade_required");
 
-    const registry = env.DEVICES.get(env.DEVICES.idFromName("registry"));
-    expect(await runInDurableObject(registry, async (_instance, state) =>
-      Array.from(state.storage.sql.exec<{ claimed_group_id: string | null }>(
-        "SELECT claimed_group_id FROM device_requests WHERE id = ?",
-        request.id,
-      ))[0].claimed_group_id
-    )).toBeNull();
+    expect(await getDeviceRequest(second, request.id)).toEqual({
+      status: "waiting",
+      expiresAt: request.expiresAt,
+    });
   });
 
   it("reverses device approval and binds group keys to their members", async () => {
@@ -474,8 +676,7 @@ describe("devices and persistent groups", () => {
     expect(removedState.status).toBe(403);
     expect(removedState.json.error).toBe("device_removed");
     const replayedApproval = await approve();
-    expect(replayedApproval.status).toBe(409);
-    expect(replayedApproval.json.error).toBe("device_request_used");
+    expect(replayedApproval).toEqual(approved);
     expect((await groupState(group.id, first)).members.map((member: { deviceId: string }) => member.deviceId)).toEqual([
       first.id,
     ]);
@@ -515,7 +716,7 @@ describe("devices and persistent groups", () => {
     )).toBe(2);
 
     expect((await groupState(group.id, first)).sessions).toHaveLength(1);
-    expect((await api(`/api/sessions/${session.id}`, { method: "DELETE", token: session.managerToken })).status).toBe(204);
+    expect((await api(`/api/sessions/${session.id}`, { method: "DELETE", token: session.sessionToken })).status).toBe(204);
     expect((await groupState(group.id, first)).sessions).toEqual([]);
     expect(await runInDurableObject(registry, async (_instance, state) =>
       Array.from(state.storage.sql.exec<{ count: number }>(
@@ -603,6 +804,141 @@ describe("devices and persistent groups", () => {
     ]);
   });
 
+  it("continues a version 4 join after Session participation was established", async () => {
+    const device = await newDevice();
+    const { group, key } = await createV4Group(device);
+    const prepared = await prepareSessionJoin(group, device, key, 4);
+    const sessionStub = await establishSessionParticipation(prepared, group, device, key);
+
+    const before = await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
+      token: device.token,
+    });
+    expect(before.status).toBe(200);
+    expect(before.json.sessions).toEqual([]);
+
+    const retried = await api(`/api/sessions/${prepared.session.id}/join`, {
+      method: "POST",
+      body: prepared.body,
+    });
+    expect(retried.status).toBe(201);
+    const after = await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
+      token: device.token,
+    });
+    expect(after.json.sessions).toEqual([
+      expect.objectContaining({ sessionId: prepared.session.id }),
+    ]);
+    expect(await runInDurableObject(sessionStub, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ consumed: number }>(
+        "SELECT COUNT(*) AS consumed FROM pairings WHERE id = ? AND consumed_at IS NOT NULL",
+        prepared.pairingId,
+      ))[0].consumed
+    )).toBe(1);
+    const groupStub = env.GROUPS.get(env.GROUPS.idFromName(group.id));
+    expect(await runInDurableObject(groupStub, async (_instance, state) =>
+      Array.from(state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'group_session_candidates_v4'",
+      ))
+    )).toEqual([]);
+  });
+
+  it("rejects another current Device while a SessionPairing is joining", async () => {
+    const first = await newDevice();
+    const second = await newDevice();
+    const initial = await createV4Group(first);
+    const request = await createV4DeviceRequest(second);
+    const addition = await createSignedV4Transition(
+      initial.group.id,
+      first,
+      initial.transition,
+      [first, second],
+      initial.continuityKey,
+      false,
+    );
+    expect((await api(
+      `/api/groups/${initial.group.id}/device-requests/${request.id}/approve?deviceId=${first.id}`,
+      {
+        method: "POST",
+        token: first.token,
+        body: { transition: addition.transition, packages: addition.packages, approvalProof: randomToken() },
+      },
+    )).status).toBe(200);
+    const key = {
+      timestamp: addition.transition.timestamp,
+      publicKey: addition.transition.publicKey,
+      transitionHash: addition.transition.transitionHash,
+      continuityKey: addition.continuityKey,
+    };
+    const prepared = await prepareSessionJoin(initial.group, first, key, 4);
+    await establishSessionParticipation(prepared, initial.group, first, key);
+
+    const competing = await api(`/api/sessions/${prepared.session.id}/join`, {
+      method: "POST",
+      body: {
+        ...prepared.body,
+        deviceId: second.id,
+        deviceAccessToken: second.token,
+      },
+    });
+    expect(competing.status).toBe(409);
+    expect(competing.json.error).toBe("pairing_consumed");
+    expect((await api(`/api/sessions/${prepared.session.id}/join`, {
+      method: "POST",
+      body: prepared.body,
+    })).status).toBe(201);
+  });
+
+  it("consumes a SessionPairing after both participation records were established", async () => {
+    const device = await newDevice();
+    const { group, key } = await createV4Group(device);
+    const prepared = await prepareSessionJoin(group, device, key, 4);
+    const sessionStub = await establishSessionParticipation(prepared, group, device, key);
+    const groupStub = env.GROUPS.get(env.GROUPS.idFromName(group.id));
+    await groupStub.validateSessionDescriptor(prepared.body.sessionDescriptor);
+    await groupStub.storeSession(
+      prepared.session.id,
+      key.publicKey,
+      prepared.expiresAt,
+      4,
+      prepared.body.sessionDescriptor,
+    );
+
+    const state = await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
+      token: device.token,
+    });
+    expect(state.json.sessions).toEqual([
+      expect.objectContaining({ sessionId: prepared.session.id }),
+    ]);
+    expect((await api(`/api/sessions/${prepared.session.id}/join`, {
+      method: "POST",
+      body: prepared.body,
+    })).status).toBe(201);
+    expect(await runInDurableObject(sessionStub, async (_instance, durableState) =>
+      Array.from(durableState.storage.sql.exec<{ consumed: number }>(
+        "SELECT COUNT(*) AS consumed FROM pairings WHERE id = ? AND consumed_at IS NOT NULL",
+        prepared.pairingId,
+      ))[0].consumed
+    )).toBe(1);
+    expect(await runInDurableObject(groupStub, async (_instance, durableState) =>
+      Array.from(durableState.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM group_sessions_v3 WHERE session_id = ?",
+        prepared.session.id,
+      ))[0].count
+    )).toBe(1);
+  });
+
+  it("returns the same result when the same version 4 join is repeated", async () => {
+    const device = await newDevice();
+    const { group, key } = await createV4Group(device);
+
+    const session = await createJoinedSession(group, device, key, 4, 2);
+
+    const state = await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
+      token: device.token,
+    });
+    expect(state.status).toBe(200);
+    expect(state.json.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual([session.id]);
+  });
+
   it("does not expose Durable Object RPC methods as HTTP routes", async () => {
     const device = await newDevice();
     const group = await createGroup(device);
@@ -634,8 +970,15 @@ interface RegisteredKey {
 
 interface JoinedSession {
   id: string;
-  managerToken: string;
+  sessionToken: string;
   groupId: string;
+}
+
+interface PreparedSessionJoin {
+  session: JoinedSession;
+  pairingId: string;
+  expiresAt: number;
+  body: Record<string, any>;
 }
 
 async function newDevice(): Promise<Device> {
@@ -864,21 +1207,39 @@ async function createJoinedSession(
   device: Device,
   key: RegisteredKey,
   protocolVersion = 3,
+  joinAttempts = 1,
 ): Promise<JoinedSession> {
+  const prepared = await prepareSessionJoin(group, device, key, protocolVersion);
+  for (let attempt = 0; attempt < joinAttempts; attempt += 1) {
+    expect((await api(`/api/sessions/${prepared.session.id}/join`, {
+      method: "POST",
+      body: prepared.body,
+    })).status).toBe(201);
+  }
+  return prepared.session;
+}
+
+async function prepareSessionJoin(
+  group: Group,
+  device: Device,
+  key: RegisteredKey,
+  protocolVersion = 3,
+): Promise<PreparedSessionJoin> {
   const sessionId = randomId();
-  const managerToken = randomToken();
+  const sessionToken = randomToken();
   const pairingId = randomId();
   const pairingToken = randomToken();
-  expect((await api("/api/sessions", {
+  const created = await api("/api/sessions", {
     method: "POST",
     body: {
       sessionId,
-      managerTokenHash: await hash(managerToken),
+      sessionTokenHash: await hash(sessionToken),
       creatorPublicKey: key.publicKey,
       ...(protocolVersion === 3 ? {} : { protocolVersion }),
       pairing: { id: pairingId, tokenHash: await hash(pairingToken) },
     },
-  })).status).toBe(201);
+  });
+  expect(created.status).toBe(201);
   if (protocolVersion === 4) {
     expect(key.continuityKey).toBeDefined();
     expect((await api(`/api/groups/${group.id}/state?deviceId=${device.id}&protocolVersion=4`, {
@@ -889,8 +1250,11 @@ async function createJoinedSession(
     "notify.guru/session-descriptor/v1", sessionId, group.id, "4", key.publicKey,
     String(key.timestamp), key.transitionHash, device.id,
   ].join("\n");
-  expect((await api(`/api/sessions/${sessionId}/join`, {
-    method: "POST",
+  const proof = randomToken();
+  return {
+    session: { id: sessionId, sessionToken, groupId: group.id },
+    pairingId,
+    expiresAt: created.json.expiresAt,
     body: {
       pairingId,
       pairingToken,
@@ -908,17 +1272,58 @@ async function createJoinedSession(
           continuitySignature: await sign(key.continuityKey!, descriptorTranscript),
         },
       } : {}),
-      proof: randomToken(),
+      proof,
     },
-  })).status).toBe(201);
-  return { id: sessionId, managerToken, groupId: group.id };
+  };
+}
+
+async function establishSessionParticipation(
+  prepared: PreparedSessionJoin,
+  group: Group,
+  device: Device,
+  key: RegisteredKey,
+) {
+  const joinHash = await hash([
+    "notify.guru/session-join-operation/v1",
+    prepared.session.id,
+    prepared.pairingId,
+    group.id,
+    device.id,
+    String(key.timestamp),
+    key.publicKey,
+    key.transitionHash ?? "",
+    prepared.body.proof,
+  ].join("\n"));
+  const stub = env.SESSIONS.get(env.SESSIONS.idFromName(prepared.session.id));
+  await runInDurableObject(stub, async (_instance, state) => {
+    state.storage.sql.exec(
+      `INSERT INTO session_groups_v3
+         (id, pairing_id, initial_key_timestamp, initial_public_key, initial_transition_hash,
+          join_proof, join_hash, actor_device_id, joined_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      group.id,
+      prepared.pairingId,
+      key.timestamp,
+      key.publicKey,
+      key.transitionHash ?? null,
+      prepared.body.proof,
+      joinHash,
+      device.id,
+      Date.now(),
+    );
+    expect(Array.from(state.storage.sql.exec<{ consumed_at: number | null }>(
+      "SELECT consumed_at FROM pairings WHERE id = ?",
+      prepared.pairingId,
+    ))).toEqual([{ consumed_at: null }]);
+  });
+  return stub;
 }
 
 async function postEvent(session: JoinedSession, keyTimestamp: number, notificationKind = "notify") {
   const eventId = randomId();
   const result = await api(`/api/sessions/${session.id}/events`, {
     method: "POST",
-    token: session.managerToken,
+    token: session.sessionToken,
     body: {
       eventId,
       groupId: session.groupId,
@@ -941,7 +1346,7 @@ async function postTrackedEvent(
 ) {
   const result = await api(`/api/sessions/${session.id}/events`, {
     method: "POST",
-    token: session.managerToken,
+    token: session.sessionToken,
     body: {
       eventId,
       itemId,
