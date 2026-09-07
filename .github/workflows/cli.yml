@@ -54,7 +54,6 @@ jobs:
   full-test:
     runs-on: macos-26
     env:
-      TEST_RESULTS_DIR: ${{ runner.temp }}/notify-guru-test-results
       WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -68,6 +67,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:all
+        env:
+          TEST_RESULTS_DIR: ${{ runner.temp }}/notify-guru-test-results
       - if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
