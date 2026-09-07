@@ -21,6 +21,7 @@ import (
 )
 
 var colorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+var attachmentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
 var pastelPalette = []string{
 	"#ffd6e0", "#ffe5b4", "#fff3b0", "#d9f2d0",
@@ -626,6 +627,9 @@ func (s *Store) receiveAttachment(
 ) (*ReceivedAttachment, error) {
 	if session.protocolVersion != 4 || envelope.AttachmentID == "" || manifest.ID != envelope.AttachmentID {
 		return nil, fmt.Errorf("attachment ID does not match its version 4 response envelope")
+	}
+	if !attachmentIDPattern.MatchString(manifest.ID) {
+		return nil, fmt.Errorf("invalid attachment ID")
 	}
 	if manifest.Kind != "image" || manifest.MediaType != "image/jpeg" {
 		return nil, fmt.Errorf("unsupported attachment kind or media type")
