@@ -33,6 +33,7 @@ struct JoinSessionView: View {
             .padding()
             .background(Color(uiColor: .secondarySystemBackground))
             .navigationTitle("Scan QR code")
+            .safeAreaInset(edge: .bottom) { OperationErrorView() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

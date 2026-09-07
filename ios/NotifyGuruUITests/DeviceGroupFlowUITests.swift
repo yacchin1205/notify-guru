@@ -235,7 +235,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].waitForExistence(timeout: 5))
         app.buttons["Dismiss request"].tap()
 
-        XCTAssertTrue(app.alerts["notify.guru error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["operation-error-message"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Continue the meeting?"].exists)
         XCTAssertTrue(app.staticTexts["3 unresolved items"].exists)
         attachScreenshot(named: "13-dismiss-error-keeps-request", app: app)
@@ -248,7 +248,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Invalid server response: object fields do not match the protocol"].exists)
-        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        XCTAssertFalse(app.staticTexts["operation-error-message"].exists)
         XCTAssertTrue(app.buttons["Yes"].isHittable)
         attachScreenshot(named: "17-session-sync-error-on-card", app: app)
     }
@@ -395,13 +395,9 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Add device"].waitForExistence(timeout: 5))
         app.buttons["Add device"].tap()
 
-        let errorAlert = app.alerts["notify.guru error"]
-        XCTAssertTrue(errorAlert.waitForExistence(timeout: 5))
-        XCTAssertTrue(
-            errorAlert.staticTexts
-                .matching(NSPredicate(format: "label CONTAINS %@", "Device addition failed for UI testing"))
-                .firstMatch.exists
-        )
+        let errorMessage = app.staticTexts["operation-error-message"]
+        XCTAssertTrue(errorMessage.waitForExistence(timeout: 5))
+        XCTAssertTrue(errorMessage.label.contains("Device addition failed for UI testing"))
         attachScreenshot(named: "22-device-addition-error", app: app)
     }
 
@@ -414,7 +410,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
         app.buttons["Add device"].tap()
 
         XCTAssertFalse(app.staticTexts["Add a device to this group?"].waitForExistence(timeout: 2))
-        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        XCTAssertFalse(app.staticTexts["operation-error-message"].exists)
         attachScreenshot(named: "23-device-addition-approved", app: app)
     }
 
@@ -434,8 +430,33 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         XCTAssertFalse(app.navigationBars["Scan QR code"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Add a device to this group?"].exists)
-        XCTAssertFalse(app.alerts["notify.guru error"].exists)
+        XCTAssertFalse(app.staticTexts["operation-error-message"].exists)
         attachScreenshot(named: "24-session-link-joined-without-device-approval", app: app)
+    }
+
+    func testInvalidJoinErrorIsVisibleInsideSheetAndRemainsUntilDismissed() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+        let scan = app.buttons["Scan QR code"].firstMatch
+        XCTAssertTrue(scan.waitForExistence(timeout: 5))
+        scan.tap()
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("not-a-pairing-link")
+        app.buttons["Continue"].tap()
+        let errorMessage = app.staticTexts["operation-error-message"].firstMatch
+        XCTAssertTrue(errorMessage.waitForExistence(timeout: 5))
+        XCTAssertTrue(errorMessage.label.contains("expected an https://notify.guru/join URL"))
+        attachScreenshot(named: "40-join-error-inside-sheet", app: app)
+
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(errorMessage.waitForExistence(timeout: 5))
+        attachScreenshot(named: "41-join-error-after-sheet-close", app: app)
+        app.buttons["Dismiss error"].tap()
+        XCTAssertFalse(errorMessage.exists)
+        attachScreenshot(named: "42-join-error-acknowledged", app: app)
     }
 
     private var sessionLinkFixture: String {

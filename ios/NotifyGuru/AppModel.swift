@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -13,7 +14,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var isReady = false
     @Published private(set) var startupErrorMessage: String?
     @Published private(set) var canResetLocalData = false
-    @Published var errorMessage: String?
+    @Published private(set) var operationErrors: [String] = []
+    var errorMessage: String? {
+        operationErrors.isEmpty ? nil : operationErrors.joined(separator: "\n\n")
+    }
     @Published var noticeMessage: String?
     @Published private(set) var sessionSyncErrors: [String: String] = [:]
 
@@ -24,6 +28,7 @@ final class AppModel: ObservableObject {
     private var pendingDeviceRequest: DeviceRequestRecord?
     private var pendingDeviceAddition: DeviceRequestLink?
     private var pendingUniversalLinks: [URL] = []
+    private let linkLogger = Logger(subsystem: "guru.notify.app", category: "LinkReception")
     private var pendingUniversalLinkTask: Task<Void, Never>?
     private var hasFinishedStarting = false
     private var isSyncing = false
@@ -174,26 +179,22 @@ final class AppModel: ObservableObject {
     }
 
     func join(link: String) async -> Bool {
-        guard !isSyncing, !isStateActionInProgress else { return false }
-        isStateActionInProgress = true
+        guard beginStateAction("Join session") else { return false }
         defer { finishStateAction() }
         do {
             let value = link.trimmingCharacters(in: .whitespacesAndNewlines)
             if URLComponents(string: value)?.path == "/device" {
                 try stageDeviceAddition(DeviceRequestLink(value))
-                errorMessage = nil
                 return true
             } else {
                 let pairing = try PairingLink(value)
 #if DEBUG
                 if isSessionLinkUITest {
-                    errorMessage = nil
                     return true
                 }
 #endif
                 try await joinSession(pairing)
             }
-            errorMessage = nil
             await sync()
             return true
         } catch { show(error); return false }
@@ -235,7 +236,6 @@ final class AppModel: ObservableObject {
         do {
             try await approveDeviceRequest(link)
             if clearPendingOnSuccess { clearPendingDeviceAddition() }
-            errorMessage = nil
             await sync()
             return true
         } catch {
@@ -247,13 +247,13 @@ final class AppModel: ObservableObject {
     func cancelDeviceAddition() { clearPendingDeviceAddition() }
 
     func openUniversalLink(_ url: URL) async {
+        linkLogger.info("Queued received link")
         pendingUniversalLinks.append(url)
         schedulePendingUniversalLink()
     }
 
     func createDeviceRequest(discardingCurrentState: Bool = false) async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Create device request") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -293,13 +293,11 @@ final class AppModel: ObservableObject {
             pendingDeviceRequest = created
             try persist(current)
             deviceRequestLink = try deviceRequestURL(created)
-            errorMessage = nil
         } catch { show(error) }
     }
 
     func removeDevice(_ deviceID: String) async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Remove device") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -322,8 +320,7 @@ final class AppModel: ObservableObject {
     }
 
     func leaveDeviceGroup() async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Leave group") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -347,8 +344,7 @@ final class AppModel: ObservableObject {
     }
 
     func respond(sessionID: String, optionID: String) async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Send response") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -377,8 +373,7 @@ final class AppModel: ObservableObject {
     }
 
     func dismissRequest(sessionID: String) async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Dismiss request") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -427,8 +422,7 @@ final class AppModel: ObservableObject {
     }
 
     func dismissNotification(sessionID: String, notificationID: String) async {
-        guard !isSyncing, !isStateActionInProgress else { return }
-        isStateActionInProgress = true
+        guard beginStateAction("Dismiss notification") else { return }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -459,8 +453,7 @@ final class AppModel: ObservableObject {
     }
 
     func setAttention(sessionID: String, attention: Bool) async -> Bool {
-        guard !isSyncing, !isStateActionInProgress else { return false }
-        isStateActionInProgress = true
+        guard beginStateAction("Change attention") else { return false }
         defer { finishStateAction() }
         do {
             var current = try requiredVault()
@@ -482,8 +475,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendFeedback(sessionID: String, message: String, photo: PreparedPhoto? = nil) async -> Bool {
-        guard !isSyncing, !isStateActionInProgress else { return false }
-        isStateActionInProgress = true
+        guard beginStateAction("Send message") else { return false }
         defer { finishStateAction() }
         do {
             let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -543,7 +535,7 @@ final class AppModel: ObservableObject {
     }
 
     func resumeNotifications() async { await PushCoordinator.shared.resumeIfAuthorized() }
-    func dismissError() { errorMessage = nil }
+    func dismissError() { operationErrors.removeAll() }
     func dismissNotice() { noticeMessage = nil }
 
 #if DEBUG
@@ -561,7 +553,9 @@ final class AppModel: ObservableObject {
         guard hasFinishedStarting, !isSyncing, !isStateActionInProgress,
               !pendingUniversalLinks.isEmpty else { return }
         let url = pendingUniversalLinks.removeFirst()
-        _ = await join(link: url.absoluteString)
+        linkLogger.info("Starting queued link operation")
+        let joined = await join(link: url.absoluteString)
+        linkLogger.info("Queued link operation completed; succeeded: \(joined)")
         schedulePendingUniversalLink()
     }
 
@@ -675,9 +669,11 @@ final class AppModel: ObservableObject {
             }
             current = Self.pruningExpiredSessions(from: current, nowMilliseconds: Self.currentTimeMilliseconds())
             try persist(current)
-            connectionState = .current; errorMessage = nil
+            connectionState = .current
         } catch let error as APIError where error.status == 403 && error.code == "device_removed" {
             do { try await recoverRemovedDevice() } catch { show(error) }
+        } catch where Task.isCancelled && Self.isCancellation(error) {
+            return
         } catch { show(error) }
     }
 
@@ -945,6 +941,7 @@ final class AppModel: ObservableObject {
             } catch {
                 // A single relay-controlled session must not block retirement of
                 // other stale sessions or persistence of the authenticated set.
+                reportError("Could not inherit session \(remote.sessionID): \(error.localizedDescription)")
                 continue
             }
         }
@@ -1145,8 +1142,21 @@ final class AppModel: ObservableObject {
     }
 
     private func show(_ error: Error) {
-        guard !Self.isCancellation(error) else { return }
-        errorMessage = error.localizedDescription; connectionState = .failed
+        reportError(error.localizedDescription)
+        connectionState = .failed
+    }
+
+    func reportError(_ message: String) {
+        if !operationErrors.contains(message) { operationErrors.append(message) }
+    }
+
+    private func beginStateAction(_ operation: String) -> Bool {
+        guard !isSyncing, !isStateActionInProgress else {
+            reportError("\(operation) was not started because another operation is in progress. Try again shortly.")
+            return false
+        }
+        isStateActionInProgress = true
+        return true
     }
 
     nonisolated private static func isCancellation(_ error: Error) -> Bool {

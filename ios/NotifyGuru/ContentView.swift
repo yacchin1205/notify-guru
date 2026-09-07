@@ -85,11 +85,7 @@ struct ContentView: View {
             } message: {
                 Text("The new device will receive notifications and can respond as a member of this device group.")
             }
-            .alert("notify.guru error", isPresented: errorPresented) {
-                Button("OK") { model.dismissError() }
-            } message: {
-                Text(model.errorMessage ?? "")
-            }
+            .safeAreaInset(edge: .bottom) { OperationErrorView() }
             .alert("notify.guru", isPresented: noticePresented) {
                 Button("OK") { model.dismissNotice() }
             } message: {
@@ -109,13 +105,6 @@ struct ContentView: View {
             }
         }
         .tint(.brandAccent)
-    }
-
-    private var errorPresented: Binding<Bool> {
-        Binding(
-            get: { model.errorMessage != nil },
-            set: { if !$0 { model.dismissError() } }
-        )
     }
 
     private var deviceAdditionApprovalPresented: Binding<Bool> {
@@ -153,6 +142,29 @@ enum SessionGridLayout {
     static func columnCount(idiom: UIUserInterfaceIdiom, size: CGSize) -> Int {
         guard idiom == .pad, size.width >= 600 else { return 1 }
         return size.width > size.height ? 3 : 2
+    }
+}
+
+struct OperationErrorView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let message = model.errorMessage {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("notify.guru error", systemImage: "exclamationmark.triangle")
+                    .font(.headline)
+                ScrollView {
+                    Text(message)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("operation-error-message")
+                }
+                .frame(maxHeight: 120)
+                Button("Dismiss error") { model.dismissError() }
+            }
+            .padding()
+            .background(.regularMaterial)
+        }
     }
 }
 
@@ -276,6 +288,7 @@ private struct DeviceManagementView: View {
             }
             .background(Color.brandBackground)
             .navigationTitle("Device Group")
+            .safeAreaInset(edge: .bottom) { OperationErrorView() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -665,6 +678,7 @@ private struct FeedbackView: View {
             }
             .padding()
             .navigationTitle("Send a message")
+            .safeAreaInset(edge: .bottom) { OperationErrorView() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -702,7 +716,7 @@ private struct FeedbackView: View {
                     selectedPhotoItem = nil
                 } catch {
                     selectedPhotoItem = nil
-                    photoError = "The selected photo could not be prepared within the attachment limit."
+                    photoError = error.localizedDescription
                 }
                 preparingPhoto = false
             }
@@ -720,8 +734,10 @@ private struct FeedbackView: View {
     }
 }
 
-private enum PhotoPreparationError: Error {
+private enum PhotoPreparationError: LocalizedError {
     case failed
+
+    var errorDescription: String? { "The selected photo could not be decoded or prepared within the attachment limit." }
 }
 
 private struct CameraPicker: UIViewControllerRepresentable {

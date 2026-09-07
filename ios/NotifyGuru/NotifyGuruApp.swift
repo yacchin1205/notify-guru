@@ -1,9 +1,11 @@
 import SwiftUI
+import OSLog
 
 @main
 struct NotifyGuruApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    private let linkLogger = Logger(subsystem: "guru.notify.app", category: "LinkReception")
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +16,15 @@ struct NotifyGuruApp: App {
                     PushCoordinator.shared.setDesiredBadgeCount(count)
                 }
                 .onOpenURL { url in
+                    linkLogger.info("Received link through onOpenURL")
+                    Task { await model.openUniversalLink(url) }
+                }
+                .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                    linkLogger.info("Received browsing activity through onContinueUserActivity")
+                    guard let url = activity.webpageURL else {
+                        model.reportError("The browsing activity did not contain a URL. Session joining was not started.")
+                        return
+                    }
                     Task { await model.openUniversalLink(url) }
                 }
         }

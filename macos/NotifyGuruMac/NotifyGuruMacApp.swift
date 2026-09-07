@@ -172,7 +172,7 @@ final class MacRuntime: ObservableObject {
         start()
         if url.scheme == "notifyguru" {
             guard url.host == "sessions", url.path.isEmpty else {
-                model.errorMessage = "This notify.guru link cannot be opened."
+                model.reportError("This notify.guru link cannot be opened.")
                 return
             }
             sessionsWindowRequest += 1
