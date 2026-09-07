@@ -149,7 +149,14 @@ final class MacRuntime: ObservableObject {
     private init() {
         let model = AppModel()
         self.model = model
+        #if MAC_GUI_TESTING
+        widgetSnapshotCoordinator = WidgetSnapshotCoordinator(
+            model: model,
+            store: WidgetSnapshotStore(directoryURL: FileManager.default.temporaryDirectory)
+        )
+        #else
         widgetSnapshotCoordinator = WidgetSnapshotCoordinator(model: model)
+        #endif
     }
 
     func start() {

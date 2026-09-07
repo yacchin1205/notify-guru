@@ -5,6 +5,12 @@ set -euo pipefail
 repository_dir=${0:A:h:h}
 cd "$repository_dir"
 
+suite=${1:-all}
+case "$suite" in
+  all|ios-unit|iphone|ipad|macos) ;;
+  *) print -u2 "Unknown test suite: $suite"; exit 2 ;;
+esac
+
 results_dir=${TEST_RESULTS_DIR:-/tmp/notify-guru-test-results-$(date +%Y%m%d-%H%M%S)-$$}
 phone_simulator=${IOS_PHONE_SIMULATOR:-iPhone 17 Pro}
 tablet_simulator=${IOS_TABLET_SIMULATOR:-iPad Pro 13-inch (M5)}
@@ -37,6 +43,7 @@ run_ui_tests() {
   local scheme=$2
   local destination=$3
   local only_testing=$4
+  shift 4
   local result_bundle="$results_dir/$label.xcresult"
   local attachments="$results_dir/$label-attachments"
   local test_status=0
@@ -48,6 +55,7 @@ run_ui_tests() {
     -parallel-testing-enabled NO \
     -resultBundlePath "$result_bundle" \
     -only-testing:"$only_testing" \
+    "$@" \
     test || test_status=$?
 
   if [[ -d "$result_bundle" ]]; then
@@ -62,45 +70,57 @@ run_ui_tests() {
 mkdir -p "$results_dir"
 print "Test results: $results_dir"
 
-print "Running Worker and Web tests"
-npm run check
+if [[ "$suite" == all ]]; then
+  print "Running Worker and Web tests"
+  npm run check
 
-print "Running Go tests"
-go test -count=1 ./...
+  print "Running Go tests"
+  go test -count=1 ./...
 
-print "Running Go integration tests"
-npm run dev -- --ip 127.0.0.1 --port 8787 &
-worker_pid=$!
-curl --fail --show-error --silent \
-  --retry 60 \
-  --retry-delay 2 \
-  --retry-all-errors \
-  --retry-connrefused \
-  http://127.0.0.1:8787/api/health
-kill -0 "$worker_pid"
-NOTIFY_INTEGRATION_BASE_URL=http://127.0.0.1:8787 go test -count=1 -tags integration ./internal/notify
-cleanup
-worker_pid=""
+  print "Running Go integration tests"
+  npm run dev -- --ip 127.0.0.1 --port 8787 &
+  worker_pid=$!
+  curl --fail --show-error --silent \
+    --retry 60 \
+    --retry-delay 2 \
+    --retry-all-errors \
+    --retry-connrefused \
+    http://127.0.0.1:8787/api/health
+  kill -0 "$worker_pid"
+  NOTIFY_INTEGRATION_BASE_URL=http://127.0.0.1:8787 go test -count=1 -tags integration ./internal/notify
+  cleanup
+  worker_pid=""
+fi
 
-print "Running iOS unit tests"
-xcodebuild \
-  -project ios/NotifyGuru.xcodeproj \
-  -scheme NotifyGuru \
-  -destination "$phone_destination" \
-  -parallel-testing-enabled NO \
-  -resultBundlePath "$results_dir/ios-unit.xcresult" \
-  -only-testing:NotifyGuruTests \
-  test
+if [[ "$suite" == all || "$suite" == ios-unit ]]; then
+  print "Running iOS unit tests"
+  xcodebuild \
+    -project ios/NotifyGuru.xcodeproj \
+    -scheme NotifyGuru \
+    -destination "$phone_destination" \
+    -parallel-testing-enabled NO \
+    -resultBundlePath "$results_dir/ios-unit.xcresult" \
+    -only-testing:NotifyGuruTests \
+    test
+fi
 
-print "Running iPhone UI tests"
-prepare_ios_ui_tests "$phone_simulator"
-run_ui_tests ios-ui-iphone NotifyGuru "$phone_destination" NotifyGuruUITests
+if [[ "$suite" == all || "$suite" == iphone ]]; then
+  print "Running iPhone UI tests"
+  prepare_ios_ui_tests "$phone_simulator"
+  run_ui_tests ios-ui-iphone NotifyGuru "$phone_destination" NotifyGuruUITests
+fi
 
-print "Running iPad UI tests"
-prepare_ios_ui_tests "$tablet_simulator"
-run_ui_tests ios-ui-ipad NotifyGuru "$tablet_destination" NotifyGuruUITests
+if [[ "$suite" == all || "$suite" == ipad ]]; then
+  print "Running iPad UI tests"
+  prepare_ios_ui_tests "$tablet_simulator"
+  run_ui_tests ios-ui-ipad NotifyGuru "$tablet_destination" NotifyGuruUITests
+fi
 
-print "Running macOS UI tests"
-run_ui_tests macos-ui NotifyGuruMac "platform=macOS" NotifyGuruMacUITests
+if [[ "$suite" == all || "$suite" == macos ]]; then
+  print "Running macOS UI tests"
+  run_ui_tests macos-ui NotifyGuruMac "platform=macOS" NotifyGuruMacUITests \
+    -xcconfig macos/NotifyGuruMacUITests/UITesting.xcconfig \
+    -derivedDataPath "${TMPDIR:-/tmp/}notify-guru-macos-ui-derived-data"
+fi
 
-print "All tests passed"
+print "Test suite passed: $suite"

@@ -51,35 +51,41 @@ jobs:
       - if: always()
         run: cat wrangler.log
 
-  full-test:
-    runs-on: macos-26
+  web:
+    runs-on: ubuntu-24.04
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - run: npm run test:all
+      - run: npm run check
+
+  apple-test:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [ios-unit, iphone, ipad, macos]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: scripts/test-all.sh "${{ matrix.suite }}"
         env:
           TEST_RESULTS_DIR: ${{ runner.temp }}/notify-guru-test-results
       - if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: full-test-results
+          name: test-results-${{ matrix.suite }}
           path: ${{ runner.temp }}/notify-guru-test-results
           if-no-files-found: error
           retention-days: 14
 
   snapshot:
     if: github.ref_type != 'tag'
-    needs: [verify, integration, full-test]
+    needs: [verify, integration, web, apple-test]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -108,7 +114,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [verify, integration, full-test]
+    needs: [verify, integration, web, apple-test]
     permissions:
       contents: write
     runs-on: ubuntu-24.04
