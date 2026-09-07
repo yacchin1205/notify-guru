@@ -24,7 +24,7 @@ final class WidgetSnapshotCoordinator {
                 WidgetCenter.shared.reloadTimelines(ofKind: WidgetSnapshotConfiguration.kind)
             }
         } catch {
-            model.errorMessage = error.localizedDescription
+            model.reportError(error.localizedDescription)
         }
     }
 

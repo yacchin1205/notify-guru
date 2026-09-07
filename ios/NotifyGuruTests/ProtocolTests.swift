@@ -4,6 +4,36 @@ import XCTest
 @testable import NotifyGuru
 
 final class ProtocolTests: XCTestCase {
+    @MainActor
+    func testFailedJoinRemainsReportedAfterAnotherOperationSucceeds() async {
+        let model = AppModel()
+        let joined = await model.join(link: "not a pairing link")
+        XCTAssertFalse(joined)
+        let failure = model.errorMessage
+        XCTAssertNotNil(failure)
+
+        let secret = String(repeating: "A", count: 43)
+        let hash = String(repeating: "a", count: 64)
+        let staged = await model.join(link: "https://notify.guru/device#v=3&r=request_identifier&a=\(secret)&h=\(hash)")
+        XCTAssertTrue(staged)
+        XCTAssertTrue(model.isDeviceAdditionApprovalPending)
+        XCTAssertEqual(model.errorMessage, failure)
+
+        model.dismissError()
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testLaterFailureDoesNotOverwriteUnacknowledgedFailure() async {
+        let model = AppModel()
+        _ = await model.join(link: "invalid link")
+        let firstFailure = model.errorMessage!
+        _ = await model.sendFeedback(sessionID: "missing", message: "Hello")
+        XCTAssertEqual(model.operationErrors.count, 2)
+        XCTAssertTrue(model.errorMessage!.contains(firstFailure))
+        XCTAssertTrue(model.errorMessage!.contains("secure storage is not ready"))
+    }
+
     func testSessionGridColumnsFollowDeviceAndOrientation() {
         XCTAssertEqual(SessionGridLayout.columnCount(idiom: .phone, size: CGSize(width: 390, height: 844)), 1)
         XCTAssertEqual(SessionGridLayout.columnCount(idiom: .phone, size: CGSize(width: 844, height: 390)), 1)
