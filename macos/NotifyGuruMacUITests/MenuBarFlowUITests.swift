@@ -7,6 +7,97 @@ final class MenuBarFlowUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testResponseAndFeedbackCommandsCompleteInTheUI() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+        let status = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        status.click()
+        attachScreenshot(named: "command-before-response", app: app)
+        app.buttons["Yes"].click()
+        wait(for: [absence(of: app.staticTexts["Continue the meeting?"])], timeout: 5)
+        XCTAssertTrue(app.staticTexts["Response sent"].exists)
+        attachScreenshot(named: "command-response-saved", app: app)
+        app.buttons["Send a Message"].click()
+        let editor = app.textFields["mac-message-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.click()
+        editor.typeText("Message through the command queue")
+        attachScreenshot(named: "command-feedback-ready", app: app)
+        app.buttons["Send"].click()
+        wait(for: [absence(of: editor)], timeout: 5)
+        XCTAssertFalse(app.staticTexts["error-message"].exists)
+        attachScreenshot(named: "command-feedback-completed", app: app)
+    }
+
+    func testFeedbackCommandFailureKeepsComposerAndShowsError() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-photo-message", "-ui-test-response-error"]
+        app.launch()
+        let status = app.menuBars.statusItems["notify.guru, no unresolved items"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        status.click()
+        let compose = app.buttons["Send a Message"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 5))
+        XCTAssertTrue(compose.isHittable)
+        compose.click()
+        let editor = app.textFields["mac-message-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.click()
+        editor.typeText("Keep this message on failure")
+        app.buttons["Send"].click()
+        XCTAssertTrue(app.staticTexts["error-message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(editor.exists)
+        XCTAssertFalse(app.buttons["Send"].isEnabled)
+        attachScreenshot(named: "command-feedback-failed", app: app)
+    }
+
+    func testRemoveDeviceThenPrepareGroupJoinThroughCommands() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Add Device"].waitForExistence(timeout: 5))
+        app.buttons["Add Device"].click()
+        wait(for: [absence(of: app.staticTexts["Add a Device?"])], timeout: 5)
+        let status = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        status.click()
+        app.buttons["Device Group"].click()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-two-devices", app: app)
+        app.buttons["Remove"].click()
+        app.sheets.buttons["Remove Device"].click()
+        wait(for: [absence(of: app.buttons["Remove"])], timeout: 5)
+        attachScreenshot(named: "command-device-removed", app: app)
+        app.buttons["Add This Mac to Another Group"].click()
+        app.sheets.buttons["Remove and Continue"].click()
+        XCTAssertTrue(app.staticTexts["On a device already in that group, scan this QR code."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Share Link"].exists)
+        attachScreenshot(named: "command-group-request-created", app: app)
+    }
+
+    func testLeaveGroupThroughCommand() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Add Device"].waitForExistence(timeout: 5))
+        app.buttons["Add Device"].click()
+        wait(for: [absence(of: app.staticTexts["Add a Device?"])], timeout: 5)
+        let status = app.menuBars.statusItems["notify.guru, 3 unresolved items"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        status.click()
+        app.buttons["Device Group"].click()
+        let leave = app.buttons["Remove This Mac from the Group"]
+        XCTAssertTrue(leave.waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-before-leave", app: app)
+        leave.click()
+        app.sheets.buttons["Remove from Group"].click()
+        wait(for: [absence(of: leave)], timeout: 5)
+        XCTAssertFalse(app.staticTexts["error-message"].exists)
+        attachScreenshot(named: "command-left-group", app: app)
+    }
+
     func testRecoverableStartupFailureShowsWarningAndCanReset() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-recoverable-startup-error"]
@@ -51,6 +142,7 @@ final class MenuBarFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["20m ago"].exists)
 
         app.buttons.matching(identifier: "Dismiss Notification").element(boundBy: 0).click()
+        wait(for: [absence(of: app.staticTexts["First accumulated notice"])], timeout: 5)
         XCTAssertFalse(app.staticTexts["First accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["2 unresolved items"].exists)
@@ -58,6 +150,7 @@ final class MenuBarFlowUITests: XCTestCase {
         attachScreenshot(named: "02-notification-dismissed", app: app)
 
         app.buttons["Dismiss Request"].click()
+        wait(for: [absence(of: app.staticTexts["Continue the meeting?"])], timeout: 5)
         XCTAssertFalse(app.staticTexts["Continue the meeting?"].exists)
         XCTAssertTrue(app.staticTexts["Second accumulated notice"].exists)
         XCTAssertTrue(app.staticTexts["1 unresolved item"].exists)
@@ -65,6 +158,7 @@ final class MenuBarFlowUITests: XCTestCase {
         attachScreenshot(named: "03-request-dismissed", app: app)
 
         app.buttons["Dismiss Notification"].click()
+        wait(for: [absence(of: app.staticTexts["Second accumulated notice"])], timeout: 5)
         XCTAssertFalse(app.staticTexts["Second accumulated notice"].exists)
         XCTAssertFalse(app.staticTexts["1 unresolved item"].exists)
         XCTAssertTrue(app.menuBars.statusItems["notify.guru, no unresolved items"].waitForExistence(timeout: 5))

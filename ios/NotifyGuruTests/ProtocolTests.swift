@@ -681,7 +681,7 @@ final class ProtocolTests: XCTestCase {
             session(id: "current-v4", groupID: "current-group", protocolVersion: 4),
             session(id: "other", groupID: "other-group")
         ])
-        let detached = AppModel.detachingFromDeviceGroup(vault, groupID: "current-group")
+        let detached = AppCommandExecutor.detachingFromDeviceGroup(vault, groupID: "current-group")
         XCTAssertNil(detached.identity.group)
         XCTAssertEqual(detached.sessions.map(\.sessionID), ["other"])
     }

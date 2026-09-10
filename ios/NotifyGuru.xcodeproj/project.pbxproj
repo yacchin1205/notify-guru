@@ -9,6 +9,10 @@
 /* Begin PBXBuildFile section */
 		D00000000000000000000001 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* APIClient.swift */; };
 		D00000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* AppModel.swift */; };
+		D00000000000000000000042 /* AppCommandQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000042 /* AppCommandQueue.swift */; };
+		D00000000000000000000043 /* AppCommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000043 /* AppCommandExecutor.swift */; };
+		D00000000000000000000046 /* CommandUITestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000046 /* CommandUITestSupport.swift */; };
+		D00000000000000000000041 /* AppCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000041 /* AppCommand.swift */; };
 		D00000000000000000000003 /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Base64URL.swift */; };
 		D00000000000000000000004 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000004 /* ContentView.swift */; };
 		D00000000000000000000005 /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* CryptoEngine.swift */; };
@@ -22,6 +26,10 @@
 		D0000000000000000000000D /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000D /* QRScannerView.swift */; };
 		D0000000000000000000000E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000E /* Assets.xcassets */; };
 		D0000000000000000000000F /* ProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000010 /* ProtocolTests.swift */; };
+		D00000000000000000000044 /* AppCommandQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000044 /* AppCommandQueueTests.swift */; };
+		D00000000000000000000045 /* AppCommandExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000045 /* AppCommandExecutorTests.swift */; };
+		D00000000000000000000047 /* AppCommandTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000047 /* AppCommandTestSupport.swift */; };
+		D00000000000000000000048 /* DismissCommandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000048 /* DismissCommandTests.swift */; };
 		D00000000000000000000010 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* AppDelegate.swift */; };
 		D00000000000000000000011 /* PushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* PushCoordinator.swift */; };
 		D00000000000000000000012 /* DeviceGroupFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000014 /* DeviceGroupFlowUITests.swift */; };
@@ -30,6 +38,10 @@
 		D00000000000000000000015 /* WidgetSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000017 /* WidgetSnapshotStore.swift */; };
 		AB1000000000000000000001 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* APIClient.swift */; };
 		AB1000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* AppModel.swift */; };
+		AB1000000000000000000042 /* AppCommandQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000042 /* AppCommandQueue.swift */; };
+		AB1000000000000000000043 /* AppCommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000043 /* AppCommandExecutor.swift */; };
+		AB1000000000000000000046 /* CommandUITestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000046 /* CommandUITestSupport.swift */; };
+		AB1000000000000000000041 /* AppCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000041 /* AppCommand.swift */; };
 		AB1000000000000000000003 /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Base64URL.swift */; };
 		AB1000000000000000000004 /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* CryptoEngine.swift */; };
 		AB1000000000000000000005 /* EventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* EventDecoder.swift */; };
@@ -153,6 +165,10 @@
 /* Begin PBXFileReference section */
 		C00000000000000000000001 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		C00000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		C00000000000000000000042 /* AppCommandQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommandQueue.swift; sourceTree = "<group>"; };
+		C00000000000000000000043 /* AppCommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommandExecutor.swift; sourceTree = "<group>"; };
+		C00000000000000000000046 /* CommandUITestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandUITestSupport.swift; sourceTree = "<group>"; };
+		C00000000000000000000041 /* AppCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommand.swift; sourceTree = "<group>"; };
 		C00000000000000000000003 /* Base64URL.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base64URL.swift; sourceTree = "<group>"; };
 		C00000000000000000000004 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C00000000000000000000005 /* CryptoEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoEngine.swift; sourceTree = "<group>"; };
@@ -167,6 +183,10 @@
 		C0000000000000000000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C0000000000000000000000F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C00000000000000000000010 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000044 /* AppCommandQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommandQueueTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000045 /* AppCommandExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommandExecutorTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000047 /* AppCommandTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCommandTestSupport.swift; sourceTree = "<group>"; };
+		C00000000000000000000048 /* DismissCommandTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DismissCommandTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		C00000000000000000000012 /* PushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCoordinator.swift; sourceTree = "<group>"; };
 		C00000000000000000000013 /* NotifyGuru.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotifyGuru.entitlements; sourceTree = "<group>"; };
@@ -280,6 +300,10 @@
 				C00000000000000000000001 /* APIClient.swift */,
 				C00000000000000000000011 /* AppDelegate.swift */,
 				C00000000000000000000002 /* AppModel.swift */,
+				C00000000000000000000042 /* AppCommandQueue.swift */,
+				C00000000000000000000043 /* AppCommandExecutor.swift */,
+				C00000000000000000000046 /* CommandUITestSupport.swift */,
+				C00000000000000000000041 /* AppCommand.swift */,
 				C00000000000000000000003 /* Base64URL.swift */,
 				C00000000000000000000004 /* ContentView.swift */,
 				C00000000000000000000005 /* CryptoEngine.swift */,
@@ -307,6 +331,10 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000010 /* ProtocolTests.swift */,
+				C00000000000000000000044 /* AppCommandQueueTests.swift */,
+				C00000000000000000000045 /* AppCommandExecutorTests.swift */,
+				C00000000000000000000047 /* AppCommandTestSupport.swift */,
+				C00000000000000000000048 /* DismissCommandTests.swift */,
 			);
 			path = NotifyGuruTests;
 			sourceTree = "<group>";
@@ -662,6 +690,10 @@
 				D00000000000000000000001 /* APIClient.swift in Sources */,
 				D00000000000000000000010 /* AppDelegate.swift in Sources */,
 				D00000000000000000000002 /* AppModel.swift in Sources */,
+				D00000000000000000000042 /* AppCommandQueue.swift in Sources */,
+				D00000000000000000000043 /* AppCommandExecutor.swift in Sources */,
+				D00000000000000000000046 /* CommandUITestSupport.swift in Sources */,
+				D00000000000000000000041 /* AppCommand.swift in Sources */,
 				D00000000000000000000003 /* Base64URL.swift in Sources */,
 				D00000000000000000000004 /* ContentView.swift in Sources */,
 				D00000000000000000000005 /* CryptoEngine.swift in Sources */,
@@ -686,6 +718,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				D0000000000000000000000F /* ProtocolTests.swift in Sources */,
+				D00000000000000000000044 /* AppCommandQueueTests.swift in Sources */,
+				D00000000000000000000045 /* AppCommandExecutorTests.swift in Sources */,
+				D00000000000000000000047 /* AppCommandTestSupport.swift in Sources */,
+				D00000000000000000000048 /* DismissCommandTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -703,6 +739,10 @@
 			files = (
 				AB1000000000000000000001 /* APIClient.swift in Sources */,
 				AB1000000000000000000002 /* AppModel.swift in Sources */,
+				AB1000000000000000000042 /* AppCommandQueue.swift in Sources */,
+				AB1000000000000000000043 /* AppCommandExecutor.swift in Sources */,
+				AB1000000000000000000046 /* CommandUITestSupport.swift in Sources */,
+				AB1000000000000000000041 /* AppCommand.swift in Sources */,
 				AB1000000000000000000003 /* Base64URL.swift in Sources */,
 				AB1000000000000000000004 /* CryptoEngine.swift in Sources */,
 				AB1000000000000000000005 /* EventDecoder.swift in Sources */,

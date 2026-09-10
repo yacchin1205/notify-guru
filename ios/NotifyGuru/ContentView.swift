@@ -513,8 +513,10 @@ private struct SessionCard: View {
                     }
                     Spacer(minLength: 8)
                     Button("Dismiss notification", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let notificationID = notification.id
                         Task {
-                            await model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                            await model.dismissNotification(sessionID: sessionID, notificationID: notificationID)
                         }
                     }
                     .labelStyle(.iconOnly)
@@ -534,9 +536,11 @@ private struct SessionCard: View {
                     }
                     Spacer(minLength: 8)
                     Button("Dismiss request", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let requestID = request.id
                         responding = true
                         Task {
-                            await model.dismissRequest(sessionID: session.sessionID)
+                            await model.dismissRequest(sessionID: sessionID, requestID: requestID)
                             responding = false
                         }
                     }
@@ -547,9 +551,12 @@ private struct SessionCard: View {
                 }
                 ForEach(request.options) { option in
                     Button(option.label) {
+                        let sessionID = session.sessionID
+                        let requestID = request.id
+                        let optionID = option.id
                         responding = true
                         Task {
-                            await model.respond(sessionID: session.sessionID, optionID: option.id)
+                            await model.respond(sessionID: sessionID, requestID: requestID, optionID: optionID)
                             responding = false
                         }
                     }
@@ -586,9 +593,11 @@ private struct SessionCard: View {
 
     private func toggleAttention() {
         guard !togglingAttention else { return }
+        let sessionID = session.sessionID
+        let attention = !session.attention
         togglingAttention = true
         Task {
-            if await model.setAttention(sessionID: session.sessionID, attention: !session.attention) {
+            if await model.setAttention(sessionID: sessionID, attention: attention) {
                 attentionChanges += 1
             }
             togglingAttention = false
@@ -687,6 +696,9 @@ private struct FeedbackView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Send") {
+                        let sessionID = sessionID
+                        let message = message
+                        let photos = photos
                         sending = true
                         Task {
                             let result = await model.sendFeedback(sessionID: sessionID, message: message, photos: photos)

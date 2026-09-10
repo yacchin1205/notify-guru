@@ -261,7 +261,7 @@ struct SessionNotification: Codable, Equatable, Identifiable {
     var serverItemID: String? = nil
 }
 
-struct PreparedPhoto: Equatable {
+struct PreparedPhoto: Codable, Equatable {
     let jpeg: Data
     let width: Int
     let height: Int

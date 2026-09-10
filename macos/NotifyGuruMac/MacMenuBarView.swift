@@ -222,8 +222,10 @@ private struct MacSessionCard: View {
                     }
                     Spacer(minLength: 4)
                     Button("Dismiss Notification", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let notificationID = notification.id
                         Task {
-                            await model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                            await model.dismissNotification(sessionID: sessionID, notificationID: notificationID)
                         }
                     }
                     .labelStyle(.iconOnly)
@@ -244,9 +246,11 @@ private struct MacSessionCard: View {
                     }
                     Spacer(minLength: 4)
                     Button("Dismiss Request", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let requestID = request.id
                         responding = true
                         Task {
-                            await model.dismissRequest(sessionID: session.sessionID)
+                            await model.dismissRequest(sessionID: sessionID, requestID: requestID)
                             responding = false
                         }
                     }
@@ -257,9 +261,12 @@ private struct MacSessionCard: View {
                 HStack {
                     ForEach(request.options) { option in
                         Button(option.label) {
+                            let sessionID = session.sessionID
+                            let requestID = request.id
+                            let optionID = option.id
                             responding = true
                             Task {
-                                await model.respond(sessionID: session.sessionID, optionID: option.id)
+                                await model.respond(sessionID: sessionID, requestID: requestID, optionID: optionID)
                                 responding = false
                             }
                         }
@@ -362,18 +369,23 @@ private struct MacSessionCard: View {
 
     private func toggleAttention() {
         guard !togglingAttention else { return }
+        let sessionID = session.sessionID
+        let attention = !session.attention
         togglingAttention = true
         Task {
-            _ = await model.setAttention(sessionID: session.sessionID, attention: !session.attention)
+            _ = await model.setAttention(sessionID: sessionID, attention: attention)
             togglingAttention = false
         }
     }
 
     private func sendMessage() {
         guard canSendMessage else { return }
+        let sessionID = session.sessionID
+        let message = message
+        let photos = photos
         sendingMessage = true
         Task {
-            let result = await model.sendFeedback(sessionID: session.sessionID, message: message, photos: photos)
+            let result = await model.sendFeedback(sessionID: sessionID, message: message, photos: photos)
             resultUnknown = result == .unknown
             if result == .sent {
                 resetComposer()
