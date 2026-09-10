@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct MacMenuBarView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,7 +81,10 @@ struct MacMenuBarView: View {
         HStack {
             Button("Add Session") { openWindow(id: "join-session") }
                 .disabled(!model.isReady)
-            Button("Device Group") { openWindow(id: "device-group") }
+            Button("Device Group") {
+                openWindow(id: "device-group")
+                dismiss()
+            }
                 .disabled(!model.isReady)
             Spacer()
             Button("Quit") { NSApplication.shared.terminate(nil) }

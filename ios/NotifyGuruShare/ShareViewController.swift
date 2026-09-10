@@ -64,6 +64,7 @@ private struct ShareView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Button("Cancel") { context.cancelRequest(withError: CocoaError(.userCancelled)) }
+                    .accessibilityIdentifier("share-cancel")
                 Spacer()
                 Text("notify.guru").font(.headline)
                 Spacer()

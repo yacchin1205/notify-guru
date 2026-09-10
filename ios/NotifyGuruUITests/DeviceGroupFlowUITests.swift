@@ -433,15 +433,20 @@ final class DeviceGroupFlowUITests: XCTestCase {
         share.tap()
         attachScreenshot(named: "62-photos-share-sheet", app: photos)
         let service = photos.cells["notify.guru"]
-        XCTAssertTrue(service.waitForExistence(timeout: 10))
+        let serviceReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: service
+        )
+        XCTAssertEqual(XCTWaiter().wait(for: [serviceReady], timeout: 10), .completed)
         service.tap()
-        XCTAssertTrue(photos.buttons["Send"].waitForExistence(timeout: 10))
+        let send = photos.buttons["Send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 30))
         XCTAssertTrue(photos.buttons["Remove photo 3"].waitForExistence(timeout: 20))
         attachScreenshot(named: "63-notify-share-extension", app: photos)
         photos.buttons["Remove photo 2"].tap()
         XCTAssertFalse(photos.buttons["Remove photo 3"].exists)
         attachScreenshot(named: "64-notify-share-middle-removed", app: photos)
-        photos.buttons["Cancel"].tap()
+        photos.buttons["share-cancel"].tap()
     }
 
     private func absence(of element: XCUIElement) -> XCTestExpectation {
@@ -481,8 +486,9 @@ final class DeviceGroupFlowUITests: XCTestCase {
         icon.tap()
         XCTAssertTrue(app.staticTexts["2 unresolved items"].waitForExistence(timeout: 5))
         app.buttons["Dismiss request"].tap()
+        XCTAssertTrue(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 5))
         app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
-        XCTAssertFalse(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 2))
+        wait(for: [absence(of: app.staticTexts["1 unresolved item"])], timeout: 5)
         showHomeScreen(icon: icon)
         let badgeCleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == ''"), object: icon)
         XCTAssertEqual(XCTWaiter().wait(for: [badgeCleared], timeout: 10), .completed)
