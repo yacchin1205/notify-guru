@@ -474,54 +474,21 @@ final class AppModel: ObservableObject {
         } catch { show(error); return false }
     }
 
-    func sendFeedback(sessionID: String, message: String, photo: PreparedPhoto? = nil) async -> Bool {
-        guard beginStateAction("Send message") else { return false }
+    func sendFeedback(sessionID: String, message: String, photos: [PreparedPhoto] = []) async -> FeedbackSendResult {
+        guard beginStateAction("Send message") else { return .failed }
         defer { finishStateAction() }
         do {
-            let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard text.utf8.count <= 20_000, !text.isEmpty || photo != nil else {
-                throw ProtocolError.invalidResponse("a message or photo is required, and the message must not exceed 20000 bytes")
-            }
-            var current = try requiredVault()
-            guard let index = current.sessions.firstIndex(where: { $0.sessionID == sessionID }),
+            let current = try requiredVault()
+            guard let session = current.sessions.first(where: { $0.sessionID == sessionID }),
                   let group = current.identity.group,
                   let key = try currentGroupKey(state: requiredGroupState(), group: group) else {
                 throw ProtocolError.invalidResponse("session feedback key is unavailable")
             }
-            try populateSessionKeys(&current.sessions[index], group: group)
-            guard current.sessions[index].protocolVersion == 4 || photo == nil else {
-                throw ProtocolError.invalidResponse("this session does not support photo attachments")
-            }
-            let responseID = try CryptoEngine.randomID()
-            var attachment: EncryptedAttachment?
-            if let photo {
-                let attachmentID = try CryptoEngine.randomID()
-                attachment = try CryptoEngine.encryptAttachment(
-                    groupKey: key, creatorPublicKey: current.sessions[index].creatorPublicKey,
-                    sessionID: current.sessions[index].sessionID, groupID: current.sessions[index].groupID,
-                    responseID: responseID, attachmentID: attachmentID,
-                    jpeg: photo.jpeg, width: photo.width, height: photo.height
-                )
-                let reservation = try await api.reserveAttachment(
-                    session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
-                    responseID: responseID, attachment: attachment!
-                )
-                try await api.uploadAttachment(session: current.sessions[index], attachment: attachment!, reservation: reservation)
-            }
-            let payload = try CryptoEngine.encryptFeedback(
-                session: current.sessions[index], timestamp: key.timestamp, responseID: responseID,
-                message: text.isEmpty ? nil : text, attachment: attachment?.manifest,
-                createdAt: RFC3339.string(from: Date())
-            )
-            current.sessions[index].expiresAt = try await api.postResponse(
-                session: current.sessions[index], identity: current.identity, timestamp: key.timestamp,
-                responseID: responseID, itemID: nil, attachmentID: attachment?.manifest.id, payload: payload
-            )
-            try persist(current)
-            return true
+            try await api.sendFeedback(session: session, identity: current.identity, key: key, message: message, photos: photos)
+            return .sent
         } catch {
             show(error)
-            return false
+            return error is FeedbackResultUnknown ? .unknown : .failed
         }
     }
 

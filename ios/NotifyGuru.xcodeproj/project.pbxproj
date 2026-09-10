@@ -53,6 +53,30 @@
 		BB1000000000000000000002 /* WidgetSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000017 /* WidgetSnapshotStore.swift */; };
 		BB1000000000000000000003 /* NotifyGuruMacWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1000000000000000000001 /* NotifyGuruMacWidget.swift */; };
 		BB1000000000000000000004 /* NotifyGuruMacWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BC1000000000000000000004 /* NotifyGuruMacWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		2350AE03AFB0EB0E47E37849 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* Models.swift */; };
+		29C874373E444B011819572F /* PhotoPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */; };
+		2C6E9B3F00BDDCE3C84C0E94 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B05C857DB6BA3551D0B259C0 /* ShareViewController.swift */; };
+		343627F693140DEBDA576CEE /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Base64URL.swift */; };
+		396EFBC556C86EC126F34339 /* PairingLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000B /* PairingLink.swift */; };
+		47121CD2F6016E9C4D6FAEE7 /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* CryptoEngine.swift */; };
+		484559DA15BA2211472F630D /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* APIClient.swift */; };
+		4D32F0B8BD87629CFDF3C9B3 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* APIClient.swift */; };
+		55F7F806E301833E3EEBE464 /* NotifyGuruShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 697CCFB8875EC22B96F1EAFB /* NotifyGuruShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		601ABA5EA5AD78A4B8FBF93A /* PhotoPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */; };
+		608BF9FBCD61D42A206C4FC2 /* PhotoPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */; };
+		6A8F029D5AEF5AE6794D7B7F /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* CryptoEngine.swift */; };
+		6EA745B61FBA0ECFBC3FDCD8 /* ProtocolError.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000C /* ProtocolError.swift */; };
+		72ACC83D7E5D4A086A531408 /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Base64URL.swift */; };
+		73122482A1F54F4F9811D0B4 /* EventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* EventDecoder.swift */; };
+		76CA211588DB2CCF3AA69018 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B05C857DB6BA3551D0B259C0 /* ShareViewController.swift */; };
+		84CE3AD57695F3B879C5D3BF /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* Models.swift */; };
+		937435CB206C7F8A86D02F8A /* KeychainVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* KeychainVault.swift */; };
+		97344363FA53876F239E76BA /* PhotoPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */; };
+		99F2705C84563A16986D111C /* EventDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* EventDecoder.swift */; };
+		9D144E15E4CAC0682015D68E /* KeychainVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* KeychainVault.swift */; };
+		BA19B1D13CA0E0EDD5172460 /* ProtocolError.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000C /* ProtocolError.swift */; };
+		BDAB42A2A335B11EF550C357 /* PairingLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000B /* PairingLink.swift */; };
+		D57567E3807CB3F9B2C847A4 /* NotifyGuruMacShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 7DE13CC8AF2819ACBFF56ED7 /* NotifyGuruMacShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -84,6 +108,20 @@
 			remoteGlobalIDString = BF1000000000000000000001;
 			remoteInfo = NotifyGuruMacWidget;
 		};
+		9277F68E29B3EB1488A86796 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8075D34CCFEF368A88CEA5E1;
+			remoteInfo = NotifyGuruShare;
+		};
+		DEBB93CB474484718E5B3DAA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3EDFC914AF7F756B831832F7;
+			remoteInfo = NotifyGuruMacShare;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -94,6 +132,18 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BB1000000000000000000004 /* NotifyGuruMacWidget.appex in Embed App Extensions */,
+				D57567E3807CB3F9B2C847A4 /* NotifyGuruMacShare.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		26BAD9A00587D624FFEB671B /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				55F7F806E301833E3EEBE464 /* NotifyGuruShare.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -144,6 +194,10 @@
 		BC1000000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BC1000000000000000000003 /* NotifyGuruMacWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotifyGuruMacWidget.entitlements; sourceTree = "<group>"; };
 		BC1000000000000000000004 /* NotifyGuruMacWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotifyGuruMacWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhotoPreparer.swift; sourceTree = "<group>"; };
+		697CCFB8875EC22B96F1EAFB /* NotifyGuruShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotifyGuruShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		7DE13CC8AF2819ACBFF56ED7 /* NotifyGuruMacShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotifyGuruMacShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B05C857DB6BA3551D0B259C0 /* ShareViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -189,6 +243,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		068E8863FBE862255143057F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		51BE730727F1025E0A612FA2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -202,6 +270,7 @@
 				AD1000000000000000000002 /* NotifyGuruMacUITests */,
 				BD1000000000000000000001 /* NotifyGuruMacWidget */,
 				B00000000000000000000004 /* Products */,
+				F541CD76824EE8C66664ACD4 /* NotifyGuruShare */,
 			);
 			sourceTree = "<group>";
 		};
@@ -229,6 +298,7 @@
 				C0000000000000000000000E /* Assets.xcassets */,
 				C0000000000000000000000F /* Info.plist */,
 				C00000000000000000000013 /* NotifyGuru.entitlements */,
+				2861FF8F1A1343273301A1C7 /* PhotoPreparer.swift */,
 			);
 			path = NotifyGuru;
 			sourceTree = "<group>";
@@ -250,6 +320,8 @@
 				AC100000000000000000000A /* NotifyGuruMac.app */,
 				AC100000000000000000000B /* NotifyGuruMacUITests.xctest */,
 				BC1000000000000000000004 /* NotifyGuruMacWidget.appex */,
+				697CCFB8875EC22B96F1EAFB /* NotifyGuruShare.appex */,
+				7DE13CC8AF2819ACBFF56ED7 /* NotifyGuruMacShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -297,6 +369,15 @@
 			path = ../macos/NotifyGuruMacWidget;
 			sourceTree = "<group>";
 		};
+		F541CD76824EE8C66664ACD4 /* NotifyGuruShare */ = {
+			isa = PBXGroup;
+			children = (
+				B05C857DB6BA3551D0B259C0 /* ShareViewController.swift */,
+			);
+			name = NotifyGuruShare;
+			path = NotifyGuruShare;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -307,10 +388,12 @@
 				H00000000000000000000001 /* Sources */,
 				H00000000000000000000002 /* Frameworks */,
 				H00000000000000000000003 /* Resources */,
+				26BAD9A00587D624FFEB671B /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				720B8F01C4738928E006384E /* PBXTargetDependency */,
 			);
 			name = NotifyGuru;
 			productName = NotifyGuru;
@@ -366,6 +449,7 @@
 			);
 			dependencies = (
 				B61000000000000000000002 /* PBXTargetDependency */,
+				9E3AB3D59F30552B7FEEC0CA /* PBXTargetDependency */,
 			);
 			name = NotifyGuruMac;
 			productName = NotifyGuruMac;
@@ -407,6 +491,40 @@
 			productReference = BC1000000000000000000004 /* NotifyGuruMacWidget.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		3EDFC914AF7F756B831832F7 /* NotifyGuruMacShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 91BCD3A026DAFFCE60F4E670 /* Build configuration list for PBXNativeTarget "NotifyGuruMacShare" */;
+			buildPhases = (
+				EC55C4531E4D73262A218CAA /* Sources */,
+				068E8863FBE862255143057F /* Frameworks */,
+				70422423EAF78702F17F3216 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotifyGuruMacShare;
+			productName = NotifyGuruMacShare;
+			productReference = 7DE13CC8AF2819ACBFF56ED7 /* NotifyGuruMacShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		8075D34CCFEF368A88CEA5E1 /* NotifyGuruShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D2C42DA34BE0C1CEDA54FCB8 /* Build configuration list for PBXNativeTarget "NotifyGuruShare" */;
+			buildPhases = (
+				13F7E1CF0572C659DDF1D97B /* Sources */,
+				51BE730727F1025E0A612FA2 /* Frameworks */,
+				27885796B96DE479997056DE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotifyGuruShare;
+			productName = NotifyGuruShare;
+			productReference = 697CCFB8875EC22B96F1EAFB /* NotifyGuruShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -417,6 +535,21 @@
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
+					AF1000000000000000000001 = {
+						CreatedOnToolsVersion = 26.4;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
+					};
+					AF1000000000000000000002 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = AF1000000000000000000001;
+					};
+					BF1000000000000000000001 = {
+						CreatedOnToolsVersion = 26.4;
+					};
 					E00000000000000000000001 = {
 						CreatedOnToolsVersion = 26.4;
 						SystemCapabilities = {
@@ -432,21 +565,6 @@
 					E00000000000000000000003 = {
 						CreatedOnToolsVersion = 26.4;
 						TestTargetID = E00000000000000000000001;
-					};
-					AF1000000000000000000001 = {
-						CreatedOnToolsVersion = 26.4;
-						SystemCapabilities = {
-							com.apple.Push = {
-								enabled = 1;
-							};
-						};
-					};
-					AF1000000000000000000002 = {
-						CreatedOnToolsVersion = 26.4;
-						TestTargetID = AF1000000000000000000001;
-					};
-					BF1000000000000000000001 = {
-						CreatedOnToolsVersion = 26.4;
 					};
 				};
 			};
@@ -469,6 +587,8 @@
 				AF1000000000000000000001 /* NotifyGuruMac */,
 				AF1000000000000000000002 /* NotifyGuruMacUITests */,
 				BF1000000000000000000001 /* NotifyGuruMacWidget */,
+				8075D34CCFEF368A88CEA5E1 /* NotifyGuruShare */,
+				3EDFC914AF7F756B831832F7 /* NotifyGuruMacShare */,
 			);
 		};
 /* End PBXProject section */
@@ -518,6 +638,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		27885796B96DE479997056DE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		70422423EAF78702F17F3216 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -543,6 +677,7 @@
 				D00000000000000000000014 /* WidgetSnapshotBuilder.swift in Sources */,
 				D00000000000000000000015 /* WidgetSnapshotStore.swift in Sources */,
 				D0000000000000000000000D /* QRScannerView.swift in Sources */,
+				608BF9FBCD61D42A206C4FC2 /* PhotoPreparer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -585,6 +720,7 @@
 				AB1000000000000000000013 /* WidgetSnapshotBuilder.swift in Sources */,
 				AB1000000000000000000014 /* WidgetSnapshotStore.swift in Sources */,
 				AB1000000000000000000015 /* WidgetSnapshotCoordinator.swift in Sources */,
+				29C874373E444B011819572F /* PhotoPreparer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -603,6 +739,40 @@
 				BB1000000000000000000001 /* WidgetSnapshot.swift in Sources */,
 				BB1000000000000000000002 /* WidgetSnapshotStore.swift in Sources */,
 				BB1000000000000000000003 /* NotifyGuruMacWidget.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		13F7E1CF0572C659DDF1D97B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				76CA211588DB2CCF3AA69018 /* ShareViewController.swift in Sources */,
+				484559DA15BA2211472F630D /* APIClient.swift in Sources */,
+				72ACC83D7E5D4A086A531408 /* Base64URL.swift in Sources */,
+				47121CD2F6016E9C4D6FAEE7 /* CryptoEngine.swift in Sources */,
+				99F2705C84563A16986D111C /* EventDecoder.swift in Sources */,
+				937435CB206C7F8A86D02F8A /* KeychainVault.swift in Sources */,
+				2350AE03AFB0EB0E47E37849 /* Models.swift in Sources */,
+				396EFBC556C86EC126F34339 /* PairingLink.swift in Sources */,
+				6EA745B61FBA0ECFBC3FDCD8 /* ProtocolError.swift in Sources */,
+				97344363FA53876F239E76BA /* PhotoPreparer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EC55C4531E4D73262A218CAA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2C6E9B3F00BDDCE3C84C0E94 /* ShareViewController.swift in Sources */,
+				4D32F0B8BD87629CFDF3C9B3 /* APIClient.swift in Sources */,
+				343627F693140DEBDA576CEE /* Base64URL.swift in Sources */,
+				6A8F029D5AEF5AE6794D7B7F /* CryptoEngine.swift in Sources */,
+				73122482A1F54F4F9811D0B4 /* EventDecoder.swift in Sources */,
+				9D144E15E4CAC0682015D68E /* KeychainVault.swift in Sources */,
+				84CE3AD57695F3B879C5D3BF /* Models.swift in Sources */,
+				BDAB42A2A335B11EF550C357 /* PairingLink.swift in Sources */,
+				BA19B1D13CA0E0EDD5172460 /* ProtocolError.swift in Sources */,
+				601ABA5EA5AD78A4B8FBF93A /* PhotoPreparer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -628,6 +798,18 @@
 			isa = PBXTargetDependency;
 			target = BF1000000000000000000001 /* NotifyGuruMacWidget */;
 			targetProxy = B61000000000000000000001 /* PBXContainerItemProxy */;
+		};
+		720B8F01C4738928E006384E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = NotifyGuruShare;
+			target = 8075D34CCFEF368A88CEA5E1 /* NotifyGuruShare */;
+			targetProxy = 9277F68E29B3EB1488A86796 /* PBXContainerItemProxy */;
+		};
+		9E3AB3D59F30552B7FEEC0CA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = NotifyGuruMacShare;
+			target = 3EDFC914AF7F756B831832F7 /* NotifyGuruMacShare */;
+			targetProxy = DEBB93CB474484718E5B3DAA /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -773,7 +955,6 @@
 				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(MAC_APP_ENTITLEMENTS)";
-				MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMac/NotifyGuruMac.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2026090401;
 				DEVELOPMENT_TEAM = TDW896YLJ7;
@@ -782,6 +963,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../macos/NotifyGuruMac/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMac/NotifyGuruMac.entitlements;
 				MARKETING_VERSION = 2026.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
 				PRODUCT_NAME = NotifyGuruMac;
@@ -799,7 +981,6 @@
 				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(MAC_APP_ENTITLEMENTS)";
-				MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMac/NotifyGuruMac.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2026090401;
 				DEVELOPMENT_TEAM = TDW896YLJ7;
@@ -808,6 +989,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../macos/NotifyGuruMac/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMac/NotifyGuruMac.entitlements;
 				MARKETING_VERSION = 2026.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app;
 				PRODUCT_NAME = NotifyGuruMac;
@@ -849,16 +1031,16 @@
 		B81000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_GROUP_IDENTIFIER = TDW896YLJ7.guru.notify.app.shared;
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				APP_GROUP_IDENTIFIER = TDW896YLJ7.guru.notify.app.shared;
 				CODE_SIGN_ENTITLEMENTS = "$(MAC_WIDGET_ENTITLEMENTS)";
-				MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacWidget/NotifyGuruMacWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2026090401;
 				DEVELOPMENT_TEAM = TDW896YLJ7;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../macos/NotifyGuruMacWidget/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacWidget/NotifyGuruMacWidget.entitlements;
 				MARKETING_VERSION = 2026.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -873,16 +1055,16 @@
 		B81000000000000000000002 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_GROUP_IDENTIFIER = TDW896YLJ7.guru.notify.app.shared;
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				APP_GROUP_IDENTIFIER = TDW896YLJ7.guru.notify.app.shared;
 				CODE_SIGN_ENTITLEMENTS = "$(MAC_WIDGET_ENTITLEMENTS)";
-				MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacWidget/NotifyGuruMacWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2026090401;
 				DEVELOPMENT_TEAM = TDW896YLJ7;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../macos/NotifyGuruMacWidget/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacWidget/NotifyGuruMacWidget.entitlements;
 				MARKETING_VERSION = 2026.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -893,6 +1075,93 @@
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
+		};
+		1443AA4EE31EAC83865643C6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotifyGuruShare/Share.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2026090401;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuruShare/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 2026.9.1;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		41D2EFAE0C599C0E6D85675C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = "$(MAC_SHARE_ENTITLEMENTS)";
+				MAC_SHARE_ENTITLEMENTS = NotifyGuruShare/Share.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2026090401;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuruShare/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 2026.9.1;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		62989D6F7E9E876F7454CD6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = "$(MAC_SHARE_ENTITLEMENTS)";
+				MAC_SHARE_ENTITLEMENTS = NotifyGuruShare/Share.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2026090401;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuruShare/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 2026.9.1;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		B7747E4CE5118F4C815A94D3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotifyGuruShare/Share.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2026090401;
+				DEVELOPMENT_TEAM = TDW896YLJ7;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotifyGuruShare/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 2026.9.1;
+				PRODUCT_BUNDLE_IDENTIFIER = guru.notify.app.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
 		};
 /* End XCBuildConfiguration section */
 
@@ -956,6 +1225,24 @@
 			buildConfigurations = (
 				B81000000000000000000001 /* Debug */,
 				B81000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		91BCD3A026DAFFCE60F4E670 /* Build configuration list for PBXNativeTarget "NotifyGuruMacShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				41D2EFAE0C599C0E6D85675C /* Release */,
+				62989D6F7E9E876F7454CD6D /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D2C42DA34BE0C1CEDA54FCB8 /* Build configuration list for PBXNativeTarget "NotifyGuruShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1443AA4EE31EAC83865643C6 /* Release */,
+				B7747E4CE5118F4C815A94D3 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

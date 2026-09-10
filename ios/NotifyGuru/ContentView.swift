@@ -627,45 +627,46 @@ private struct FeedbackView: View {
     @State private var message = ""
     @State private var sending = false
     @State private var showingCamera = false
-    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var preparingPhoto = false
-    @State private var photo: PreparedPhoto?
+    @State private var photos: [PreparedPhoto] = []
+    @State private var previewPhoto: PreparedPhoto?
     @State private var photoError: String?
+    @State private var resultUnknown = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
                 TextEditor(text: $message)
-                    .frame(minHeight: 180)
+                    .frame(minHeight: 120, maxHeight: 220)
                     .accessibilityLabel("Message")
                 if protocolVersion == 4 {
-                    if let photo, let image = UIImage(data: photo.jpeg) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 220)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .accessibilityLabel("Selected photo preview")
-                            .accessibilityIdentifier("selected-photo-preview")
+                    ScrollView(.horizontal) {
+                        HStack {
+                            ForEach(photos.indices, id: \.self) { index in
+                                VStack {
+                                    Text("Photo \(index + 1)").font(.caption)
+                                    if let image = UIImage(data: photos[index].jpeg) {
+                                        Image(uiImage: image).resizable().scaledToFit().frame(width: 120, height: 120)
+                                            .accessibilityLabel("Photo \(index + 1)")
+                                            .accessibilityIdentifier("selected-photo-preview")
+                                            .onTapGesture { previewPhoto = photos[index] }
+                                            .accessibilityAddTraits(.isButton)
+                                    }
+                                    Button("Remove photo \(index + 1)", role: .destructive) { photos.remove(at: index) }
+                                        .disabled(preparingPhoto || sending)
+                                }
+                            }
+                        }
                     }
+                    .frame(height: photos.isEmpty ? 0 : 180)
                     HStack {
-                        Button("Take Photo", systemImage: "camera") {
-                            selectedPhotoItem = nil
-                            showingCamera = true
+                        Button("Take Photo", systemImage: "camera") { showingCamera = true }
+                            .disabled(preparingPhoto || photos.count >= 5 || !UIImagePickerController.isSourceTypeAvailable(.camera))
+                        PhotosPicker(selection: $selectedPhotoItems, maxSelectionCount: max(1, 5 - photos.count), selectionBehavior: .ordered, matching: .images) {
+                            Label("Choose Photos", systemImage: "photo.on.rectangle")
                         }
-                        .disabled(preparingPhoto || !UIImagePickerController.isSourceTypeAvailable(.camera))
-                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                            Label("Choose Photo", systemImage: "photo.on.rectangle")
-                        }
-                        .disabled(preparingPhoto)
-                    }
-                    if photo != nil {
-                        Button("Remove Photo", systemImage: "trash", role: .destructive) {
-                            selectedPhotoItem = nil
-                            photo = nil
-                            photoError = nil
-                        }
-                        .disabled(preparingPhoto)
+                        .disabled(preparingPhoto || photos.count >= 5)
                     }
                     if preparingPhoto { ProgressView("Preparing photo") }
                     if let photoError {
@@ -688,44 +689,54 @@ private struct FeedbackView: View {
                     Button("Send") {
                         sending = true
                         Task {
-                            if await model.sendFeedback(sessionID: sessionID, message: message, photo: photo) {
-                                isPresented = false
-                            }
+                            let result = await model.sendFeedback(sessionID: sessionID, message: message, photos: photos)
+                            if result == .sent { isPresented = false }
+                            resultUnknown = result == .unknown
                             sending = false
                         }
                     }
                     .disabled(
-                        sending || preparingPhoto ||
-                        (message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photo == nil)
+                        sending || preparingPhoto || resultUnknown ||
+                        (message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photos.isEmpty)
                     )
                 }
             }
         }
-        .onChange(of: selectedPhotoItem) { _, item in
-            guard let item else { return }
+        .onChange(of: selectedPhotoItems) { _, items in
+            guard !items.isEmpty else { return }
             preparingPhoto = true
             photoError = nil
             Task {
                 do {
-                    guard let data = try await item.loadTransferable(type: Data.self),
-                          let image = UIImage(data: data),
-                          let prepared = normalizedPhoto(image) else {
-                        throw PhotoPreparationError.failed
+                    var preparedPhotos: [PreparedPhoto] = []
+                    for item in items {
+                        guard let data = try await item.loadTransferable(type: Data.self),
+                              let image = UIImage(data: data), let prepared = normalizedPhoto(image) else {
+                            throw PhotoPreparationError.failed
+                        }
+                        preparedPhotos.append(prepared)
                     }
-                    photo = prepared
-                    selectedPhotoItem = nil
-                } catch {
-                    selectedPhotoItem = nil
-                    photoError = error.localizedDescription
-                }
+                    photos.append(contentsOf: preparedPhotos)
+                } catch { photoError = error.localizedDescription }
+                selectedPhotoItems = []
                 preparingPhoto = false
             }
+        }
+        .sheet(isPresented: Binding(get: { previewPhoto != nil }, set: { if !$0 { previewPhoto = nil } })) {
+            VStack {
+                if let photo = previewPhoto, let image = UIImage(data: photo.jpeg) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+                Button("Close") { previewPhoto = nil }
+            }.padding()
         }
         .fullScreenCover(isPresented: $showingCamera) {
             CameraPicker { image in
                 if let image {
-                    photo = normalizedPhoto(image)
-                    photoError = photo == nil ? "The photo could not be prepared within the attachment limit." : nil
+                    if let prepared = normalizedPhoto(image) {
+                        photos.append(prepared)
+                        photoError = nil
+                    } else { photoError = "The photo could not be prepared within the attachment limit." }
                 }
                 showingCamera = false
             }

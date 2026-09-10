@@ -6,3 +6,5 @@ PROVISIONING_PROFILE_SPECIFIER =
 MAC_APP_ENTITLEMENTS = ../macos/NotifyGuruMacUITests/App.entitlements
 MAC_WIDGET_ENTITLEMENTS = ../macos/NotifyGuruMacUITests/Widget.entitlements
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) MAC_GUI_TESTING
+
+MAC_SHARE_ENTITLEMENTS = ../macos/NotifyGuruMacUITests/App.entitlements

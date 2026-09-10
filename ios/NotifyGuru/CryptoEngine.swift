@@ -491,9 +491,9 @@ enum CryptoEngine {
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
-    static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String?, attachment: AttachmentManifest?, createdAt: String) throws -> EncryptedPayload {
+    static func encryptFeedback(session: SessionRecord, timestamp: Int64, responseID: String, message: String?, attachments: [AttachmentManifest], createdAt: String) throws -> EncryptedPayload {
         guard let key = session.keys[String(timestamp)] else { throw ProtocolError.crypto("feedback key is unavailable") }
-        let response = FeedbackPayload(id: responseID, type: "feedback", message: message, attachment: attachment, createdAt: createdAt)
+        let response = FeedbackPayload(id: responseID, type: "feedback", message: message, attachments: attachments, createdAt: createdAt)
         return try encryptResponsePayload(response, session: session, timestamp: timestamp, responseID: responseID, key: key)
     }
 
@@ -601,7 +601,7 @@ private struct FeedbackPayload: Encodable {
     let id: String
     let type: String
     let message: String?
-    let attachment: AttachmentManifest?
+    let attachments: [AttachmentManifest]
     let createdAt: String
 }
 

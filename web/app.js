@@ -624,14 +624,16 @@ async function dismissNotification(sessionId, notificationId) {
   });
 }
 
-async function sendFeedback(sessionId, message, imageFile) {
+class FeedbackResultUnknown extends Error {}
+
+async function sendFeedback(sessionId, message, imageFiles) {
   return withStateAction(async () => {
   const session = await getSession(sessionId);
   if (session === undefined) throw new Error("Session disappeared before feedback was sent");
   const text = message.trim();
   if (new TextEncoder().encode(text).byteLength > 20_000) throw new Error("メッセージは20000バイト以内で入力してください");
-  if (session.protocolVersion === 3 && imageFile !== undefined) throw new Error("このセッションには写真を添付できません");
-  if (text.length === 0 && imageFile === undefined) throw new Error("メッセージまたは写真を指定してください");
+  if (session.protocolVersion === 3 && imageFiles.length > 0) throw new Error("このセッションには写真を添付できません");
+  if (text.length === 0 && imageFiles.length === 0) throw new Error("メッセージまたは写真を指定してください");
   const groupKey = await currentLocalKey();
   let key = session.keys[String(groupKey.timestamp)];
   if (key === undefined) {
@@ -639,8 +641,9 @@ async function sendFeedback(sessionId, message, imageFile) {
     session.keys[String(groupKey.timestamp)] = key;
   }
   const responseId = randomId();
-  let attachment;
-  if (imageFile !== undefined) {
+  if (imageFiles.length > 5) throw new Error("写真は5枚まで選択できます");
+  const attachments = [];
+  for (const imageFile of imageFiles) {
     const attachmentId = randomId();
     const jpeg = await normalizedJPEG(imageFile);
     const encryptedAttachment = await encryptAttachment(
@@ -659,26 +662,33 @@ async function sendFeedback(sessionId, message, imageFile) {
       throw new Error("写真が現在の添付サイズ上限を超えています");
     }
     await uploadAttachment(session, attachmentId, reservation.uploadToken, encryptedAttachment.ciphertext);
-    attachment = encryptedAttachment.manifest;
+    attachments.push(encryptedAttachment.manifest);
   }
   const response = {
     id: responseId,
     type: "feedback",
     ...(text.length === 0 ? {} : { message: text }),
-    ...(attachment === undefined ? {} : { attachment }),
+    attachments,
     createdAt: new Date().toISOString(),
   };
   const encrypted = await encryptResponse(
     key, session.protocolVersion, session.sessionId, session.groupId, groupKey.timestamp, responseId, response,
   );
-  session.expiresAt = await postResponse(session, identity, {
-    responseId,
-    ...(attachment === undefined ? {} : { attachmentId: attachment.id }),
-    groupId: session.groupId,
-    deviceId: identity.deviceId,
-    keyTimestamp: groupKey.timestamp,
-    ...encrypted,
-  });
+  try {
+    session.expiresAt = await postResponse(session, identity, {
+      responseId,
+      attachmentIds: attachments.map((attachment) => attachment.id),
+      groupId: session.groupId,
+      deviceId: identity.deviceId,
+      keyTimestamp: groupKey.timestamp,
+      ...encrypted,
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new FeedbackResultUnknown("送信結果を確認できませんでした。受信側を確認してから改めて共有してください。");
+    }
+    throw error;
+  }
   await putSession(session);
   messageElement.textContent = "メッセージを送信しました。";
   });
@@ -945,17 +955,44 @@ async function render() {
     const feedbackImage = card.querySelector(".feedback-image");
     const feedbackPreview = card.querySelector(".feedback-preview");
     const feedbackSubmit = feedbackForm.querySelector('button[type="submit"]');
-    let feedbackPreviewURL;
+    let feedbackFiles = [];
+    let feedbackSending = false;
+    let feedbackResultUnknown = false;
+    let feedbackPreviewURLs = [];
     const updateFeedbackSubmit = () => {
-      feedbackSubmit.disabled = feedbackMessage.value.trim().length === 0 && feedbackImage.files.length === 0;
+      feedbackSubmit.disabled = feedbackSending || feedbackResultUnknown || feedbackFiles.length > 5 || (feedbackMessage.value.trim().length === 0 && feedbackFiles.length === 0);
     };
     const updateFeedbackPreview = () => {
-      if (feedbackPreviewURL !== undefined) URL.revokeObjectURL(feedbackPreviewURL);
-      const file = feedbackImage.files[0];
-      feedbackPreviewURL = file === undefined ? undefined : URL.createObjectURL(file);
-      feedbackPreview.hidden = feedbackPreviewURL === undefined;
-      if (feedbackPreviewURL === undefined) feedbackPreview.removeAttribute("src");
-      else feedbackPreview.src = feedbackPreviewURL;
+      feedbackPreviewURLs.forEach((url) => URL.revokeObjectURL(url));
+      feedbackPreviewURLs = [];
+      feedbackPreview.replaceChildren();
+      feedbackPreview.hidden = feedbackFiles.length === 0;
+      feedbackFiles.forEach((file, index) => {
+        const url = URL.createObjectURL(file);
+        feedbackPreviewURLs.push(url);
+        const figure = document.createElement("figure");
+        const image = document.createElement("img");
+        image.src = url;
+        image.alt = `写真 ${index + 1}`;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = `写真 ${index + 1} を削除`;
+        remove.addEventListener("click", () => {
+          feedbackFiles.splice(index, 1);
+          const remaining = new DataTransfer();
+          feedbackFiles.forEach((file) => remaining.items.add(file));
+          feedbackImage.files = remaining.files;
+          updateFeedbackPreview();
+          updateFeedbackSubmit();
+        });
+        const previewLink = document.createElement("a");
+        previewLink.href = url;
+        previewLink.target = "_blank";
+        previewLink.rel = "noopener";
+        previewLink.append(image);
+        figure.append(previewLink, remove);
+        feedbackPreview.append(figure);
+      });
     };
     if (session.protocolVersion !== 4) feedbackImage.closest("label").hidden = true;
     feedbackToggle.addEventListener("click", () => {
@@ -966,11 +1003,15 @@ async function render() {
     });
     feedbackMessage.addEventListener("input", updateFeedbackSubmit);
     feedbackImage.addEventListener("change", () => {
+      feedbackFiles = Array.from(feedbackImage.files);
+      if (feedbackFiles.length > 5) showError(new Error("写真は5枚まで選択できます"));
       updateFeedbackPreview();
       updateFeedbackSubmit();
     });
     card.querySelector(".feedback-cancel").addEventListener("click", () => {
       feedbackForm.reset();
+      feedbackResultUnknown = false;
+      feedbackFiles = [];
       updateFeedbackPreview();
       updateFeedbackSubmit();
       feedbackForm.hidden = true;
@@ -978,13 +1019,18 @@ async function render() {
     });
     feedbackForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      feedbackSubmit.disabled = true;
-      sendFeedback(session.sessionId, feedbackMessage.value, feedbackImage.files[0]).then(() => {
+      feedbackSending = true;
+      updateFeedbackSubmit();
+      sendFeedback(session.sessionId, feedbackMessage.value, [...feedbackFiles]).then(() => {
         feedbackForm.reset();
+        feedbackFiles = [];
         updateFeedbackPreview();
         feedbackForm.hidden = true;
         feedbackToggle.hidden = false;
-      }).catch(showError).finally(updateFeedbackSubmit);
+      }).catch((error) => {
+        feedbackResultUnknown = error instanceof FeedbackResultUnknown;
+        showError(error);
+      }).finally(() => { feedbackSending = false; updateFeedbackSubmit(); });
     });
     cardsElement.append(card);
   }

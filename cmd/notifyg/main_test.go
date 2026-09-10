@@ -44,12 +44,12 @@ func TestWriteResponseIncludesDecryptedAttachmentPath(t *testing.T) {
 
 	var output bytes.Buffer
 	writeResponse(&output, notify.Response{
-		Type:       "feedback",
-		GroupID:    "group",
-		Attachment: &notify.ReceivedAttachment{Path: "/tmp/notifyg-attachments/example.jpg"},
-		CreatedAt:  time.Date(2026, 9, 3, 11, 38, 38, 0, time.UTC),
+		Type:        "feedback",
+		GroupID:     "group",
+		Attachments: []*notify.ReceivedAttachment{{Path: "/tmp/notifyg-attachments/example.jpg"}},
+		CreatedAt:   time.Date(2026, 9, 3, 11, 38, 38, 0, time.UTC),
 	})
-	if got, want := output.String(), "feedback message=\"\" attachment=/tmp/notifyg-attachments/example.jpg group=group at=2026-09-03T11:38:38Z\n"; got != want {
+	if got, want := output.String(), "feedback message=\"\" attachment[1]=/tmp/notifyg-attachments/example.jpg group=group at=2026-09-03T11:38:38Z\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }

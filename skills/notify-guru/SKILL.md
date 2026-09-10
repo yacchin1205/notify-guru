@@ -113,7 +113,7 @@ Response types are:
 
 - `response`: a selected `optionId` and `requestId`.
 - `dismiss`: a cleared request or notification, not an answer.
-- `feedback`: an unprompted message, optional photo, or both.
+- `feedback`: an unprompted message, up to five photos, or both.
 
 ## Read every result completely
 
@@ -122,12 +122,14 @@ Every send (`status`, `notify`, `session_color`, `request`, and
 delivered once. Inspect the complete result before making another call, act on
 everything returned, or at minimum tell the user what arrived.
 
-A photo is not necessarily nested in structured `responses`. After verification
-and decryption, it arrives as a separate `resource_link` content block with a
-local `file:` URI. That block can piggyback on any send or on `responses_wait`.
+Each verified and decrypted photo arrives as a separate `resource_link` content
+block with a local `file:` URI. These blocks can piggyback on any send or on
+`responses_wait`; attachment metadata is in `responses[].attachments[]`.
+Keep photos in the returned order within each response so references such as
+"the first photo" and "the second photo" match the sender's message.
 Preserve and surface every content block; never forward only `text`, `image`, or
 structured fields while silently dropping other content types. A result with no
-text can contain the only handed-over attachment link.
+text can contain handed-over attachment links.
 
 Text limits are measured in bytes, so Japanese and emoji use more than one byte.
 Use the limits declared by each MCP tool. Keep credentials, tokens, and key

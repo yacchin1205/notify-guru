@@ -189,10 +189,10 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 		t.Fatalf("attachment response count = %d, want 1", len(attachmentResult.Responses))
 	}
 	attachmentResponse := attachmentResult.Responses[0]
-	if attachmentResponse.ID != attachmentResponseID || attachmentResponse.Attachment == nil {
+	if attachmentResponse.ID != attachmentResponseID || len(attachmentResponse.Attachments) != 3 {
 		t.Fatalf("unexpected attachment response: %+v", attachmentResponse)
 	}
-	decryptedPath := attachmentResponse.Attachment.Path
+	decryptedPath := attachmentResponse.Attachments[0].Path
 	decrypted, err := os.ReadFile(decryptedPath)
 	if err != nil {
 		t.Fatalf("read decrypted attachment: %v", err)
@@ -200,12 +200,14 @@ func TestMCPEncryptedRoundTrip(t *testing.T) {
 	if !bytes.Equal(decrypted, jpeg) {
 		t.Fatalf("decrypted attachment = %x, want %x", decrypted, jpeg)
 	}
-	if len(rawAttachmentResult.Content) != 1 {
-		t.Fatalf("MCP attachment content count = %d, want 1", len(rawAttachmentResult.Content))
+	if len(rawAttachmentResult.Content) != 3 {
+		t.Fatalf("MCP attachment content count = %d, want 3", len(rawAttachmentResult.Content))
 	}
-	link, ok := rawAttachmentResult.Content[0].(*mcp.ResourceLink)
-	if !ok || link.URI != attachmentResponse.Attachment.URI || link.MIMEType != "image/jpeg" {
-		t.Fatalf("unexpected MCP attachment resource: %#v", rawAttachmentResult.Content[0])
+	for i, attachment := range attachmentResponse.Attachments {
+		link, ok := rawAttachmentResult.Content[i].(*mcp.ResourceLink)
+		if !ok || link.URI != attachment.URI || link.MIMEType != "image/jpeg" || link.Title != fmt.Sprintf("Photo %d attached to response %s", i+1, attachmentResponse.ID) {
+			t.Fatalf("unexpected MCP attachment resource at %d: %#v", i, rawAttachmentResult.Content[i])
+		}
 	}
 
 	closed := callTool[closeToolOutput](t, ctx, clientSession, "session_close", map[string]any{
@@ -316,79 +318,86 @@ func postEncryptedAttachment(
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachmentID, err := randomValue(18)
-	if err != nil {
-		t.Fatal(err)
-	}
 	jpeg := []byte{
 		0xff, 0xd8,
 		0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
 		0xff, 0xd9,
 	}
-	attachmentKey, err := deriveAttachmentKey(
-		group.PrivateKey, group.CreatorPublicKey, sessionID, group.GroupID, responseID, attachmentID, group.Timestamp,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aead, err := newAEAD(attachmentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatal(err)
-	}
-	ciphertext := aead.Seal(
-		nil,
-		nonce,
-		jpeg,
-		[]byte(attachmentAAD(sessionID, group.GroupID, responseID, attachmentID, group.Timestamp)),
-	)
-	digest := sha256.Sum256(ciphertext)
-	manifest := &attachmentManifest{
-		ID: attachmentID, Kind: "image", MediaType: "image/jpeg", ByteLength: int64(len(jpeg)),
-		Width: 1, Height: 1, Nonce: encode(nonce), CiphertextLength: int64(len(ciphertext)),
-		CiphertextSHA256: hex.EncodeToString(digest[:]),
-	}
-	var reservation struct {
-		AttachmentID       string `json:"attachmentId"`
-		UploadToken        string `json:"uploadToken"`
-		MaxCiphertextBytes int64  `json:"maxCiphertextBytes"`
-		UploadExpiresAt    int64  `json:"uploadExpiresAt"`
-	}
-	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/attachments", group.AccessToken, map[string]any{
-		"attachmentId": attachmentID, "responseId": responseID, "groupId": group.GroupID,
-		"deviceId": group.DeviceID, "keyTimestamp": group.Timestamp,
-		"ciphertextLength": len(ciphertext), "ciphertextSha256": manifest.CiphertextSHA256,
-	}, &reservation); err != nil {
-		t.Fatalf("reserve encrypted attachment: %v", err)
-	}
-	if reservation.MaxCiphertextBytes < int64(len(ciphertext)) {
-		t.Fatalf("attachment reservation limit = %d, need %d", reservation.MaxCiphertextBytes, len(ciphertext))
-	}
-	upload, err := http.NewRequestWithContext(
-		ctx, http.MethodPut,
-		api.baseURL.String()+"/api/sessions/"+sessionID+"/attachments/"+attachmentID,
-		bytes.NewReader(ciphertext),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	upload.Header.Set("Authorization", "Bearer "+reservation.UploadToken)
-	upload.Header.Set("Content-Type", "application/octet-stream")
-	uploadResponse, err := api.client.Do(upload)
-	if err != nil {
-		t.Fatalf("upload encrypted attachment: %v", err)
-	}
-	uploadResponse.Body.Close()
-	if uploadResponse.StatusCode != http.StatusOK {
-		t.Fatalf("upload encrypted attachment status = %d", uploadResponse.StatusCode)
+	var manifests []*attachmentManifest
+	var attachmentIDs []string
+	for range 3 {
+		attachmentID, err := randomValue(18)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		attachmentKey, err := deriveAttachmentKey(
+			group.PrivateKey, group.CreatorPublicKey, sessionID, group.GroupID, responseID, attachmentID, group.Timestamp,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aead, err := newAEAD(attachmentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonce := make([]byte, aead.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatal(err)
+		}
+		ciphertext := aead.Seal(
+			nil,
+			nonce,
+			jpeg,
+			[]byte(attachmentAAD(sessionID, group.GroupID, responseID, attachmentID, group.Timestamp)),
+		)
+		digest := sha256.Sum256(ciphertext)
+		manifest := &attachmentManifest{
+			ID: attachmentID, Kind: "image", MediaType: "image/jpeg", ByteLength: int64(len(jpeg)),
+			Width: 1, Height: 1, Nonce: encode(nonce), CiphertextLength: int64(len(ciphertext)),
+			CiphertextSHA256: hex.EncodeToString(digest[:]),
+		}
+		var reservation struct {
+			AttachmentID       string `json:"attachmentId"`
+			UploadToken        string `json:"uploadToken"`
+			MaxCiphertextBytes int64  `json:"maxCiphertextBytes"`
+			UploadExpiresAt    int64  `json:"uploadExpiresAt"`
+		}
+		if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/attachments", group.AccessToken, map[string]any{
+			"attachmentId": attachmentID, "responseId": responseID, "groupId": group.GroupID,
+			"deviceId": group.DeviceID, "keyTimestamp": group.Timestamp,
+			"ciphertextLength": len(ciphertext), "ciphertextSha256": manifest.CiphertextSHA256,
+		}, &reservation); err != nil {
+			t.Fatalf("reserve encrypted attachment: %v", err)
+		}
+		if reservation.MaxCiphertextBytes < int64(len(ciphertext)) {
+			t.Fatalf("attachment reservation limit = %d, need %d", reservation.MaxCiphertextBytes, len(ciphertext))
+		}
+		upload, err := http.NewRequestWithContext(
+			ctx, http.MethodPut,
+			api.baseURL.String()+"/api/sessions/"+sessionID+"/attachments/"+attachmentID,
+			bytes.NewReader(ciphertext),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upload.Header.Set("Authorization", "Bearer "+reservation.UploadToken)
+		upload.Header.Set("Content-Type", "application/octet-stream")
+		uploadResponse, err := api.client.Do(upload)
+		if err != nil {
+			t.Fatalf("upload encrypted attachment: %v", err)
+		}
+		uploadResponse.Body.Close()
+		if uploadResponse.StatusCode != http.StatusOK {
+			t.Fatalf("upload encrypted attachment status = %d", uploadResponse.StatusCode)
+		}
+		manifests = append(manifests, manifest)
+		attachmentIDs = append(attachmentIDs, attachmentID)
 	}
 	responseNonce, responseCiphertext, err := encryptJSON(
 		group.Key,
 		responseAAD(4, sessionID, group.GroupID, responseID, group.Timestamp),
-		decryptedResponse{ID: responseID, Type: "feedback", Attachment: manifest, CreatedAt: time.Now().UTC()},
+		decryptedResponse{ID: responseID, Type: "feedback", Attachments: manifests, CreatedAt: time.Now().UTC()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +406,7 @@ func postEncryptedAttachment(
 		ExpiresAt int64 `json:"expiresAt"`
 	}
 	if err := api.do(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/responses", group.AccessToken, map[string]any{
-		"responseId": responseID, "attachmentId": attachmentID, "groupId": group.GroupID,
+		"responseId": responseID, "attachmentIds": attachmentIDs, "groupId": group.GroupID,
 		"deviceId": group.DeviceID, "keyTimestamp": group.Timestamp,
 		"nonce": responseNonce, "ciphertext": responseCiphertext,
 	}, &posted); err != nil {

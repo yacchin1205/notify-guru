@@ -30,16 +30,16 @@ type Choice struct {
 }
 
 type Response struct {
-	ID         string              `json:"id"`
-	Type       string              `json:"type"`
-	ItemID     string              `json:"itemId,omitempty"`
-	RequestID  string              `json:"requestId,omitempty"`
-	EventID    string              `json:"eventId,omitempty"`
-	OptionID   string              `json:"optionId,omitempty"`
-	Message    string              `json:"message,omitempty"`
-	CreatedAt  time.Time           `json:"createdAt"`
-	GroupID    string              `json:"groupId"`
-	Attachment *ReceivedAttachment `json:"attachment,omitempty"`
+	ID          string                `json:"id"`
+	Type        string                `json:"type"`
+	ItemID      string                `json:"itemId,omitempty"`
+	RequestID   string                `json:"requestId,omitempty"`
+	EventID     string                `json:"eventId,omitempty"`
+	OptionID    string                `json:"optionId,omitempty"`
+	Message     string                `json:"message,omitempty"`
+	CreatedAt   time.Time             `json:"createdAt"`
+	GroupID     string                `json:"groupId"`
+	Attachments []*ReceivedAttachment `json:"attachments,omitempty"`
 }
 
 type ReceivedAttachment struct {
@@ -66,14 +66,14 @@ type attachmentManifest struct {
 }
 
 type decryptedResponse struct {
-	ID         string              `json:"id"`
-	Type       string              `json:"type"`
-	RequestID  string              `json:"requestId,omitempty"`
-	EventID    string              `json:"eventId,omitempty"`
-	OptionID   string              `json:"optionId,omitempty"`
-	Message    string              `json:"message,omitempty"`
-	Attachment *attachmentManifest `json:"attachment,omitempty"`
-	CreatedAt  time.Time           `json:"createdAt"`
+	ID          string                `json:"id"`
+	Type        string                `json:"type"`
+	RequestID   string                `json:"requestId,omitempty"`
+	EventID     string                `json:"eventId,omitempty"`
+	OptionID    string                `json:"optionId,omitempty"`
+	Message     string                `json:"message,omitempty"`
+	Attachments []*attachmentManifest `json:"attachments,omitempty"`
+	CreatedAt   time.Time             `json:"createdAt"`
 }
 
 type event struct {

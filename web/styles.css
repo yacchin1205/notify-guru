@@ -206,7 +206,7 @@ body.managing-devices #empty {
   display: block;
   width: min(100%, 24rem);
   max-height: 18rem;
-  object-fit: contain;
+  overflow: auto;
   border-radius: 0.75rem;
 }
 
@@ -385,3 +385,6 @@ button.destructive {
     margin-top: 0.5rem;
   }
 }
+
+.feedback-preview img { max-width: 160px; max-height: 160px; object-fit: contain; }
+.feedback-preview figure { display: inline-flex; flex-direction: column; margin: 4px; }

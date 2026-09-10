@@ -562,7 +562,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		}
 		switch decrypted.Type {
 		case "response":
-			if decrypted.RequestID == "" || decrypted.EventID != "" || decrypted.OptionID == "" || decrypted.Message != "" || decrypted.Attachment != nil || envelope.AttachmentID != "" {
+			if decrypted.RequestID == "" || decrypted.EventID != "" || decrypted.OptionID == "" || decrypted.Message != "" || len(decrypted.Attachments) > 0 || len(envelope.AttachmentIDs) > 0 {
 				return nil, fmt.Errorf("response %q has invalid response fields", decrypted.ID)
 			}
 			if envelope.ItemID != "" && decrypted.RequestID != envelope.ItemID {
@@ -571,7 +571,7 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 		case "dismiss":
 			legacyDismiss := envelope.ItemID == "" && decrypted.RequestID != "" && decrypted.EventID == ""
 			trackedDismiss := envelope.ItemID != "" && decrypted.EventID != "" && decrypted.RequestID == ""
-			if (!legacyDismiss && !trackedDismiss) || decrypted.OptionID != "" || decrypted.Message != "" || decrypted.Attachment != nil || envelope.AttachmentID != "" {
+			if (!legacyDismiss && !trackedDismiss) || decrypted.OptionID != "" || decrypted.Message != "" || len(decrypted.Attachments) > 0 || len(envelope.AttachmentIDs) > 0 {
 				return nil, fmt.Errorf("response %q has invalid dismiss fields", decrypted.ID)
 			}
 			if envelope.ItemID != "" && decrypted.EventID != envelope.ItemID {
@@ -581,10 +581,10 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 			if decrypted.RequestID != "" || decrypted.EventID != "" || decrypted.OptionID != "" || envelope.ItemID != "" {
 				return nil, fmt.Errorf("response %q has invalid feedback fields", decrypted.ID)
 			}
-			if session.protocolVersion == 3 && (decrypted.Message == "" || decrypted.Attachment != nil || envelope.AttachmentID != "") {
+			if session.protocolVersion == 3 && (decrypted.Message == "" || len(decrypted.Attachments) > 0 || len(envelope.AttachmentIDs) > 0) {
 				return nil, fmt.Errorf("response %q has invalid version 3 feedback fields", decrypted.ID)
 			}
-			if session.protocolVersion == 4 && decrypted.Message == "" && decrypted.Attachment == nil {
+			if session.protocolVersion == 4 && decrypted.Message == "" && len(decrypted.Attachments) == 0 {
 				return nil, fmt.Errorf("response %q has neither a message nor an attachment", decrypted.ID)
 			}
 		default:
@@ -601,14 +601,22 @@ func (s *Store) Responses(ctx context.Context, sessionID string) ([]Response, er
 			CreatedAt: decrypted.CreatedAt,
 			GroupID:   group.ID,
 		}
-		if decrypted.Attachment != nil {
-			attachment, err := s.receiveAttachment(ctx, session, group, envelope, decrypted.Attachment)
+		if len(decrypted.Attachments) != len(envelope.AttachmentIDs) || len(decrypted.Attachments) > 5 {
+			return nil, fmt.Errorf("response %q attachment count does not match its envelope or exceeds the limit", decrypted.ID)
+		}
+		seen := make(map[string]bool)
+		for i, manifest := range decrypted.Attachments {
+			if manifest == nil || manifest.ID != envelope.AttachmentIDs[i] || seen[manifest.ID] {
+				return nil, fmt.Errorf("response %q attachment IDs are mismatched or duplicated", decrypted.ID)
+			}
+			seen[manifest.ID] = true
+		}
+		for _, manifest := range decrypted.Attachments {
+			attachment, err := s.receiveAttachment(ctx, session, group, envelope, manifest)
 			if err != nil {
 				return nil, fmt.Errorf("receive attachment for response %q: %w", decrypted.ID, err)
 			}
-			response.Attachment = attachment
-		} else if envelope.AttachmentID != "" {
-			return nil, fmt.Errorf("response %q has an attachment only in its relay envelope", decrypted.ID)
+			response.Attachments = append(response.Attachments, attachment)
 		}
 		responses = append(responses, response)
 	}
@@ -625,8 +633,8 @@ func (s *Store) receiveAttachment(
 	envelope responseEnvelope,
 	manifest *attachmentManifest,
 ) (*ReceivedAttachment, error) {
-	if session.protocolVersion != 4 || envelope.AttachmentID == "" || manifest.ID != envelope.AttachmentID {
-		return nil, fmt.Errorf("attachment ID does not match its version 4 response envelope")
+	if session.protocolVersion != 4 {
+		return nil, fmt.Errorf("attachments require protocol version 4")
 	}
 	if !attachmentIDPattern.MatchString(manifest.ID) {
 		return nil, fmt.Errorf("invalid attachment ID")

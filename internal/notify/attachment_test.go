@@ -95,7 +95,7 @@ func TestResponsesRejectUnsafeAttachmentIDs(t *testing.T) {
 				Nonce: encode(nonce), CiphertextSHA256: hex.EncodeToString(digest[:]),
 			}
 			responseNonce, responseCiphertext, err := encryptJSON(responseKey, responseAAD(4, sessionID, groupID, responseID, timestamp), decryptedResponse{
-				ID: responseID, Type: "feedback", CreatedAt: time.Now().UTC(), Attachment: manifest,
+				ID: responseID, Type: "feedback", CreatedAt: time.Now().UTC(), Attachments: []*attachmentManifest{manifest},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -117,7 +117,7 @@ func TestResponsesRejectUnsafeAttachmentIDs(t *testing.T) {
 				case "/api/sessions/session/responses":
 					payload = responsesResult{Responses: []responseEnvelope{{
 						Sequence: 1, ResponseID: responseID, GroupID: groupID, KeyTimestamp: timestamp,
-						AttachmentID: tc.id, Nonce: responseNonce, Ciphertext: responseCiphertext,
+						AttachmentIDs: []string{tc.id}, Nonce: responseNonce, Ciphertext: responseCiphertext,
 					}}}
 				default:
 					if !strings.HasPrefix(request.URL.Path, "/api/sessions/session/attachments/") {
@@ -164,10 +164,10 @@ func TestResponsesRejectUnsafeAttachmentIDs(t *testing.T) {
 			if receiveErr != nil {
 				t.Fatal(receiveErr)
 			}
-			if len(responses) != 1 || responses[0].Attachment == nil {
+			if len(responses) != 1 || len(responses[0].Attachments) != 1 {
 				t.Fatalf("missing attachment: %+v", responses)
 			}
-			attachment := responses[0].Attachment
+			attachment := responses[0].Attachments[0]
 			if attachment.Path != filepath.Join(tempDir, tc.id+".jpg") || len(entries) != 1 {
 				t.Fatalf("unexpected saved attachment: %+v", attachment)
 			}

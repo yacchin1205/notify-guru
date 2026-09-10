@@ -190,81 +190,213 @@ describe("devices and persistent groups", () => {
     )).toBe(2);
   });
 
-  it("stores version 4 attachment ciphertext in R2 and releases it after response acknowledgement", async () => {
+  it.each([true, false])("migrates stored responses with an existing attachment column: %s", async (hasAttachmentColumn) => {
     const device = await newDevice();
     const { group, key } = await createV4Group(device);
     const session = await createJoinedSession(group, device, key, 4);
-    const attachmentId = randomId();
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session.id));
+    await runInDurableObject(stub, (instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`
+        DROP TABLE session_attachments_v4;
+        DROP TABLE session_responses_v3;
+      CREATE TABLE IF NOT EXISTS session_responses_v3 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        response_id TEXT NOT NULL UNIQUE,
+        item_id TEXT,
+        group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
+        key_timestamp INTEGER NOT NULL,
+        nonce TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        attachment_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS session_attachments_v4 (
+        attachment_id TEXT PRIMARY KEY,
+        response_id TEXT NOT NULL UNIQUE,
+        group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
+        device_id TEXT NOT NULL,
+        key_timestamp INTEGER NOT NULL,
+        object_key TEXT NOT NULL UNIQUE,
+        upload_token_hash TEXT NOT NULL,
+        ciphertext_length INTEGER NOT NULL,
+        ciphertext_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'uploaded', 'committed')),
+        upload_expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      `);
+      sql.exec(`INSERT INTO session_responses_v3
+        (sequence, response_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_id)
+        VALUES (7, 'with-image', ?, ?, 'nonce-1', 'encrypted-response-1', 100, 'photo-1'),
+               (9, 'text-only', ?, ?, 'nonce-2', 'encrypted-response-2', 200, NULL)`,
+        group.id, key.timestamp, group.id, key.timestamp);
+      for (const [index, status] of ['reserved', 'uploaded', 'committed'].entries()) {
+        sql.exec(`INSERT INTO session_attachments_v4 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `photo-${index + 1}`, `response-${index + 1}`, group.id, device.id, key.timestamp,
+          `object-${index + 1}`, `token-${index + 1}`, 123 + index, `hash-${index + 1}`, status, 300, 100);
+      }
+      if (!hasAttachmentColumn) {
+        sql.exec('DROP TABLE session_attachments_v4');
+        sql.exec('ALTER TABLE session_responses_v3 DROP COLUMN attachment_id');
+      }
+      const responsesBefore = Array.from(sql.exec('SELECT * FROM session_responses_v3 ORDER BY sequence'));
+      const attachmentsBefore = hasAttachmentColumn
+        ? Array.from(sql.exec('SELECT * FROM session_attachments_v4 ORDER BY attachment_id')) : [];
+      expect(() => sql.exec('SELECT attachment_ids FROM session_responses_v3')).toThrow();
+      if (hasAttachmentColumn) {
+        expect(() => sql.exec(`INSERT INTO session_attachments_v4
+          SELECT 'extra-photo', response_id, group_id, device_id, key_timestamp, 'extra-object',
+                 upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at
+          FROM session_attachments_v4 WHERE attachment_id = 'photo-1'`)).toThrow(/UNIQUE/);
+      }
+
+      instance['createSchema']();
+      const migrated = Array.from(sql.exec('SELECT * FROM session_responses_v3 ORDER BY sequence'));
+      expect(migrated).toEqual(responsesBefore.map((row, index) => ({
+        ...row,
+        attachment_id: hasAttachmentColumn && index === 0 ? 'photo-1' : null,
+        attachment_ids: hasAttachmentColumn && index === 0 ? '["photo-1"]' : '[]',
+      })));
+      expect(Array.from(sql.exec('SELECT * FROM session_attachments_v4 ORDER BY attachment_id')))
+        .toEqual(attachmentsBefore);
+      expect(Array.from(sql.exec('PRAGMA foreign_key_check'))).toEqual([]);
+      expect(Array.from(sql.exec("SELECT name FROM sqlite_master WHERE name = 'session_attachments_migrating'")))
+        .toEqual([]);
+      if (hasAttachmentColumn) {
+        sql.exec(`INSERT INTO session_attachments_v4
+          SELECT 'extra-photo', response_id, group_id, device_id, key_timestamp, 'extra-object',
+                 upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at
+          FROM session_attachments_v4 WHERE attachment_id = 'photo-1'`);
+        expect(Array.from(sql.exec("SELECT attachment_id FROM session_attachments_v4 WHERE response_id = 'response-1'")))
+          .toHaveLength(2);
+        expect(() => sql.exec(`INSERT INTO session_attachments_v4
+          SELECT 'duplicate-object', 'another-response', group_id, device_id, key_timestamp, object_key,
+                 upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at
+          FROM session_attachments_v4 WHERE attachment_id = 'photo-1'`)).toThrow(/UNIQUE/);
+      }
+      sql.exec(`INSERT INTO session_responses_v3
+        (response_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_ids)
+        VALUES ('multiple-images', ?, ?, 'nonce-3', 'encrypted-response-3', 300, '["photo-b","photo-a"]')`,
+        group.id, key.timestamp);
+      const responsesAfter = Array.from(sql.exec('SELECT * FROM session_responses_v3 ORDER BY sequence'));
+      const attachmentsAfter = Array.from(sql.exec('SELECT * FROM session_attachments_v4 ORDER BY attachment_id'));
+      expect(responsesAfter[2].sequence).toBe(10);
+      instance['createSchema']();
+      expect(Array.from(sql.exec('SELECT * FROM session_responses_v3 ORDER BY sequence'))).toEqual(responsesAfter);
+      expect(Array.from(sql.exec('SELECT * FROM session_attachments_v4 ORDER BY attachment_id'))).toEqual(attachmentsAfter);
+    });
+    const received = await api(`/api/sessions/${session.id}/responses?after=0`, { token: session.sessionToken });
+    expect(received.status).toBe(200);
+    expect(received.json.responses.map((row: { attachmentIds: string[] }) => row.attachmentIds))
+      .toEqual([hasAttachmentColumn ? ['photo-1'] : [], [], ['photo-b', 'photo-a']]);
+  });
+
+  it.each([1, 3, 5])("stores %i images in response order and releases all after acknowledgement", async (count) => {
+    const device = await newDevice();
+    const { group, key } = await createV4Group(device);
+    const session = await createJoinedSession(group, device, key, 4);
+    const attachmentIds = Array.from({ length: count }, () => randomId());
     const responseId = randomId();
     const ciphertext = new TextEncoder().encode("opaque encrypted jpeg bytes");
-    const reserved = await api(`/api/sessions/${session.id}/attachments`, {
+    const responseBody = {
+      responseId, attachmentIds: [...attachmentIds].reverse(), groupId: group.id,
+      deviceId: device.id, keyTimestamp: key.timestamp, nonce: "A".repeat(16), ciphertext: randomToken(),
+    };
+    for (const attachmentId of attachmentIds) {
+      const reserved = await api(`/api/sessions/${session.id}/attachments`, {
+        method: "POST",
+        token: device.token,
+        body: {
+          attachmentId,
+          responseId,
+          groupId: group.id,
+          deviceId: device.id,
+          keyTimestamp: key.timestamp,
+          ciphertextLength: ciphertext.byteLength,
+          ciphertextSha256: await hash("opaque encrypted jpeg bytes"),
+        },
+      });
+      expect(reserved).toEqual({
+        status: 201,
+        json: {
+          attachmentId,
+          uploadToken: expect.any(String),
+          maxCiphertextBytes: 2 * 1024 * 1024,
+          uploadExpiresAt: expect.any(Number),
+        },
+      });
+
+      if (attachmentId === attachmentIds[count - 1]) {
+        const incomplete = await api(`/api/sessions/${session.id}/responses`, {
+          method: "POST", token: device.token, body: responseBody,
+        });
+        expect(incomplete.status).toBe(409);
+        expect((await api(`/api/sessions/${session.id}/responses?after=0`, {
+          token: session.sessionToken,
+        })).json.responses).toEqual([]);
+      }
+
+      const uploaded = await SELF.fetch(`https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`, {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${reserved.json.uploadToken}`,
+          "content-type": "application/octet-stream",
+        },
+        body: ciphertext,
+      });
+      expect(uploaded.status).toBe(200);
+      expect(await uploaded.json()).toEqual({ uploaded: true });
+    }
+
+    if (count === 5) {
+      const excess = await api(`/api/sessions/${session.id}/attachments`, {
+        method: "POST", token: device.token,
+        body: {
+          attachmentId: randomId(), responseId, groupId: group.id, deviceId: device.id,
+          keyTimestamp: key.timestamp, ciphertextLength: ciphertext.byteLength,
+          ciphertextSha256: await hash("opaque encrypted jpeg bytes"),
+        },
+      });
+      expect(excess.status).toBe(413);
+    }
+    const differentResponse = await api(`/api/sessions/${session.id}/responses`, {
+      method: "POST", token: device.token, body: { ...responseBody, responseId: randomId() },
+    });
+    expect(differentResponse.status).toBe(409);
+    const duplicate = await api(`/api/sessions/${session.id}/responses`, {
       method: "POST",
       token: device.token,
-      body: {
-        attachmentId,
-        responseId,
-        groupId: group.id,
-        deviceId: device.id,
-        keyTimestamp: key.timestamp,
-        ciphertextLength: ciphertext.byteLength,
-        ciphertextSha256: await hash("opaque encrypted jpeg bytes"),
-      },
+      body: { ...responseBody, attachmentIds: [attachmentIds[0], attachmentIds[0]] },
     });
-    expect(reserved).toEqual({
-      status: 201,
-      json: {
-        attachmentId,
-        uploadToken: expect.any(String),
-        maxCiphertextBytes: 2 * 1024 * 1024,
-        uploadExpiresAt: expect.any(Number),
-      },
-    });
-
-    const uploaded = await SELF.fetch(`https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`, {
-      method: "PUT",
-      headers: {
-        authorization: `Bearer ${reserved.json.uploadToken}`,
-        "content-type": "application/octet-stream",
-      },
-      body: ciphertext,
-    });
-    expect(uploaded.status).toBe(200);
-    expect(await uploaded.json()).toEqual({ uploaded: true });
-
+    expect(duplicate.status).toBe(400);
     const committed = await api(`/api/sessions/${session.id}/responses`, {
-      method: "POST",
-      token: device.token,
-      body: {
-        responseId,
-        attachmentId,
-        groupId: group.id,
-        deviceId: device.id,
-        keyTimestamp: key.timestamp,
-        nonce: "A".repeat(16),
-        ciphertext: randomToken(),
-      },
+      method: "POST", token: device.token, body: responseBody,
     });
     expect(committed.status).toBe(201);
 
-    const downloaded = await SELF.fetch(
-      `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
-      { headers: { authorization: `Bearer ${session.sessionToken}` } },
-    );
-    expect(downloaded.status).toBe(200);
-    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(ciphertext);
-
+    for (const attachmentId of attachmentIds) {
+      const downloaded = await SELF.fetch(
+        `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
+        { headers: { authorization: `Bearer ${session.sessionToken}` } },
+      );
+      expect(downloaded.status).toBe(200);
+      expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(ciphertext);
+    }
     const received = await api(`/api/sessions/${session.id}/responses?after=0`, { token: session.sessionToken });
     expect(received.json.responses).toEqual([
-      expect.objectContaining({ responseId, attachmentId }),
+      expect.objectContaining({ responseId, attachmentIds: [...attachmentIds].reverse() }),
     ]);
     const sequence = received.json.responses[0].sequence;
     expect((await api(`/api/sessions/${session.id}/responses?after=${sequence}`, {
       token: session.sessionToken,
     })).status).toBe(200);
-    expect((await SELF.fetch(
-      `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
-      { headers: { authorization: `Bearer ${session.sessionToken}` } },
-    )).status).toBe(404);
+    for (const attachmentId of attachmentIds) {
+      expect((await SELF.fetch(
+        `https://notify.guru/api/sessions/${session.id}/attachments/${attachmentId}`,
+        { headers: { authorization: `Bearer ${session.sessionToken}` } },
+      )).status).toBe(404);
+    }
   });
 
   it("keeps only continuously attested v4 Session participation usable after self-removal", async () => {

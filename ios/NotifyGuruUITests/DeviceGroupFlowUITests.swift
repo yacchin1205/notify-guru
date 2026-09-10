@@ -283,7 +283,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         let editor = app.textViews["Message"]
         let takePhoto = app.buttons["Take Photo"]
-        let choosePhoto = app.buttons["Choose Photo"]
+        let choosePhoto = app.buttons["Choose Photos"]
         let send = app.buttons["Send"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         XCTAssertTrue(takePhoto.exists)
@@ -300,14 +300,28 @@ final class DeviceGroupFlowUITests: XCTestCase {
             NSPredicate(format: "label == %@ OR label == %@", "Close", "閉じる")
         ).firstMatch
         if onboardingClose.exists { onboardingClose.tap() }
-        photoThumbnail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let preview = app.images["selected-photo-preview"]
+        for index in 0..<3 {
+            app.images.matching(identifier: "PXGGridLayout-Info").element(boundBy: index)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        app.buttons["Add"].tap()
+        let previews = app.descendants(matching: .any).matching(identifier: "selected-photo-preview")
+        let preview = previews.firstMatch
         XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertEqual(previews.count, 3)
         XCTAssertTrue(send.isEnabled)
-        XCTAssertTrue(app.buttons["Remove Photo"].exists)
+        XCTAssertTrue(app.buttons["Remove photo 1"].exists)
         attachScreenshot(named: "52-v4-feedback-library-photo-ready", app: app)
 
-        app.buttons["Remove Photo"].tap()
+        previews.element(boundBy: 1).tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "54-feedback-enlarged-photo", app: app)
+        app.buttons["Close"].tap()
+        app.buttons["Remove photo 2"].tap()
+        XCTAssertEqual(previews.count, 2)
+        attachScreenshot(named: "55-feedback-middle-photo-removed", app: app)
+        app.buttons["Remove photo 2"].tap()
+        app.buttons["Remove photo 1"].tap()
         XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
         XCTAssertFalse(send.isEnabled)
 
@@ -315,6 +329,42 @@ final class DeviceGroupFlowUITests: XCTestCase {
         editor.typeText("A message with an optional photo")
         XCTAssertTrue(send.isEnabled)
         attachScreenshot(named: "53-v4-feedback-message-ready", app: app)
+    }
+
+    func testPhotosShareOpensNotifyGuru() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+        let photos = XCUIApplication(bundleIdentifier: "com.apple.mobileslideshow")
+        photos.launch()
+        let welcomeContinue = photos.buttons.matching(NSPredicate(format: "label == 'Continue' OR label == '続ける'")).firstMatch
+        if welcomeContinue.waitForExistence(timeout: 20) { welcomeContinue.tap() }
+        let backToLibrary = photos.buttons["PUOneUpBarButtonItemIdentifierDone"]
+        if backToLibrary.exists { backToLibrary.tap() }
+        attachScreenshot(named: "60-photos-library", app: photos)
+        let thumbnails = photos.images.matching(identifier: "PXGGridLayout-Info")
+        XCTAssertTrue(thumbnails.firstMatch.waitForExistence(timeout: 20))
+        let select = photos.buttons.matching(NSPredicate(format: "label == 'Select' OR label == '選択'")).firstMatch
+        select.tap()
+        XCTAssertGreaterThanOrEqual(thumbnails.count, 3)
+        for index in (thumbnails.count - 3)..<thumbnails.count {
+            thumbnails.element(boundBy: index).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        attachScreenshot(named: "61-photos-three-selected", app: photos)
+        let share = photos.buttons.matching(NSPredicate(format: "label == 'Share' OR label == '共有'")).firstMatch
+        XCTAssertTrue(share.waitForExistence(timeout: 10))
+        share.tap()
+        attachScreenshot(named: "62-photos-share-sheet", app: photos)
+        let service = photos.cells["notify.guru"]
+        XCTAssertTrue(service.waitForExistence(timeout: 10))
+        service.tap()
+        XCTAssertTrue(photos.buttons["Send"].waitForExistence(timeout: 10))
+        XCTAssertTrue(photos.buttons["Remove photo 3"].waitForExistence(timeout: 20))
+        attachScreenshot(named: "63-notify-share-extension", app: photos)
+        photos.buttons["Remove photo 2"].tap()
+        XCTAssertFalse(photos.buttons["Remove photo 3"].exists)
+        attachScreenshot(named: "64-notify-share-middle-removed", app: photos)
+        photos.buttons["Cancel"].tap()
     }
 
     private func absence(of element: XCUIElement) -> XCTestExpectation {

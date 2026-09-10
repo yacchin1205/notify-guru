@@ -287,10 +287,53 @@ struct APIClient {
         }
     }
 
-    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, attachmentID: String? = nil, payload: EncryptedPayload) async throws -> Int64 {
+    func sendFeedback(session: SessionRecord, identity: DeviceIdentity, key: GroupKey, message: String, photos: [PreparedPhoto]) async throws {
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.utf8.count <= 20_000, photos.count <= 5, !text.isEmpty || !photos.isEmpty else {
+            throw ProtocolError.invalidResponse("a message or up to five photos is required; the message must not exceed 20000 bytes")
+        }
+        guard session.protocolVersion == 4 || photos.isEmpty else {
+            throw ProtocolError.invalidResponse("this session does not support photo attachments")
+        }
+        var current = session
+        current.keys[String(key.timestamp)] = try CryptoEngine.deriveSessionKey(
+            key: key, creatorPublicKey: session.creatorPublicKey, sessionID: session.sessionID,
+            groupID: session.groupID, protocolVersion: session.protocolVersion
+        )
+        let responseID = try CryptoEngine.randomID()
+        var manifests: [AttachmentManifest] = []
+        for photo in photos {
+            let attachment = try CryptoEngine.encryptAttachment(
+                groupKey: key, creatorPublicKey: session.creatorPublicKey,
+                sessionID: session.sessionID, groupID: session.groupID,
+                responseID: responseID, attachmentID: CryptoEngine.randomID(),
+                jpeg: photo.jpeg, width: photo.width, height: photo.height
+            )
+            let reservation = try await reserveAttachment(
+                session: current, identity: identity, timestamp: key.timestamp,
+                responseID: responseID, attachment: attachment
+            )
+            try await uploadAttachment(session: current, attachment: attachment, reservation: reservation)
+            manifests.append(attachment.manifest)
+        }
+        let payload = try CryptoEngine.encryptFeedback(
+            session: current, timestamp: key.timestamp, responseID: responseID,
+            message: text.isEmpty ? nil : text, attachments: manifests, createdAt: RFC3339.string(from: Date())
+        )
+        do {
+            _ = try await postResponse(
+                session: current, identity: identity, timestamp: key.timestamp, responseID: responseID,
+                itemID: nil, attachmentIDs: manifests.map(\.id), payload: payload
+            )
+        } catch let error as URLError {
+            throw FeedbackResultUnknown(underlying: error)
+        }
+    }
+
+    func postResponse(session record: SessionRecord, identity: DeviceIdentity, timestamp: Int64, responseID: String, itemID: String?, attachmentIDs: [String] = [], payload: EncryptedPayload) async throws -> Int64 {
         let body = PostResponseRequest(
             responseID: responseID, itemID: itemID, groupID: record.groupID, deviceID: identity.deviceID,
-            keyTimestamp: timestamp, nonce: payload.nonce, ciphertext: payload.ciphertext, attachmentID: attachmentID
+            keyTimestamp: timestamp, nonce: payload.nonce, ciphertext: payload.ciphertext, attachmentIDs: attachmentIDs
         )
         let data = try await request(
             method: "POST", path: "/api/sessions/\(record.sessionID)/responses", token: identity.accessToken,
@@ -436,10 +479,10 @@ private struct JoinRequest: Encodable {
 
 private struct PostResponseRequest: Encodable {
     let responseID: String; let itemID: String?; let groupID: String; let deviceID: String; let keyTimestamp: Int64
-    let nonce: String; let ciphertext: String; let attachmentID: String?
+    let nonce: String; let ciphertext: String; let attachmentIDs: [String]
     enum CodingKeys: String, CodingKey {
         case responseID = "responseId"; case itemID = "itemId"; case groupID = "groupId"; case deviceID = "deviceId"
-        case keyTimestamp, nonce, ciphertext; case attachmentID = "attachmentId"
+        case keyTimestamp, nonce, ciphertext; case attachmentIDs = "attachmentIds"
     }
 }
 
@@ -448,3 +491,10 @@ struct AttachmentReservation: Equatable {
     let maximumCiphertextBytes: Int64
     let expiresAt: Int64
 }
+
+struct FeedbackResultUnknown: LocalizedError {
+    let underlying: URLError
+    var errorDescription: String? { "The send result could not be confirmed. Check the receiving session before sharing again. (\(underlying.localizedDescription))" }
+}
+
+enum FeedbackSendResult { case sent, failed, unknown }

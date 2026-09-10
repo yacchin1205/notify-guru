@@ -343,11 +343,11 @@ Repeating a successful upload while the SessionAttachment remains `uploaded` obs
 
 Authentication: a `groupToken` for a Group joined to the named Session. Authorization: its Device MUST be a current member of that Group, the Session MUST be `open`, and the Group's current state MUST be usable by the Session.
 
-Encryption: the request carries the Response payload, including any attachment manifest, encrypted with a key derived from the Device's locally held Group private key and the Session creator public key returned by `GET /api/groups/:groupId/state`. The derivation and authenticated encryption bind the Session, Group, group-key version, and Response identity.
+Encryption: the request carries the Response payload, including the ordered `attachments` manifest array, encrypted with a key derived from the Device's locally held Group private key and the Session creator public key returned by `GET /api/groups/:groupId/state`. The derivation and authenticated encryption bind the Session, Group, group-key version, and Response identity.
 
 Records one immutable Response from a current member of a joined Group in an `open` Session. The Response is accepted only against the Group state currently usable by that Session.
 
-If the Response addresses an `active` SessionItem, success also changes that item to `inactive`. If it references the matching `uploaded` SessionAttachment, success also changes that attachment to `available`; the Response and all applicable child-Object changes become observable together.
+If the Response addresses an `active` SessionItem, success also changes that item to `inactive`. The ordered `attachmentIds` array contains zero to five distinct IDs. Each referenced SessionAttachment must match the Response, Group, Device, and key version and be `uploaded`; success changes all referenced attachments to `available`; the Response and all applicable child-Object changes become observable together.
 
 ### `GET /api/sessions/:sessionId/responses`
 

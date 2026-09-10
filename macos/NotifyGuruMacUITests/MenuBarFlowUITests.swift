@@ -103,13 +103,13 @@ final class MenuBarFlowUITests: XCTestCase {
 
         message.click()
         app.typeKey("v", modifierFlags: .command)
-        let preview = app.images["mac-selected-photo-preview"]
+        let preview = app.buttons["mac-selected-photo-preview"]
         XCTAssertTrue(preview.waitForExistence(timeout: 10))
         XCTAssertTrue(send.isEnabled)
-        XCTAssertTrue(app.buttons["Remove Image"].exists)
+        XCTAssertTrue(app.buttons["Remove photo 1"].exists)
         attachScreenshot(named: "31-clipboard-image-ready", app: app)
 
-        app.buttons["Remove Image"].click()
+        app.buttons["Remove photo 1"].click()
         XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
         XCTAssertFalse(send.isEnabled)
 
@@ -118,7 +118,7 @@ final class MenuBarFlowUITests: XCTestCase {
         XCTAssertTrue(send.isEnabled)
         attachScreenshot(named: "32-paste-button-image-ready", app: app)
 
-        app.buttons["Remove Image"].click()
+        app.buttons["Remove photo 1"].click()
         XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("ordinary text paste", forType: .string)

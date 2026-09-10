@@ -1,5 +1,18 @@
 import Foundation
 
+enum PushEnvironment: String, Codable {
+    case sandbox
+    case production
+
+    static var current: PushEnvironment {
+#if DEBUG
+        .sandbox
+#else
+        .production
+#endif
+    }
+}
+
 struct GroupKey: Codable, Equatable {
     let timestamp: Int64
     let publicKey: String
