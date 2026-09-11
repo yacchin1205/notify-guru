@@ -21,10 +21,11 @@ security is being explained, reviewed, or flagged.
 - Version 4 session inheritance is authenticated. The joining device signs the
   session ID, group ID, creator ECDH public key, and transition anchor with both
   its device identity and the current group continuity key. Other devices
-  require the signer to remain in the latest authenticated group head with the
-  same identity keys, validate that the creator key is an actual P-256 curve
-  point, and retire the session when those conditions fail. New responses use
-  only the current usable group-key epoch.
+  verify that the signer belonged to the authenticated transition at the join
+  anchor with the same identity keys and validate that the creator key is an
+  actual P-256 curve point. The descriptor proves the Group's participation, so
+  the session remains available if that signing device later leaves. New
+  responses use only the current usable group-key epoch.
 - Transition hashes cover the canonical transition transcript; ECDSA signatures
   are verified separately. Equivalent signature encodings cannot create
   distinct transition heads.

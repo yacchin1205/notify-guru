@@ -142,14 +142,9 @@ enum CryptoEngine {
                   $0.timestamp == keyTimestamp && $0.transitionHash == transitionHash
               }) else { return false }
         let transition = transitions[transitionIndex]
-        guard let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }),
-              transitions[transitionIndex...].allSatisfy({ item in
-                  item.members.contains { member in
-                      member.deviceID == actor.deviceID
-                          && member.signingPublicKey == actor.signingPublicKey
-                          && member.encryptionPublicKey == actor.encryptionPublicKey
-                  }
-              }) else { return false }
+        guard let actor = transition.members.first(where: { $0.deviceID == actorDeviceID }) else {
+            return false
+        }
         let transcript = sessionDescriptorTranscript(
             sessionID: remote.sessionID, groupID: groupID, protocolVersion: 4,
             creatorPublicKey: remote.creatorPublicKey, keyTimestamp: keyTimestamp,

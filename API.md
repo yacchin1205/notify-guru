@@ -251,7 +251,7 @@ A current member removes itself or another Device from the Group. Success remove
 
 Removing another Device also establishes a group key that excludes it in the same Group state change. After self-removal, the remaining membership cannot perform new Session Operations until a remaining Device establishes a new group key; no Operation may continue using the old key as though removal had not occurred.
 
-Any Session participation that is no longer valid under the resulting Group state becomes unavailable in that same observable result. Rejection leaves membership, group key, and Session availability unchanged.
+Existing Session participation remains established across membership changes. After self-removal, it is temporarily unusable until a remaining Device establishes a new group key. Rejection leaves membership, group key, and Session availability unchanged.
 
 ### `POST /api/sessions`
 
@@ -283,7 +283,7 @@ A current member of a Group uses an `available` SessionPairing to join an `open`
 
 Each established change remains in place if a later change cannot be completed. The caller receives success only after all three changes have been established; otherwise it may repeat the same join to continue from the first incomplete change.
 
-While the SessionPairing is `joining` or `consumed`, a request with a different Group, calling Device, or submitted Group state MUST be rejected. Repeating the same join does not duplicate an established change, consume the Pairing again, or restore participation made unavailable by a later transition.
+While the SessionPairing is `joining` or `consumed`, a request with a different Group, calling Device, or submitted Group state MUST be rejected. Repeating the same join does not duplicate an established change or consume the Pairing again.
 
 ### `GET /api/sessions/:sessionId`
 
