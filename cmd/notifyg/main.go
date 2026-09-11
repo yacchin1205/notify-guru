@@ -278,8 +278,8 @@ func writeResponse(output io.Writer, response notify.Response) {
 	switch response.Type {
 	case "feedback":
 		attachment := ""
-		if response.Attachment != nil {
-			attachment = " attachment=" + response.Attachment.Path
+		for i, image := range response.Attachments {
+			attachment += fmt.Sprintf(" attachment[%d]=%s", i+1, image.Path)
 		}
 		fmt.Fprintf(output, "feedback message=%q%s group=%s at=%s\n", response.Message, attachment, response.GroupID, timestamp)
 	case "dismiss":

@@ -281,18 +281,17 @@ func (s *Server) close(ctx context.Context, _ *mcp.CallToolRequest, input sessio
 func attachmentContent(responses []notify.Response) *mcp.CallToolResult {
 	var content []mcp.Content
 	for _, response := range responses {
-		if response.Attachment == nil {
-			continue
+		for i, attachment := range response.Attachments {
+			size := attachment.ByteLength
+			content = append(content, &mcp.ResourceLink{
+				URI:         attachment.URI,
+				Name:        attachment.ID + ".jpg",
+				Title:       fmt.Sprintf("Photo %d attached to response %s", i+1, response.ID),
+				Description: "End-to-end encrypted attachment decrypted by notifyg into a local temporary file",
+				MIMEType:    attachment.MediaType,
+				Size:        &size,
+			})
 		}
-		size := response.Attachment.ByteLength
-		content = append(content, &mcp.ResourceLink{
-			URI:         response.Attachment.URI,
-			Name:        response.Attachment.ID + ".jpg",
-			Title:       "Photo attached to response " + response.ID,
-			Description: "End-to-end encrypted attachment decrypted by notifyg into a local temporary file",
-			MIMEType:    response.Attachment.MediaType,
-			Size:        &size,
-		})
 	}
 	if len(content) == 0 {
 		return nil

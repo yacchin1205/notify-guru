@@ -35,6 +35,7 @@ struct MacJoinView: View {
 
     private func beginJoin() {
         guard !joining else { return }
+        let link = link
         joining = true
         Task {
             if await model.join(link: link) {

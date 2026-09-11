@@ -115,7 +115,7 @@ interface ResponseRow extends Record<string, SqlStorageValue> {
   nonce: string;
   ciphertext: string;
   created_at: number;
-  attachment_id: string | null;
+  attachment_ids: string;
 }
 
 interface PushJobRow extends Record<string, SqlStorageValue> {
@@ -674,42 +674,49 @@ export class Session extends DurableObject<SessionEnv> {
     const uploadToken = randomIdentifier();
     const uploadTokenHash = await sha256Hex(uploadToken);
     const uploadExpiresAt = Math.min(meta.expires_at, Date.now() + ATTACHMENT_UPLOAD_LIFETIME_MS);
-    const existing = this.attachment(attachmentId) ?? this.attachmentByResponse(responseId);
-    if (existing !== null) {
-      if (
-        existing.attachment_id !== attachmentId || existing.response_id !== responseId ||
-        existing.group_id !== groupId || existing.device_id !== deviceId ||
-        existing.key_timestamp !== keyTimestamp || existing.ciphertext_length !== ciphertextLength ||
-        existing.ciphertext_sha256 !== ciphertextSha256 || existing.state !== "reserved"
-      ) {
-        throw new HttpError(409, "attachment_exists", "Attachment or response ID is already reserved");
+    this.state.storage.transactionSync(() => {
+      const existing = this.attachment(attachmentId);
+      if (existing !== null) {
+        if (
+          existing.attachment_id !== attachmentId || existing.response_id !== responseId ||
+          existing.group_id !== groupId || existing.device_id !== deviceId ||
+          existing.key_timestamp !== keyTimestamp || existing.ciphertext_length !== ciphertextLength ||
+          existing.ciphertext_sha256 !== ciphertextSha256 || existing.state !== "reserved"
+        ) {
+          throw new HttpError(409, "attachment_exists", "Attachment or response ID is already reserved");
+        }
+        this.state.storage.sql.exec(
+          `UPDATE session_attachments_v4
+           SET upload_token_hash = ?, upload_expires_at = ? WHERE attachment_id = ?`,
+          uploadTokenHash,
+          uploadExpiresAt,
+          attachmentId,
+        );
+      } else {
+        const [{ count }] = Array.from(this.state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM session_attachments_v4 WHERE response_id = ?", responseId,
+        ));
+        if (count >= 5) throw new HttpError(413, "too_many_attachments", "A response may contain at most five images");
+        if (this.responseExists(responseId)) throw new HttpError(409, "response_exists", "Response already exists");
+        this.state.storage.sql.exec(
+          `INSERT INTO session_attachments_v4
+             (attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
+              upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?)`,
+          attachmentId,
+          responseId,
+          groupId,
+          deviceId,
+          keyTimestamp,
+          `v4/${randomIdentifier()}`,
+          uploadTokenHash,
+          ciphertextLength,
+          ciphertextSha256,
+          uploadExpiresAt,
+          Date.now(),
+        );
       }
-      this.state.storage.sql.exec(
-        `UPDATE session_attachments_v4
-         SET upload_token_hash = ?, upload_expires_at = ? WHERE attachment_id = ?`,
-        uploadTokenHash,
-        uploadExpiresAt,
-        attachmentId,
-      );
-    } else {
-      this.state.storage.sql.exec(
-        `INSERT INTO session_attachments_v4
-           (attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
-            upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?)`,
-        attachmentId,
-        responseId,
-        groupId,
-        deviceId,
-        keyTimestamp,
-        `v4/${randomIdentifier()}`,
-        uploadTokenHash,
-        ciphertextLength,
-        ciphertextSha256,
-        uploadExpiresAt,
-        Date.now(),
-      );
-    }
+    });
     return json({ attachmentId, uploadToken, maxCiphertextBytes: ATTACHMENT_MAX_CIPHERTEXT_BYTES, uploadExpiresAt }, 201);
   }
 
@@ -773,8 +780,7 @@ export class Session extends DurableObject<SessionEnv> {
   private async addResponse(request: Request, meta: MetaRow): Promise<Response> {
     const body = await readObject(request);
     const tracked = body.itemId !== undefined;
-    const hasAttachment = body.attachmentId !== undefined;
-    expectKeys(body, ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"], ["itemId", "attachmentId"]);
+    expectKeys(body, ["responseId", "groupId", "deviceId", "keyTimestamp", "nonce", "ciphertext"], ["itemId", "attachmentIds"]);
     const responseId = stringField(body, "responseId", IDENTIFIER, 64);
     const itemId = tracked ? stringField(body, "itemId", IDENTIFIER, 64) : null;
     const groupId = stringField(body, "groupId", IDENTIFIER, 64);
@@ -782,8 +788,15 @@ export class Session extends DurableObject<SessionEnv> {
     const keyTimestamp = integerField(body, "keyTimestamp");
     const nonce = stringField(body, "nonce", BASE64URL, 32);
     const ciphertext = stringField(body, "ciphertext", BASE64URL, 350_000);
-    const attachmentId = hasAttachment ? stringField(body, "attachmentId", IDENTIFIER, 64) : null;
-    if (hasAttachment) this.requireV4(meta);
+    const ids = body.attachmentIds === undefined ? [] : body.attachmentIds;
+    if (!Array.isArray(ids) || ids.length > 5) {
+      throw new HttpError(400, "invalid_attachments", "attachmentIds must contain at most five IDs");
+    }
+    const attachmentIds = ids.map((id) => stringField({ id }, "id", IDENTIFIER, 64));
+    if (new Set(attachmentIds).size !== attachmentIds.length) {
+      throw new HttpError(400, "invalid_attachments", "attachmentIds must be unique");
+    }
+    if (attachmentIds.length > 0) this.requireV4(meta);
     const group = this.requireGroup(groupId);
     await this.authorizeSessionKeyDevice(
       group,
@@ -795,13 +808,13 @@ export class Session extends DurableObject<SessionEnv> {
     if (this.responseExists(responseId)) {
       throw new HttpError(409, "response_exists", "Response already exists");
     }
-    const attachment = attachmentId === null ? null : this.requiredAttachment(attachmentId);
-    if (attachment !== null && (
-      attachment.state !== "uploaded" || attachment.response_id !== responseId ||
-      attachment.group_id !== groupId || attachment.device_id !== deviceId ||
-      attachment.key_timestamp !== keyTimestamp
-    )) {
-      throw new HttpError(409, "attachment_mismatch", "Uploaded attachment does not match the response envelope");
+    for (const attachmentId of attachmentIds) {
+      const attachment = this.requiredAttachment(attachmentId);
+      if (attachment.state !== "uploaded" || attachment.response_id !== responseId ||
+          attachment.group_id !== groupId || attachment.device_id !== deviceId ||
+          attachment.key_timestamp !== keyTimestamp) {
+        throw new HttpError(409, "attachment_mismatch", "Uploaded attachment does not match the response envelope");
+      }
     }
     if (itemId !== null) this.requireDeliveredItem(itemId, groupId, deviceId);
     if (itemId !== null) await this.devices.deactivateSessionItem(meta.session_id, itemId);
@@ -809,7 +822,7 @@ export class Session extends DurableObject<SessionEnv> {
     this.state.storage.transactionSync(() => {
       this.state.storage.sql.exec(
         `INSERT INTO session_responses_v3
-           (response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_id)
+           (response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_ids)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         responseId,
         itemId,
@@ -818,9 +831,9 @@ export class Session extends DurableObject<SessionEnv> {
         nonce,
         ciphertext,
         now,
-        attachmentId,
+        JSON.stringify(attachmentIds),
       );
-      if (attachmentId !== null) {
+      for (const attachmentId of attachmentIds) {
         this.state.storage.sql.exec(
           "UPDATE session_attachments_v4 SET state = 'committed' WHERE attachment_id = ?",
           attachmentId,
@@ -856,7 +869,7 @@ export class Session extends DurableObject<SessionEnv> {
     const after = integerQuery(url, "after");
     await this.releaseAcknowledgedAttachments(after);
     const responses = Array.from(this.state.storage.sql.exec<ResponseRow>(
-      `SELECT sequence, response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_id
+      `SELECT sequence, response_id, item_id, group_id, key_timestamp, nonce, ciphertext, created_at, attachment_ids
        FROM session_responses_v3 WHERE sequence > ? ORDER BY sequence LIMIT 100`,
       after,
     )).map((row) => ({
@@ -868,7 +881,7 @@ export class Session extends DurableObject<SessionEnv> {
       nonce: row.nonce,
       ciphertext: row.ciphertext,
       createdAt: row.created_at,
-      ...(row.attachment_id === null ? {} : { attachmentId: row.attachment_id }),
+      attachmentIds: JSON.parse(row.attachment_ids),
     }));
     return json({ responses, expiresAt: meta.expires_at });
   }
@@ -902,16 +915,6 @@ export class Session extends DurableObject<SessionEnv> {
     return rows.length === 0 ? null : rows[0];
   }
 
-  private attachmentByResponse(responseId: string): AttachmentRow | null {
-    const rows = Array.from(this.state.storage.sql.exec<AttachmentRow>(
-      `SELECT attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
-              upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at
-       FROM session_attachments_v4 WHERE response_id = ?`,
-      responseId,
-    ));
-    return rows.length === 0 ? null : rows[0];
-  }
-
   private requiredAttachment(attachmentId: string): AttachmentRow {
     const row = this.attachment(attachmentId);
     if (row === null) throw new HttpError(404, "attachment_not_found", "Attachment was not found");
@@ -923,7 +926,7 @@ export class Session extends DurableObject<SessionEnv> {
     const rows = Array.from(this.state.storage.sql.exec<{ attachment_id: string; object_key: string }>(
       `SELECT a.attachment_id, a.object_key
        FROM session_attachments_v4 a
-       JOIN session_responses_v3 r ON r.attachment_id = a.attachment_id
+       JOIN session_responses_v3 r ON r.response_id = a.response_id
        WHERE a.state = 'committed' AND r.sequence <= ?`,
       after,
     ));
@@ -931,9 +934,8 @@ export class Session extends DurableObject<SessionEnv> {
     await this.attachments.delete(rows.map((row) => row.object_key));
     this.state.storage.sql.exec(
       `DELETE FROM session_attachments_v4
-       WHERE attachment_id IN (
-         SELECT attachment_id FROM session_responses_v3
-         WHERE attachment_id IS NOT NULL AND sequence <= ?
+       WHERE state = 'committed' AND response_id IN (
+         SELECT response_id FROM session_responses_v3 WHERE sequence <= ?
        )`,
       after,
     );
@@ -1264,11 +1266,11 @@ export class Session extends DurableObject<SessionEnv> {
         nonce TEXT NOT NULL,
         ciphertext TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        attachment_id TEXT
+        attachment_ids TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE IF NOT EXISTS session_attachments_v4 (
         attachment_id TEXT PRIMARY KEY,
-        response_id TEXT NOT NULL UNIQUE,
+        response_id TEXT NOT NULL,
         group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
         device_id TEXT NOT NULL,
         key_timestamp INTEGER NOT NULL,
@@ -1337,6 +1339,35 @@ export class Session extends DurableObject<SessionEnv> {
     const pushColumns = Array.from(this.state.storage.sql.exec<{ name: string }>("PRAGMA table_info(push_jobs_v3)"));
     if (!pushColumns.some((column) => column.name === "notification_kind")) {
       this.state.storage.sql.exec("ALTER TABLE push_jobs_v3 ADD COLUMN notification_kind TEXT NOT NULL DEFAULT 'notify'");
+    }
+    if (!responseColumns.some((column) => column.name === "attachment_ids")) {
+      this.state.storage.transactionSync(() => {
+        this.state.storage.sql.exec(`
+          ALTER TABLE session_responses_v3 ADD COLUMN attachment_ids TEXT NOT NULL DEFAULT '[]';
+          UPDATE session_responses_v3 SET attachment_ids = json_array(attachment_id)
+            WHERE attachment_id IS NOT NULL;
+          CREATE TABLE session_attachments_migrating (
+            attachment_id TEXT PRIMARY KEY,
+            response_id TEXT NOT NULL,
+            group_id TEXT NOT NULL REFERENCES session_groups_v3(id),
+            device_id TEXT NOT NULL,
+            key_timestamp INTEGER NOT NULL,
+            object_key TEXT NOT NULL UNIQUE,
+            upload_token_hash TEXT NOT NULL,
+            ciphertext_length INTEGER NOT NULL,
+            ciphertext_sha256 TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('reserved', 'uploaded', 'committed')),
+            upload_expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          INSERT INTO session_attachments_migrating
+            SELECT attachment_id, response_id, group_id, device_id, key_timestamp, object_key,
+                   upload_token_hash, ciphertext_length, ciphertext_sha256, state, upload_expires_at, created_at
+            FROM session_attachments_v4;
+          DROP TABLE session_attachments_v4;
+          ALTER TABLE session_attachments_migrating RENAME TO session_attachments_v4;
+        `);
+      });
     }
   }
 

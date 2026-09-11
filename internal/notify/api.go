@@ -194,15 +194,15 @@ func (a *API) addEvent(ctx context.Context, sessionID, sessionToken, eventID, it
 }
 
 type responseEnvelope struct {
-	Sequence     int64  `json:"sequence"`
-	ResponseID   string `json:"responseId"`
-	ItemID       string `json:"itemId"`
-	GroupID      string `json:"groupId"`
-	KeyTimestamp int64  `json:"keyTimestamp"`
-	Nonce        string `json:"nonce"`
-	Ciphertext   string `json:"ciphertext"`
-	CreatedAt    int64  `json:"createdAt"`
-	AttachmentID string `json:"attachmentId"`
+	Sequence      int64    `json:"sequence"`
+	ResponseID    string   `json:"responseId"`
+	ItemID        string   `json:"itemId"`
+	GroupID       string   `json:"groupId"`
+	KeyTimestamp  int64    `json:"keyTimestamp"`
+	Nonce         string   `json:"nonce"`
+	Ciphertext    string   `json:"ciphertext"`
+	CreatedAt     int64    `json:"createdAt"`
+	AttachmentIDs []string `json:"attachmentIds"`
 }
 
 type responsesResult struct {

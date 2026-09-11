@@ -10,9 +10,14 @@ final class WidgetSnapshotCoordinator {
     init(model: AppModel, store: WidgetSnapshotStore? = nil) {
         self.model = model
         self.store = store
-        subscription = model.$sessions
-            .combineLatest(model.$isReady)
-            .compactMap { sessions, isReady in isReady ? sessions : nil }
+        subscription = model.objectWillChange
+            .map { _ in () }
+            .prepend(())
+            .receive(on: RunLoop.main)
+            .compactMap { [weak model] in
+                guard let model, model.isReady else { return nil }
+                return model.sessions
+            }
             .removeDuplicates()
             .sink { [weak self] sessions in self?.publish(sessions) }
     }

@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct MacMenuBarView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,7 +81,10 @@ struct MacMenuBarView: View {
         HStack {
             Button("Add Session") { openWindow(id: "join-session") }
                 .disabled(!model.isReady)
-            Button("Device Group") { openWindow(id: "device-group") }
+            Button("Device Group") {
+                openWindow(id: "device-group")
+                dismiss()
+            }
                 .disabled(!model.isReady)
             Spacer()
             Button("Quit") { NSApplication.shared.terminate(nil) }
@@ -161,7 +165,9 @@ private struct MacSessionCard: View {
     @State private var message = ""
     @State private var sendingMessage = false
     @State private var preparingPhoto = false
-    @State private var photo: PreparedPhoto?
+    @State private var photos: [PreparedPhoto] = []
+    @State private var previewPhoto: PreparedPhoto?
+    @State private var resultUnknown = false
     @State private var photoError: String?
     @State private var photoImportID = UUID()
     @State private var togglingAttention = false
@@ -220,8 +226,10 @@ private struct MacSessionCard: View {
                     }
                     Spacer(minLength: 4)
                     Button("Dismiss Notification", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let notificationID = notification.id
                         Task {
-                            await model.dismissNotification(sessionID: session.sessionID, notificationID: notification.id)
+                            await model.dismissNotification(sessionID: sessionID, notificationID: notificationID)
                         }
                     }
                     .labelStyle(.iconOnly)
@@ -242,9 +250,11 @@ private struct MacSessionCard: View {
                     }
                     Spacer(minLength: 4)
                     Button("Dismiss Request", systemImage: "xmark") {
+                        let sessionID = session.sessionID
+                        let requestID = request.id
                         responding = true
                         Task {
-                            await model.dismissRequest(sessionID: session.sessionID)
+                            await model.dismissRequest(sessionID: sessionID, requestID: requestID)
                             responding = false
                         }
                     }
@@ -255,9 +265,12 @@ private struct MacSessionCard: View {
                 HStack {
                     ForEach(request.options) { option in
                         Button(option.label) {
+                            let sessionID = session.sessionID
+                            let requestID = request.id
+                            let optionID = option.id
                             responding = true
                             Task {
-                                await model.respond(sessionID: session.sessionID, optionID: option.id)
+                                await model.respond(sessionID: sessionID, requestID: requestID, optionID: optionID)
                                 responding = false
                             }
                         }
@@ -274,22 +287,25 @@ private struct MacSessionCard: View {
                         .accessibilityIdentifier("mac-message-editor")
                         .focused($messageFocused)
                         .onSubmit { sendMessage() }
-                    if let photo, let image = NSImage(data: photo.jpeg) {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(nsImage: image)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 88, height: 88)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .accessibilityLabel("Selected image preview")
-                                .accessibilityIdentifier("mac-selected-photo-preview")
-                            Button("Remove Image", systemImage: "trash", role: .destructive) {
-                                self.photo = nil
-                                photoError = nil
+                    ScrollView(.horizontal) {
+                        HStack {
+                            ForEach(photos.indices, id: \.self) { index in
+                                VStack {
+                                    Text("Photo \(index + 1)").font(.caption)
+                                    if let image = NSImage(data: photos[index].jpeg) {
+                                        Image(nsImage: image).resizable().scaledToFit().frame(width: 88, height: 88)
+                                            .accessibilityLabel("Photo \(index + 1)")
+                                            .accessibilityIdentifier("mac-selected-photo-preview")
+                                            .onTapGesture { previewPhoto = photos[index] }
+                                            .accessibilityAddTraits(.isButton)
+                                    }
+                                    Button("Remove photo \(index + 1)", role: .destructive) { photos.remove(at: index) }
+                                        .disabled(preparingPhoto || sendingMessage)
+                                }
                             }
-                            .disabled(preparingPhoto)
                         }
                     }
+                    .frame(height: photos.isEmpty ? 0 : 145)
                     if let photoError {
                         Text(photoError)
                             .font(.caption)
@@ -342,6 +358,14 @@ private struct MacSessionCard: View {
         }
         .shadow(color: session.attention ? Color.notifyGuruAccent.opacity(0.55) : .clear, radius: 12)
         .onLongPressGesture { toggleAttention() }
+        .sheet(isPresented: Binding(get: { previewPhoto != nil }, set: { if !$0 { previewPhoto = nil } })) {
+            VStack {
+                if let photo = previewPhoto, let image = NSImage(data: photo.jpeg) {
+                    Image(nsImage: image).resizable().scaledToFit()
+                }
+                Button("Close") { previewPhoto = nil }
+            }.padding().frame(width: 600, height: 480)
+        }
         .contextMenu {
             Button(session.attention ? "Stop Watching Status Updates" : "Watch Status Updates") { toggleAttention() }
         }
@@ -349,18 +373,25 @@ private struct MacSessionCard: View {
 
     private func toggleAttention() {
         guard !togglingAttention else { return }
+        let sessionID = session.sessionID
+        let attention = !session.attention
         togglingAttention = true
         Task {
-            _ = await model.setAttention(sessionID: session.sessionID, attention: !session.attention)
+            _ = await model.setAttention(sessionID: sessionID, attention: attention)
             togglingAttention = false
         }
     }
 
     private func sendMessage() {
         guard canSendMessage else { return }
+        let sessionID = session.sessionID
+        let message = message
+        let photos = photos
         sendingMessage = true
         Task {
-            if await model.sendFeedback(sessionID: session.sessionID, message: message, photo: photo) {
+            let result = await model.sendFeedback(sessionID: sessionID, message: message, photos: photos)
+            resultUnknown = result == .unknown
+            if result == .sent {
                 resetComposer()
             }
             sendingMessage = false
@@ -368,8 +399,8 @@ private struct MacSessionCard: View {
     }
 
     private var canSendMessage: Bool {
-        !sendingMessage && !preparingPhoto &&
-        (!message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || photo != nil)
+        !sendingMessage && !preparingPhoto && !resultUnknown &&
+        (!message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !photos.isEmpty)
     }
 
     private func resetComposer() {
@@ -377,88 +408,52 @@ private struct MacSessionCard: View {
         composingMessage = false
         messageFocused = false
         message = ""
-        photo = nil
+        photos = []
+        resultUnknown = false
         photoError = nil
         preparingPhoto = false
     }
 
     private func importPhoto(from providers: [NSItemProvider]) {
         guard !preparingPhoto else { return }
-        let imageProviders = providers.filter { provider in
-            provider.registeredTypeIdentifiers.contains { identifier in
-                UTType(identifier)?.conforms(to: .image) == true
-            }
-        }
-        guard imageProviders.count == 1, let provider = imageProviders.first else {
-            photoError = imageProviders.isEmpty
-                ? "The clipboard does not contain an image."
-                : "Only one image can be attached."
+        guard !providers.isEmpty, photos.count + providers.count <= 5 else {
+            photoError = "Select one to five images."
             return
         }
-        guard let typeIdentifier = provider.registeredTypeIdentifiers.first(where: { identifier in
-            UTType(identifier)?.conforms(to: .image) == true
-        }) else {
-            photoError = "The clipboard image format is not supported."
-            return
-        }
-
         let importID = UUID()
         photoImportID = importID
         preparingPhoto = true
         photoError = nil
-        provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
-            guard let data else {
-                completePhotoImport(nil, importID: importID)
-                return
-            }
-            preparePhoto(data, importID: importID)
-        }
-    }
-
-    /// Handles an explicit Command-V without polling or observing clipboard contents.
-    /// Returning false lets AppKit continue its normal text paste behavior.
-    private func importPhotoFromPasteboard() -> Bool {
-        guard !preparingPhoto else { return true }
-        let imageItems = (NSPasteboard.general.pasteboardItems ?? []).compactMap { item -> (NSPasteboardItem, NSPasteboard.PasteboardType)? in
-            guard let type = item.types.first(where: { type in
-                UTType(type.rawValue)?.conforms(to: .image) == true
-            }) else { return nil }
-            return (item, type)
-        }
-        guard !imageItems.isEmpty else { return false }
-        guard imageItems.count == 1 else {
-            photoError = "Only one image can be attached."
-            return true
-        }
-        guard let data = imageItems[0].0.data(forType: imageItems[0].1) else {
-            photoError = "The clipboard image format is not supported."
-            return true
-        }
-
-        let importID = UUID()
-        photoImportID = importID
-        preparingPhoto = true
-        photoError = nil
-        preparePhoto(data, importID: importID)
-        return true
-    }
-
-    private func preparePhoto(_ data: Data, importID: UUID) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            completePhotoImport(MacPhotoPreparer.prepare(data), importID: importID)
-        }
-    }
-
-    private func completePhotoImport(_ prepared: PreparedPhoto?, importID: UUID) {
-        DispatchQueue.main.async {
-            guard photoImportID == importID, composingMessage else { return }
-            if let prepared {
-                photo = prepared
-            } else {
-                photoError = "The clipboard image could not be prepared within the attachment limit."
+        Task {
+            do {
+                var prepared: [PreparedPhoto] = []
+                for provider in providers {
+                    prepared.append(try await PhotoPreparer.load(provider))
+                }
+                guard photoImportID == importID, composingMessage else { return }
+                photos.append(contentsOf: prepared)
+            } catch {
+                guard photoImportID == importID, composingMessage else { return }
+                photoError = error.localizedDescription
             }
             preparingPhoto = false
         }
+    }
+
+    private func importPhotoFromPasteboard() -> Bool {
+        guard !preparingPhoto else { return true }
+        var imageItems: [NSItemProvider] = []
+        for item in NSPasteboard.general.pasteboardItems ?? [] {
+            guard let type = item.types.first(where: { UTType($0.rawValue)?.conforms(to: .image) == true }) else { continue }
+            guard let data = item.data(forType: type) else {
+                photoError = "The clipboard image format is not supported."
+                return true
+            }
+            imageItems.append(NSItemProvider(item: data as NSData, typeIdentifier: type.rawValue))
+        }
+        guard !imageItems.isEmpty else { return false }
+        importPhoto(from: imageItems)
+        return true
     }
 
     private var panelColor: Color {
@@ -536,51 +531,6 @@ private struct MacImagePasteShortcut: NSViewRepresentable {
     }
 }
 
-private enum MacPhotoPreparer {
-    private static let maximumInputBytes = 64 * 1024 * 1024
-    private static let preferredJPEGBytes = 1024 * 1024
-    private static let maximumJPEGBytes = 2 * 1024 * 1024 - 16
-
-    static func prepare(_ data: Data) -> PreparedPhoto? {
-        guard !data.isEmpty, data.count <= maximumInputBytes,
-              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        var maximumPixelSize = 2048
-        var quality = 0.82
-        for attempt in 0..<10 {
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
-                kCGImageSourceShouldCacheImmediately: true,
-            ]
-            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-                  let jpeg = jpegData(image, quality: quality) else { return nil }
-            if jpeg.count <= preferredJPEGBytes || (attempt == 9 && jpeg.count <= maximumJPEGBytes) {
-                return PreparedPhoto(jpeg: jpeg, width: image.width, height: image.height)
-            }
-            if quality > 0.55 {
-                quality -= 0.09
-            } else {
-                maximumPixelSize = max(1, Int((Double(maximumPixelSize) * 0.82).rounded()))
-            }
-        }
-        return nil
-    }
-
-    private static func jpegData(_ image: CGImage, quality: Double) -> Data? {
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            data, UTType.jpeg.identifier as CFString, 1, nil
-        ) else { return nil }
-        CGImageDestinationAddImage(
-            destination,
-            image,
-            [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
-        )
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return data as Data
-    }
-}
 
 private struct MacRelativeTimeText: View {
     let timestampMilliseconds: Int64

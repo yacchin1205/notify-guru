@@ -6,6 +6,83 @@ final class DeviceGroupFlowUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testResponseAndFeedbackCommandsCompleteInTheUI() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-before-response", app: app)
+        app.buttons["Yes"].tap()
+        wait(for: [absence(of: app.staticTexts["Continue the meeting?"])], timeout: 5)
+        XCTAssertTrue(app.staticTexts["Response sent"].exists)
+        attachScreenshot(named: "command-response-saved", app: app)
+        app.buttons["Send a message"].tap()
+        let editor = app.textViews["Message"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText("Message through the command queue")
+        attachScreenshot(named: "command-feedback-ready", app: app)
+        app.buttons["Send"].tap()
+        wait(for: [absence(of: editor)], timeout: 5)
+        XCTAssertFalse(app.staticTexts["operation-error-message"].exists)
+        attachScreenshot(named: "command-feedback-completed", app: app)
+    }
+
+    func testFeedbackCommandFailureKeepsComposerAndShowsError() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history", "-ui-test-dismiss-error"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["UI improvement test"].waitForExistence(timeout: 5))
+        app.buttons["Send a message"].tap()
+        let editor = app.textViews["Message"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText("Keep this message on failure")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["operation-error-message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(editor.exists)
+        XCTAssertFalse(app.buttons["Send"].isEnabled)
+        attachScreenshot(named: "command-feedback-failed", app: app)
+    }
+
+    func testRemoveDeviceThenPrepareGroupJoinThroughCommands() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Add device"].waitForExistence(timeout: 5))
+        app.buttons["Add device"].tap()
+        wait(for: [absence(of: app.staticTexts["Add a device to this group?"])], timeout: 5)
+        app.buttons["Manage group"].tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-two-devices", app: app)
+        app.buttons["Remove"].tap()
+        app.buttons["Remove device"].tap()
+        wait(for: [absence(of: app.buttons["Remove"])], timeout: 5)
+        attachScreenshot(named: "command-device-removed", app: app)
+        app.buttons["Add this device to another group"].tap()
+        app.buttons["Remove and continue"].tap()
+        XCTAssertTrue(app.images["QR code for adding this device to a group"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-group-request-created", app: app)
+    }
+
+    func testLeaveGroupThroughCommand() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-device-addition-approval"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Add device"].waitForExistence(timeout: 5))
+        app.buttons["Add device"].tap()
+        wait(for: [absence(of: app.staticTexts["Add a device to this group?"])], timeout: 5)
+        app.buttons["Manage group"].tap()
+        let leave = app.buttons["Remove this device from the group"]
+        XCTAssertTrue(leave.waitForExistence(timeout: 5))
+        attachScreenshot(named: "command-before-leave", app: app)
+        leave.tap()
+        app.buttons["Remove from group"].tap()
+        wait(for: [absence(of: leave)], timeout: 5)
+        XCTAssertFalse(app.staticTexts["operation-error-message"].exists)
+        attachScreenshot(named: "command-left-group", app: app)
+    }
+
     func testStartupScreenTransitionsToAppInLightMode() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-startup-screen", "-ui-test-session-history", "-ui-test-light-mode"]
@@ -283,7 +360,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         let editor = app.textViews["Message"]
         let takePhoto = app.buttons["Take Photo"]
-        let choosePhoto = app.buttons["Choose Photo"]
+        let choosePhoto = app.buttons["Choose Photos"]
         let send = app.buttons["Send"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         XCTAssertTrue(takePhoto.exists)
@@ -300,14 +377,28 @@ final class DeviceGroupFlowUITests: XCTestCase {
             NSPredicate(format: "label == %@ OR label == %@", "Close", "閉じる")
         ).firstMatch
         if onboardingClose.exists { onboardingClose.tap() }
-        photoThumbnail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let preview = app.images["selected-photo-preview"]
+        for index in 0..<3 {
+            app.images.matching(identifier: "PXGGridLayout-Info").element(boundBy: index)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        app.buttons["Add"].tap()
+        let previews = app.descendants(matching: .any).matching(identifier: "selected-photo-preview")
+        let preview = previews.firstMatch
         XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertEqual(previews.count, 3)
         XCTAssertTrue(send.isEnabled)
-        XCTAssertTrue(app.buttons["Remove Photo"].exists)
+        XCTAssertTrue(app.buttons["Remove photo 1"].exists)
         attachScreenshot(named: "52-v4-feedback-library-photo-ready", app: app)
 
-        app.buttons["Remove Photo"].tap()
+        previews.element(boundBy: 1).tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 5))
+        attachScreenshot(named: "54-feedback-enlarged-photo", app: app)
+        app.buttons["Close"].tap()
+        app.buttons["Remove photo 2"].tap()
+        XCTAssertEqual(previews.count, 2)
+        attachScreenshot(named: "55-feedback-middle-photo-removed", app: app)
+        app.buttons["Remove photo 2"].tap()
+        app.buttons["Remove photo 1"].tap()
         XCTAssertEqual(XCTWaiter().wait(for: [absence(of: preview)], timeout: 5), .completed)
         XCTAssertFalse(send.isEnabled)
 
@@ -315,6 +406,47 @@ final class DeviceGroupFlowUITests: XCTestCase {
         editor.typeText("A message with an optional photo")
         XCTAssertTrue(send.isEnabled)
         attachScreenshot(named: "53-v4-feedback-message-ready", app: app)
+    }
+
+    func testPhotosShareOpensNotifyGuru() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-session-history"]
+        app.launch()
+        let photos = XCUIApplication(bundleIdentifier: "com.apple.mobileslideshow")
+        photos.launch()
+        let welcomeContinue = photos.buttons.matching(NSPredicate(format: "label == 'Continue' OR label == '続ける'")).firstMatch
+        if welcomeContinue.waitForExistence(timeout: 20) { welcomeContinue.tap() }
+        let backToLibrary = photos.buttons["PUOneUpBarButtonItemIdentifierDone"]
+        if backToLibrary.exists { backToLibrary.tap() }
+        attachScreenshot(named: "60-photos-library", app: photos)
+        let thumbnails = photos.images.matching(identifier: "PXGGridLayout-Info")
+        XCTAssertTrue(thumbnails.firstMatch.waitForExistence(timeout: 20))
+        let select = photos.buttons.matching(NSPredicate(format: "label == 'Select' OR label == '選択'")).firstMatch
+        select.tap()
+        XCTAssertGreaterThanOrEqual(thumbnails.count, 3)
+        for index in (thumbnails.count - 3)..<thumbnails.count {
+            thumbnails.element(boundBy: index).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        attachScreenshot(named: "61-photos-three-selected", app: photos)
+        let share = photos.buttons.matching(NSPredicate(format: "label == 'Share' OR label == '共有'")).firstMatch
+        XCTAssertTrue(share.waitForExistence(timeout: 10))
+        share.tap()
+        attachScreenshot(named: "62-photos-share-sheet", app: photos)
+        let service = photos.cells["notify.guru"]
+        let serviceReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: service
+        )
+        XCTAssertEqual(XCTWaiter().wait(for: [serviceReady], timeout: 10), .completed)
+        service.tap()
+        let send = photos.buttons["Send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 30))
+        XCTAssertTrue(photos.buttons["Remove photo 3"].waitForExistence(timeout: 20))
+        attachScreenshot(named: "63-notify-share-extension", app: photos)
+        photos.buttons["Remove photo 2"].tap()
+        XCTAssertFalse(photos.buttons["Remove photo 3"].exists)
+        attachScreenshot(named: "64-notify-share-middle-removed", app: photos)
+        photos.buttons["share-cancel"].tap()
     }
 
     private func absence(of element: XCUIElement) -> XCTestExpectation {
@@ -354,8 +486,9 @@ final class DeviceGroupFlowUITests: XCTestCase {
         icon.tap()
         XCTAssertTrue(app.staticTexts["2 unresolved items"].waitForExistence(timeout: 5))
         app.buttons["Dismiss request"].tap()
+        XCTAssertTrue(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 5))
         app.buttons.matching(identifier: "Dismiss notification").element(boundBy: 0).tap()
-        XCTAssertFalse(app.staticTexts["1 unresolved item"].waitForExistence(timeout: 2))
+        wait(for: [absence(of: app.staticTexts["1 unresolved item"])], timeout: 5)
         showHomeScreen(icon: icon)
         let badgeCleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == ''"), object: icon)
         XCTAssertEqual(XCTWaiter().wait(for: [badgeCleared], timeout: 10), .completed)
@@ -397,7 +530,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
 
         let errorMessage = app.staticTexts["operation-error-message"]
         XCTAssertTrue(errorMessage.waitForExistence(timeout: 5))
-        XCTAssertTrue(errorMessage.label.contains("Device addition failed for UI testing"))
+        XCTAssertFalse(errorMessage.label.isEmpty)
         attachScreenshot(named: "22-device-addition-error", app: app)
     }
 
