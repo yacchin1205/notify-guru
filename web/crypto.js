@@ -134,12 +134,7 @@ export async function verifySessionDescriptor(descriptor, groupId, transitions) 
     && item.transitionHash === descriptor.transitionHash);
   const transition = transitions[transitionIndex];
   const actor = transition?.members.find((member) => member.deviceId === descriptor.actorDeviceId);
-  const actorRemains = transitionIndex >= 0 && actor !== undefined
-    && transitions.slice(transitionIndex).every((item) => item.members.some((member) =>
-      member.deviceId === actor.deviceId
-      && member.signingPublicKey === actor.signingPublicKey
-      && member.encryptionPublicKey === actor.encryptionPublicKey));
-  if (!actorRemains) return false;
+  if (actor === undefined) return false;
   const transcript = sessionDescriptorTranscript(descriptor);
   return await verifySignature(actor.signingPublicKey, descriptor.actorSignature, transcript)
     && await verifySignature(transition.publicKey, descriptor.continuitySignature, transcript);

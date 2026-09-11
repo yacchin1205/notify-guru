@@ -399,7 +399,7 @@ describe("devices and persistent groups", () => {
     }
   });
 
-  it("keeps only continuously attested v4 Session participation usable after self-removal", async () => {
+  it("keeps v4 Session participation usable after its signing device removes itself", async () => {
     const first = await newDevice();
     const second = await newDevice();
     const initial = await createV4Group(first);
@@ -466,8 +466,9 @@ describe("devices and persistent groups", () => {
       { token: first.token },
     );
     expect(recoveredState.status).toBe(200);
-    expect(recoveredState.json.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual([session.id]);
-    expect(recoveredState.json.sessions).not.toEqual(expect.arrayContaining([
+    expect(recoveredState.json.sessions).toHaveLength(2);
+    expect(recoveredState.json.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: session.id }),
       expect.objectContaining({ sessionId: removedActorSession.id }),
     ]));
     expect((await postEvent(session, recovery.transition.timestamp)).status).toBe(201);
@@ -475,18 +476,17 @@ describe("devices and persistent groups", () => {
       token: removedActorSession.sessionToken,
     });
     expect(removedActorSessionState.status).toBe(200);
-    expect(removedActorSessionState.json.groups).toEqual([
-      expect.objectContaining({ groupId: initial.group.id, key: null }),
-    ]);
+    expect(removedActorSessionState.json.groups).toEqual([expect.objectContaining({
+      groupId: initial.group.id,
+      key: expect.objectContaining({ timestamp: recovery.transition.timestamp }),
+    })]);
     const removedActorEvent = await postEvent(removedActorSession, recovery.transition.timestamp);
-    expect(removedActorEvent.status).toBe(409);
-    expect(removedActorEvent.json.error).toBe("group_key_unavailable");
+    expect(removedActorEvent.status).toBe(201);
     const removedActorEvents = await events(removedActorSession, first);
-    expect(removedActorEvents.status).toBe(403);
-    expect(removedActorEvents.json.error).toBe("key_not_available");
+    expect(removedActorEvents.status).toBe(200);
     const removedActorAttention = await setAttention(removedActorSession, first, true);
-    expect(removedActorAttention.status).toBe(403);
-    expect(removedActorAttention.json.error).toBe("key_not_available");
+    expect(removedActorAttention.status).toBe(200);
+    expect(removedActorAttention.json.attention).toBe(true);
     const removedActorAttachment = await api(`/api/sessions/${removedActorSession.id}/attachments`, {
       method: "POST",
       token: first.token,
@@ -496,8 +496,7 @@ describe("devices and persistent groups", () => {
         ciphertextLength: 32, ciphertextSha256: "a".repeat(64),
       },
     });
-    expect(removedActorAttachment.status).toBe(403);
-    expect(removedActorAttachment.json.error).toBe("key_not_available");
+    expect(removedActorAttachment.status).toBe(201);
     const removedActorResponse = await api(`/api/sessions/${removedActorSession.id}/responses`, {
       method: "POST",
       token: first.token,
@@ -506,8 +505,7 @@ describe("devices and persistent groups", () => {
         keyTimestamp: recovery.transition.timestamp, nonce: "A".repeat(16), ciphertext: randomToken(),
       },
     });
-    expect(removedActorResponse.status).toBe(403);
-    expect(removedActorResponse.json.error).toBe("key_not_available");
+    expect(removedActorResponse.status).toBe(201);
     const responseAt = (keyTimestamp: number) => api(`/api/sessions/${session.id}/responses`, {
       method: "POST", token: first.token,
       body: {
@@ -540,8 +538,12 @@ describe("devices and persistent groups", () => {
       { token: second.token },
     );
     expect(readdedState.status).toBe(200);
-    expect(readdedState.json.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual([session.id]);
-    expect((await postEvent(removedActorSession, readdition.transition.timestamp)).status).toBe(409);
+    expect(readdedState.json.sessions).toHaveLength(2);
+    expect(readdedState.json.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: session.id }),
+      expect.objectContaining({ sessionId: removedActorSession.id }),
+    ]));
+    expect((await postEvent(removedActorSession, readdition.transition.timestamp)).status).toBe(201);
   });
 
   it("recovers an accepted DeviceRequest approval from its approving state", async () => {

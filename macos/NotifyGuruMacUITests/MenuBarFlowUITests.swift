@@ -123,6 +123,21 @@ final class MenuBarFlowUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Unable to start"].exists)
     }
 
+    func testSessionRemainsAfterItsSigningDeviceLeavesTheGroup() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-mixed-session-inheritance"]
+        app.launch()
+
+        let statusItem = app.menuBars.statusItems["notify.guru, no unresolved items"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        XCTAssertTrue(app.staticTexts["Authenticated v4 session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Session retained after signer removal"].exists)
+        XCTAssertFalse(app.staticTexts["Legacy v3 session"].exists)
+        XCTAssertFalse(app.staticTexts["Unable to start"].exists)
+        attachScreenshot(named: "43-session-retained-after-signer-removal", app: app)
+    }
+
     func testNotificationHistoryAndRequestDismissalFromMenuBar() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-session-history"]

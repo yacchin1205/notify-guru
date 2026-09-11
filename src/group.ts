@@ -824,18 +824,7 @@ export class DeviceGroup extends DurableObject<GroupEnv> {
       transition.timestamp === participation.keyTimestamp
       && transition.transitionHash === participation.transitionHash);
     if (joinedIndex < 0) return false;
-    const actor = history[joinedIndex].members.find((member) => member.deviceId === participation.actorDeviceId);
-    if (actor === undefined) return false;
-    const currentActor = this.member(participation.actorDeviceId);
-    if (currentActor === null
-      || currentActor.signing_public_key !== actor.signingPublicKey
-      || currentActor.encryption_public_key !== actor.encryptionPublicKey) {
-      return false;
-    }
-    return history.slice(joinedIndex).every((transition) => transition.members.some((member) =>
-      member.deviceId === actor.deviceId
-      && member.signingPublicKey === actor.signingPublicKey
-      && member.encryptionPublicKey === actor.encryptionPublicKey));
+    return history[joinedIndex].members.some((member) => member.deviceId === participation.actorDeviceId);
   }
 
   private async hasActiveV4Sessions(groupId: string): Promise<boolean> {

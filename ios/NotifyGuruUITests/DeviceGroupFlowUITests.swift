@@ -134,7 +134,7 @@ final class DeviceGroupFlowUITests: XCTestCase {
         attachScreenshot(named: "35-startup-error", app: app)
     }
 
-    func testMixedSessionInheritanceShowsOnlyAuthenticatedV4Session() {
+    func testMixedSessionInheritanceKeepsSessionAfterSignerRemoval() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-test-mixed-session-inheritance"]
         app.launch()
@@ -142,9 +142,9 @@ final class DeviceGroupFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Authenticated v4 session"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Connected securely"].exists)
         XCTAssertFalse(app.staticTexts["Legacy v3 session"].exists)
-        XCTAssertFalse(app.staticTexts["Removed signer session"].exists)
+        XCTAssertTrue(app.staticTexts["Session retained after signer removal"].exists)
         XCTAssertFalse(app.staticTexts["Unable to start"].exists)
-        attachScreenshot(named: "36-only-continuously-attested-v4-session", app: app)
+        attachScreenshot(named: "36-session-retained-after-signer-removal", app: app)
     }
 
     func testIPhoneKeepsSessionCardsInOneColumn() throws {

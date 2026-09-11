@@ -327,7 +327,7 @@ final class ProtocolTests: XCTestCase {
         )
     }
 
-    func testV4SessionDescriptorRejectsRemovedSigner() throws {
+    func testV4SessionDescriptorRemainsValidAfterSignerRemoval() throws {
         var removed = try fixedIdentity()
         var remaining = try CryptoEngine.createIdentity()
         remaining.deviceID = "remaining-device"
@@ -389,10 +389,10 @@ final class ProtocolTests: XCTestCase {
                 continuitySignature: descriptor.continuitySignature
             )
         }
-        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(
+        XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(
             remote(removedDescriptor), groupID: "group", transitions: [initial, current]
         ))
-        XCTAssertThrowsError(try CryptoEngine.authenticateInheritedSession(
+        XCTAssertNoThrow(try CryptoEngine.authenticateInheritedSession(
             remote(removedDescriptor), groupID: "group", transitions: [initial, current]
         ))
         XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(
@@ -403,7 +403,7 @@ final class ProtocolTests: XCTestCase {
                 [remote(removedDescriptor), remote(remainingDescriptor)],
                 groupID: "group", transitions: [initial, current]
             ),
-            [remote(remainingDescriptor)]
+            [remote(removedDescriptor), remote(remainingDescriptor)]
         )
 
         remaining.group?.keys[String(current.timestamp)] = GroupKey(
@@ -428,7 +428,7 @@ final class ProtocolTests: XCTestCase {
             ),
             readded
         )
-        XCTAssertFalse(try CryptoEngine.verifySessionDescriptor(
+        XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(
             remote(removedDescriptor), groupID: "group", transitions: [initial, current, readded]
         ))
         XCTAssertTrue(try CryptoEngine.verifySessionDescriptor(

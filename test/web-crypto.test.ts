@@ -189,7 +189,7 @@ describe("web device-group cryptography", () => {
     )).resolves.toEqual([]);
   });
 
-  it("rejects session descriptors signed by a device removed from the current head", async () => {
+  it("keeps session descriptors valid after their signing device leaves", async () => {
     const groupId = "group_identifier_1234";
     const removed = await registeredIdentity("removed_device_identifier");
     const remaining = await registeredIdentity("remaining_device_identifier");
@@ -225,14 +225,14 @@ describe("web device-group cryptography", () => {
       [await createKeyPackage(groupId, currentDraft, remainingMember)], true,
     );
     await expect(validateGroupTransitions(groupId, [initial, current], initial.transitionHash)).resolves.toEqual(current);
-    await expect(verifySessionDescriptor(removedDescriptor, groupId, [initial, current])).resolves.toBe(false);
+    await expect(verifySessionDescriptor(removedDescriptor, groupId, [initial, current])).resolves.toBe(true);
     await expect(authenticateInheritedSession(
       removedDescriptor, groupId, [initial, current],
-    )).rejects.toThrow("unauthenticated session descriptor");
+    )).resolves.toBeUndefined();
     await expect(verifySessionDescriptor(remainingDescriptor, groupId, [initial, current])).resolves.toBe(true);
     await expect(authenticatedInheritedSessions(
       [removedDescriptor, remainingDescriptor], groupId, [initial, current],
-    )).resolves.toEqual([remainingDescriptor]);
+    )).resolves.toEqual([removedDescriptor, remainingDescriptor]);
 
     remaining.group.keys[String(current.timestamp)] = {
       ...currentDraft, timestamp: current.timestamp, transitionHash: current.transitionHash,
@@ -250,7 +250,7 @@ describe("web device-group cryptography", () => {
     )).resolves.toEqual(readded);
     await expect(verifySessionDescriptor(
       removedDescriptor, groupId, [initial, current, readded],
-    )).resolves.toBe(false);
+    )).resolves.toBe(true);
     await expect(verifySessionDescriptor(
       remainingDescriptor, groupId, [initial, current, readded],
     )).resolves.toBe(true);

@@ -688,24 +688,23 @@ final class AppModel: ObservableObject, AppCommandStateOwner {
             request: nil, requestKeyTimestamp: nil, color: nil,
             updatedAt: Self.currentTimeMilliseconds(), expiresAt: signed.expiresAt
         )
-        let removedStale = SessionRecord(
-            protocolVersion: 4, sessionID: removedSigned.sessionID, groupID: groupID,
-            creatorPublicKey: removedSigned.creatorPublicKey, keys: [:], cursor: 0,
-            title: "Removed signer session", status: "Must not remain", notifications: [],
-            request: nil, requestKeyTimestamp: nil, color: nil,
-            updatedAt: Self.currentTimeMilliseconds(), expiresAt: removedSigned.expiresAt
-        )
-        var current = Vault(version: 4, identity: identity, sessions: [stale, removedStale])
+        var current = Vault(version: 4, identity: identity, sessions: [stale])
         guard try AppCommandExecutor.inheritSessions(
             &current, groupState: authenticatedGroupState
         ),
-              current.sessions.count == 1,
-              current.sessions[0].creatorPublicKey == signed.creatorPublicKey else {
-            throw ProtocolError.crypto("authenticated session did not replace the stale local creator key")
+              current.sessions.count == 2,
+              let signedIndex = current.sessions.firstIndex(where: { $0.sessionID == signed.sessionID }),
+              let removedIndex = current.sessions.firstIndex(where: { $0.sessionID == removedSigned.sessionID }),
+              current.sessions[signedIndex].creatorPublicKey == signed.creatorPublicKey,
+              !current.sessions[signedIndex].keys.isEmpty,
+              !current.sessions[removedIndex].keys.isEmpty else {
+            throw ProtocolError.crypto("authenticated sessions were not inherited")
         }
-        current.sessions[0].title = "Authenticated v4 session"
-        current.sessions[0].status = "Connected securely"
-        current.sessions[0].color = "#d9f2d0"
+        current.sessions[signedIndex].title = "Authenticated v4 session"
+        current.sessions[signedIndex].status = "Connected securely"
+        current.sessions[signedIndex].color = "#d9f2d0"
+        current.sessions[removedIndex].title = "Session retained after signer removal"
+        current.sessions[removedIndex].status = "Connected securely"
         vault = current
         connectionState = .current
         isReady = true
